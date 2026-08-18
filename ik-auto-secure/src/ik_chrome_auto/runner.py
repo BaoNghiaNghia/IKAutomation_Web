@@ -584,8 +584,14 @@ class MultiProfileRunner:
         columns = int(columns_per_row or len(opened))
         rows = max(1, (len(opened) + columns - 1) // columns)
         work_area = get_work_area()
-        visible_width = max(1, work_area.width // columns)
-        visible_height = max(1, work_area.height // rows)
+        # Keep every game surface at 16:9 while fitting the requested grid.
+        # The resulting windows still tile edge-to-edge; unused space (when
+        # the screen aspect ratio cannot fit the final row exactly) stays at
+        # the outside of the grid rather than between profiles.
+        max_width_by_columns = max(1, work_area.width // columns)
+        max_width_by_rows = max(1, (work_area.height // rows) * 16 // 9)
+        visible_width = min(max_width_by_columns, max_width_by_rows)
+        visible_height = max(1, visible_width * 9 // 16)
         positions = calculate_tiled_positions(
             work_area,
             visible_width,
