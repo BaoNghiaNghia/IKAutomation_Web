@@ -42,6 +42,14 @@ def test_calculate_tiled_positions_honors_offset_work_area() -> None:
     assert positions == [(100, 50), (500, 50)]
 
 
+def test_calculate_tiled_positions_has_no_gap_by_default() -> None:
+    work_area = WindowRect(0, 0, 1200, 800)
+
+    positions = calculate_tiled_positions(work_area, 500, 300, 4)
+
+    assert positions == [(0, 0), (500, 0), (0, 300), (500, 300)]
+
+
 def test_calculate_tiled_positions_honors_requested_windows_per_row() -> None:
     work_area = WindowRect(0, 0, 1800, 900)
 

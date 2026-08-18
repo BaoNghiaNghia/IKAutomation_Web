@@ -45,7 +45,7 @@ def calculate_tiled_positions(
     window_height: int,
     count: int,
     *,
-    gap: int = 8,
+    gap: int = 0,
     columns_per_row: int | None = None,
 ) -> list[tuple[int, int]]:
     """Return left-to-right, top-to-bottom positions inside the desktop work area."""
