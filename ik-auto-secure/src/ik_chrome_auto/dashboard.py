@@ -91,7 +91,7 @@ class Dashboard(QWidget):
         head = QHBoxLayout(); title = SubtitleLabel("IK Auto"); title.setStyleSheet("font-size:22px;font-weight:700;"); head.addWidget(title); head.addWidget(QLabel("Browser control")); head.addStretch(); secure = QLabel("●  Local & secure"); secure.setStyleSheet("background:#d9f7e8;color:#087443;border-radius:12px;padding:5px 10px;font-weight:600;"); head.addWidget(secure); root.addLayout(head)
         body = QHBoxLayout(); root.addLayout(body, 1)
         left = QWidget(); left.setMinimumWidth(340); left.setMaximumWidth(390); ll = QVBoxLayout(left); ll.setContentsMargins(0,0,0,0); ll.setSpacing(8); body.addWidget(left)
-        accounts = self._card(); al = QVBoxLayout(accounts); al.addWidget(StrongBodyLabel("Tài khoản Chrome")); al.addWidget(self._muted("Mỗi tài khoản có một phiên browser riêng, lưu cục bộ.")); actions = QHBoxLayout(); add = self._icon_button(FIF.ADD, "Thêm tài khoản", primary=True); add.clicked.connect(self._add_profile); open_all = PrimaryPushButton("Mở tất cả"); open_all.clicked.connect(self._open_all_and_arrange); stop_all = PushButton("Dừng tất cả"); stop_all.clicked.connect(self.runner.stop_all); actions.addWidget(add); actions.addWidget(open_all); actions.addWidget(stop_all); actions.addStretch(); al.addLayout(actions); ll.addWidget(accounts)
+        accounts = self._card(); al = QVBoxLayout(accounts); al.addWidget(StrongBodyLabel("Tài khoản Chrome")); al.addWidget(self._muted("Mỗi tài khoản có một phiên browser riêng, lưu cục bộ.")); actions = QHBoxLayout(); manage = PrimaryPushButton("Quản lý tài khoản"); manage.clicked.connect(self._manage_accounts); open_all = PushButton("Mở tất cả"); open_all.clicked.connect(self._open_all_and_arrange); stop_all = PushButton("Dừng tất cả"); stop_all.clicked.connect(self.runner.stop_all); actions.addWidget(manage); actions.addWidget(open_all); actions.addWidget(stop_all); al.addLayout(actions); ll.addWidget(accounts)
         arrange_card = self._card(); acl = QVBoxLayout(arrange_card); acl.addWidget(StrongBodyLabel("Sắp xếp cửa sổ")); acl.addWidget(self._muted("Chọn số cửa sổ trên mỗi hàng rồi áp dụng cho Chrome đang mở.")); row = QHBoxLayout(); row.addWidget(QLabel("Số cửa sổ / hàng")); row.addStretch(); self.windows_per_row = ComboBox(); self.windows_per_row.addItems(["2","3","4","5","6"]); self.windows_per_row.setCurrentText(str(self.config.browser.windows_per_row)); self.windows_per_row.currentTextChanged.connect(self._apply_windows_per_row); row.addWidget(self.windows_per_row); acl.addLayout(row); apply = PrimaryPushButton("Áp dụng & sắp xếp"); apply.clicked.connect(self._arrange); acl.addWidget(apply); tools = QHBoxLayout(); self.drag = PushButton("Ẩn nút kéo"); self.drag.clicked.connect(self._toggle_drag); self.scrollbars = PushButton("Ẩn thanh cuộn"); self.scrollbars.clicked.connect(self._toggle_scrollbars); self.pin = CheckBox("Luôn nổi trên các cửa sổ khác"); self.pin.stateChanged.connect(lambda _s: self.runner.set_all_topmost(self.pin.isChecked())); tools.addWidget(self.drag); tools.addWidget(self.scrollbars); acl.addLayout(tools); acl.addWidget(self.pin); ll.addWidget(arrange_card)
         automation = self._card(); au = QVBoxLayout(automation); au.addWidget(StrongBodyLabel("Tự động hóa")); au.addWidget(self._muted("Sync thao tác · Auto 2048")); sync = QHBoxLayout(); self.master = ComboBox(); sync.addWidget(self.master,1); self.sync = PushButton("Bật sync chuột"); self.sync.clicked.connect(self._toggle_sync); sync.addWidget(self.sync); au.addLayout(sync); self.sync_status = self._muted("Sync đang tắt"); au.addWidget(self.sync_status); speed = QHBoxLayout(); self.speed = ComboBox(); self.speed.addItems(list(SPEED_LABELS.values())); self.speed.setCurrentText(SPEED_LABELS[self.config.auto_2048_speed]); save_speed = PushButton("Lưu tốc độ"); save_speed.clicked.connect(self._save_speed); speed.addWidget(self.speed,1); speed.addWidget(save_speed); au.addLayout(speed); ll.addWidget(automation); ll.addStretch()
         right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8); body.addWidget(right,1)
@@ -187,18 +187,26 @@ class Dashboard(QWidget):
         if not self.runner.has_open_session(pid): self._warning("Profile chưa mở","Hãy bấm Mở profile trước khi bật đo tọa độ."); return
         if self.inspecting_profile_id: self.runner.set_inspector(self.inspecting_profile_id,False); self.rows[self.inspecting_profile_id].inspect.setText("Đo")
         self.inspecting_profile_id=pid; self.runner.set_inspector(pid,True); self.rows[pid].inspect.setText("Tắt đo"); self.coordinate.setText(f"[{pid}] Click vào game để lấy tọa độ…")
-    def _add_profile(self) -> None:
-        dialog=AccountDialog(self)
+    def _manage_accounts(self) -> None:
+        dialog=AccountManagerDialog(self, self.config.profiles)
         if dialog.exec()!=QDialog.DialogCode.Accepted: return
-        accounts=dialog.accounts(); existing={p.id for p in self.config.profiles}; profiles=[]; saved=[]
+        entries=dialog.accounts(); existing={p.id for p in self.config.profiles}; original={p.id:p for p in self.config.profiles if p.mode==ProfileMode.MANAGED}; unmanaged=[p for p in self.config.profiles if p.mode!=ProfileMode.MANAGED]; kept_ids={entry[0] for entry in entries if entry[0]}; removed_ids=set(original)-kept_ids
         try:
             from ik_chrome_auto.credential_store import AccountCredential, WindowsCredentialStore
-            store=WindowsCredentialStore()
-            for index,(username,password) in enumerate(accounts,start=len(self.config.profiles)+1):
-                pid=unique_profile_id(f"account-{index}",existing); existing.add(pid); store.save(AccountCredential(pid,username,password)); saved.append(pid); preview=username[:6]+("…" if len(username)>6 else ""); profiles.append(ProfileConfig(pid,f"Tài khoản {index:02d} · {preview}",ProfileMode.MANAGED,(self.config.data_dir/"profiles"/pid).resolve(),enabled=True))
-            self.config.profiles.extend(profiles); save_config(self.config)
-            for profile in profiles: profile.user_data_dir.mkdir(parents=True,exist_ok=True)  # type: ignore[union-attr]
-            self.runner.sync_profiles(); self._draw_rows(); self._append_log(f"Đã thêm {len(profiles)} profile")
+            store=WindowsCredentialStore(); updated=[]; added=0
+            for index,(pid,username,password) in enumerate(entries,start=1):
+                if pid is None:
+                    pid=unique_profile_id(f"account-{index}",existing); existing.add(pid); profile=ProfileConfig(pid,"",ProfileMode.MANAGED,(self.config.data_dir/"profiles"/pid).resolve(),enabled=True); added+=1
+                else: profile=original[pid]
+                preview=username[:6]+("…" if len(username)>6 else ""); profile.name=f"Tài khoản {index:02d} · {preview}"; store.save(AccountCredential(pid,username,password)); updated.append(profile)
+            for pid in removed_ids:
+                worker=self.runner.workers.get(pid)
+                if worker: worker.shutdown()
+                store.delete(pid)
+            self.config.profiles=[*updated,*unmanaged]; save_config(self.config)
+            for profile in updated:
+                if profile.user_data_dir: profile.user_data_dir.mkdir(parents=True,exist_ok=True)
+            self.runner.sync_profiles(); self._draw_rows(); self._append_log(f"Đã lưu {len(updated)} tài khoản" + (f", thêm {added}" if added else ""))
         except Exception as error: self._error("Không lưu được tài khoản",str(error))
     def _remove_profile(self,pid:str) -> None:
         profile=self.config.profile(pid)
@@ -259,23 +267,33 @@ class Dashboard(QWidget):
         self.timer.stop(); self.runner.shutdown(); event.accept()
 
 
-class AccountDialog(QDialog):
-    def __init__(self,parent:Dashboard)->None:
-        super().__init__(parent); self.rows:list[tuple[LineEdit,PasswordLineEdit,QWidget]]=[]; self.setWindowTitle("Thêm nhiều tài khoản game"); self.resize(680,460); layout=QVBoxLayout(self); layout.addWidget(SubtitleLabel("Thêm tài khoản game")); layout.addWidget(QLabel("Mỗi hàng là một tài khoản. Password được lưu mã hóa trong Windows Credential Manager.")); self.list=QVBoxLayout(); self.list.setAlignment(Qt.AlignmentFlag.AlignTop); self.list.setSpacing(8); content=QWidget(); content.setLayout(self.list); scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(content); layout.addWidget(scroll,1); control=QHBoxLayout(); add=PushButton("+ Thêm hàng"); add.clicked.connect(self.add_row); control.addWidget(add); control.addStretch(); self.show=CheckBox("Hiện password"); self.show.stateChanged.connect(self.toggle_password); control.addWidget(self.show); layout.addLayout(control); actions=QHBoxLayout(); actions.addStretch(); cancel=PushButton("Hủy"); cancel.clicked.connect(self.reject); save=PrimaryPushButton("Lưu tất cả"); save.clicked.connect(self.validate); actions.addWidget(cancel); actions.addWidget(save); layout.addLayout(actions); self.add_row()
-    def add_row(self)->None:
-        row=CardWidget(); row.setFixedHeight(104); row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed); layout=QVBoxLayout(row); layout.setContentsMargins(12,8,12,8); layout.setSpacing(7); header=QHBoxLayout(); header.addWidget(StrongBodyLabel(f"Tài khoản {len(self.rows)+1:02d}")); header.addStretch(); remove=PushButton("×"); remove.setFixedWidth(32); remove.setFixedHeight(28); header.addWidget(remove); layout.addLayout(header); fields=QHBoxLayout(); fields.setSpacing(8); username=LineEdit(); username.setPlaceholderText("Username / email"); password=PasswordLineEdit(); password.setPlaceholderText("Password"); fields.addWidget(username); fields.addWidget(password); layout.addLayout(fields); remove.clicked.connect(lambda:self.remove_row(row)); self.rows.append((username,password,row)); self.list.addWidget(row)
+class AccountManagerDialog(QDialog):
+    """Central CRUD form. Secrets only live in this dialog until saved to Windows Vault."""
+    def __init__(self,parent:Dashboard,profiles:list[ProfileConfig])->None:
+        super().__init__(parent); self.rows:list[tuple[str|None,LineEdit,PasswordLineEdit,QWidget]]=[]; self.setWindowTitle("Quản lý tài khoản game"); self.resize(720,520); layout=QVBoxLayout(self); layout.addWidget(SubtitleLabel("Quản lý tài khoản game")); layout.addWidget(QLabel("Thêm, sửa hoặc xóa tài khoản. Password chỉ được lưu mã hóa trong Windows Credential Manager.")); self.list=QVBoxLayout(); self.list.setAlignment(Qt.AlignmentFlag.AlignTop); self.list.setSpacing(8); content=QWidget(); content.setLayout(self.list); scroll=QScrollArea(); scroll.setWidgetResizable(True); layout.addWidget(scroll,1); control=QHBoxLayout(); add=PushButton("+ Thêm tài khoản"); add.clicked.connect(lambda:self.add_row()); control.addWidget(add); control.addStretch(); self.show=CheckBox("Hiện password"); self.show.stateChanged.connect(self.toggle_password); control.addWidget(self.show); layout.addLayout(control); actions=QHBoxLayout(); actions.addStretch(); cancel=PushButton("Hủy"); cancel.clicked.connect(self.reject); save=PrimaryPushButton("Lưu thay đổi"); save.clicked.connect(self.validate); actions.addWidget(cancel); actions.addWidget(save); layout.addLayout(actions)
+        for profile in profiles:
+            if profile.mode != ProfileMode.MANAGED: continue
+            username=password=""
+            try:
+                from ik_chrome_auto.credential_store import WindowsCredentialStore
+                credential=WindowsCredentialStore().load(profile.id)
+                if credential: username,password=credential.username,credential.password
+            except Exception: pass
+            self.add_row(profile.id,username,password)
+        if not self.rows: self.add_row()
+    def add_row(self,profile_id:str|None=None,username_value:str="",password_value:str="")->None:
+        row=CardWidget(); row.setFixedHeight(104); row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed); layout=QVBoxLayout(row); layout.setContentsMargins(12,8,12,8); layout.setSpacing(7); header=QHBoxLayout(); header.addWidget(StrongBodyLabel(f"Tài khoản {len(self.rows)+1:02d}")); header.addStretch(); remove=PushButton("×"); remove.setToolTip("Xóa tài khoản"); remove.setFixedSize(32,28); header.addWidget(remove); layout.addLayout(header); fields=QHBoxLayout(); fields.setSpacing(8); username=LineEdit(); username.setPlaceholderText("Username / email"); username.setText(username_value); password=PasswordLineEdit(); password.setPlaceholderText("Password"); password.setText(password_value); fields.addWidget(username); fields.addWidget(password); layout.addLayout(fields); remove.clicked.connect(lambda:self.remove_row(row)); self.rows.append((profile_id,username,password,row)); self.list.addWidget(row)
     def remove_row(self,row:QWidget)->None:
-        if len(self.rows)==1:return
-        self.rows=[item for item in self.rows if item[2] is not row]; self.list.removeWidget(row); row.deleteLater()
+        self.rows=[item for item in self.rows if item[3] is not row]; self.list.removeWidget(row); row.deleteLater()
     def toggle_password(self,_state:int)->None:
         mode=LineEdit.EchoMode.Normal if self.show.isChecked() else LineEdit.EchoMode.Password
-        for _,password,_ in self.rows:password.setEchoMode(mode)
+        for _,_,password,_ in self.rows: password.setEchoMode(mode)
     def validate(self)->None:
         values=self.accounts()
-        if not values: QMessageBox.warning(self,"Thiếu thông tin","Hãy nhập ít nhất một username và password."); return
-        if any(bool(user.text().strip())!=bool(password.text()) for user,password,_ in self.rows): QMessageBox.warning(self,"Thiếu thông tin","Mỗi hàng cần có đủ username và password."); return
+        if not values: QMessageBox.warning(self,"Thiếu thông tin","Hãy giữ hoặc thêm ít nhất một tài khoản."); return
+        if any(not username or not password for _,username,password in values): QMessageBox.warning(self,"Thiếu thông tin","Mỗi tài khoản cần có đủ username và password."); return
         self.accept()
-    def accounts(self)->list[tuple[str,str]]: return [(user.text().strip(),password.text()) for user,password,_ in self.rows if user.text().strip() and password.text()]
+    def accounts(self)->list[tuple[str|None,str,str]]: return [(profile_id,username.text().strip(),password.text()) for profile_id,username,password,_ in self.rows]
 
 
 def run_dashboard(config_path:Path)->None:
