@@ -93,14 +93,14 @@ class Dashboard:
         self.root.title("IK Auto — Browser Control")
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
-        width = max(360, screen_width // 3)
-        height = max(260, screen_height // 3)
+        width = screen_width // 2
+        height = screen_height // 2
         # Leave room for the Windows taskbar while anchoring the compact
         # control panel at the lower-right corner of the active display.
         left = max(0, screen_width - width - 12)
         top = max(0, screen_height - height - 48)
         self.root.geometry(f"{width}x{height}+{left}+{top}")
-        self.root.minsize(360, 260)
+        self.root.minsize(640, 420)
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         ctk.set_appearance_mode("light")
@@ -111,13 +111,13 @@ class Dashboard:
         header = ctk.CTkFrame(parent, fg_color="transparent")
         header.pack(fill="x", pady=(0, 8))
         ctk.CTkLabel(
-            header, text="IK Auto", text_color="#20324a", font=("Segoe UI", 18, "bold")
+            header, text="IK Auto", text_color="#20324a", font=("Segoe UI", 27, "bold")
         ).pack(side="left")
         ctk.CTkLabel(
             header,
             text="Browser control",
             text_color="#5b6f87",
-            font=("Segoe UI", 12),
+            font=("Segoe UI", 18),
         ).pack(side="left", padx=(8, 0), pady=(5, 0))
         ctk.CTkLabel(
             header,
@@ -127,7 +127,7 @@ class Dashboard:
             corner_radius=12,
             padx=9,
             pady=4,
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", 16, "bold"),
         ).pack(side="right")
 
         body = ctk.CTkFrame(parent, fg_color="transparent")
@@ -151,9 +151,9 @@ class Dashboard:
         profiles_card.pack(fill="x", pady=(0, 7))
         profile_head = ctk.CTkFrame(profiles_card, fg_color="transparent")
         profile_head.pack(fill="x", padx=12, pady=(10, 0))
-        ctk.CTkLabel(profile_head, text="Chrome profiles", text_color="#20324a", font=("Segoe UI", 13, "bold")).pack(side="left")
+        ctk.CTkLabel(profile_head, text="Chrome profiles", text_color="#20324a", font=("Segoe UI", 20, "bold")).pack(side="left")
         self._button(profile_head, "+ Thêm", self._add_profile, "primary").pack(side="right")
-        ctk.CTkLabel(profiles_card, text="Phiên browser độc lập, lưu cục bộ.", text_color="#6d8098", font=("Segoe UI", 10)).pack(anchor="w", padx=12, pady=(2, 7))
+        ctk.CTkLabel(profiles_card, text="Phiên browser độc lập, lưu cục bộ.", text_color="#6d8098", font=("Segoe UI", 15)).pack(anchor="w", padx=12, pady=(2, 7))
         action_row = ctk.CTkFrame(profiles_card, fg_color="transparent")
         action_row.pack(fill="x", padx=12, pady=(0, 10))
         self._button(action_row, "Mở tất cả", self.runner.open_all, "primary").pack(side="left", fill="x", expand=True)
@@ -164,33 +164,33 @@ class Dashboard:
         self._section_label(viewport_card, "Cấu hình browser", "Viewport và cửa sổ.")
         viewport_row = ctk.CTkFrame(viewport_card, fg_color="transparent")
         viewport_row.pack(fill="x", padx=12, pady=(6, 5))
-        ctk.CTkEntry(viewport_row, textvariable=self.viewport_width, width=58, height=32, corner_radius=10, font=("Segoe UI", 11)).pack(side="left")
+        ctk.CTkEntry(viewport_row, textvariable=self.viewport_width, width=70, height=42, corner_radius=12, font=("Segoe UI", 16)).pack(side="left")
         ctk.CTkLabel(viewport_row, text="×", text_color="#6d8098", width=16).pack(side="left")
-        ctk.CTkEntry(viewport_row, textvariable=self.viewport_height, width=58, height=32, corner_radius=10, font=("Segoe UI", 11)).pack(side="left")
+        ctk.CTkEntry(viewport_row, textvariable=self.viewport_height, width=70, height=42, corner_radius=12, font=("Segoe UI", 16)).pack(side="left")
         self._button(viewport_row, "Áp dụng", self._apply_size_all, "soft").pack(side="right")
-        ctk.CTkCheckBox(viewport_card, text="Tự resize khi mở", variable=self.auto_resize, font=("Segoe UI", 11), checkbox_width=20, checkbox_height=20).pack(anchor="w", padx=12)
+        ctk.CTkCheckBox(viewport_card, text="Tự resize khi mở", variable=self.auto_resize, font=("Segoe UI", 16), checkbox_width=26, checkbox_height=26).pack(anchor="w", padx=12)
         window_row = ctk.CTkFrame(viewport_card, fg_color="transparent")
         window_row.pack(fill="x", padx=12, pady=(6, 0))
         self._button(window_row, "Sắp xếp", self._arrange_windows, "soft").pack(side="left")
         self.drag_button = self._button(window_row, self.drag_button_text.get(), self._toggle_all_drag_items, "soft")
         self.drag_button.pack(side="left", padx=(5, 0))
-        ctk.CTkCheckBox(viewport_card, text="Ghim cửa sổ", variable=self.pin_windows, command=self._toggle_pin_windows, font=("Segoe UI", 11), checkbox_width=20, checkbox_height=20).pack(anchor="w", padx=12, pady=(4, 10))
+        ctk.CTkCheckBox(viewport_card, text="Ghim cửa sổ", variable=self.pin_windows, command=self._toggle_pin_windows, font=("Segoe UI", 16), checkbox_width=26, checkbox_height=26).pack(anchor="w", padx=12, pady=(4, 10))
 
         automation_card = self._card(left_panel)
         automation_card.pack(fill="x")
         self._section_label(automation_card, "Tự động hóa", "Sync thao tác · Auto 2048")
         master_row = ctk.CTkFrame(automation_card, fg_color="transparent")
         master_row.pack(fill="x", padx=12, pady=(6, 4))
-        self.master_box = ctk.CTkComboBox(master_row, variable=self.sync_master, width=120, height=32, state="readonly", corner_radius=10, font=("Segoe UI", 11))
+        self.master_box = ctk.CTkComboBox(master_row, variable=self.sync_master, width=150, height=42, state="readonly", corner_radius=12, font=("Segoe UI", 16))
         self.master_box.pack(side="left", fill="x", expand=True)
         self.sync_button = self._button(master_row, self.sync_button_text.get(), self._toggle_sync, "soft")
         self.sync_button.pack(side="left", padx=(6, 0))
-        ctk.CTkLabel(automation_card, textvariable=self.sync_status, text_color="#4b78c2", font=("Segoe UI", 10)).pack(anchor="w", padx=12)
+        ctk.CTkLabel(automation_card, textvariable=self.sync_status, text_color="#4b78c2", font=("Segoe UI", 15)).pack(anchor="w", padx=12)
         ctk.CTkFrame(automation_card, height=1, fg_color="#d9e3ef").pack(fill="x", padx=12, pady=7)
-        ctk.CTkLabel(automation_card, text="Tốc độ Auto 2048", text_color="#52657d", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=12)
+        ctk.CTkLabel(automation_card, text="Tốc độ Auto 2048", text_color="#52657d", font=("Segoe UI", 16, "bold")).pack(anchor="w", padx=12)
         speed_row = ctk.CTkFrame(automation_card, fg_color="transparent")
         speed_row.pack(fill="x", padx=12, pady=(4, 10))
-        self.auto_2048_speed_box = ctk.CTkComboBox(speed_row, variable=self.auto_2048_speed_text, values=tuple(AUTO_2048_SPEED_LABELS.values()), width=160, height=32, state="readonly", corner_radius=10, font=("Segoe UI", 11))
+        self.auto_2048_speed_box = ctk.CTkComboBox(speed_row, variable=self.auto_2048_speed_text, values=tuple(AUTO_2048_SPEED_LABELS.values()), width=190, height=42, state="readonly", corner_radius=12, font=("Segoe UI", 16))
         self.auto_2048_speed_box.pack(side="left", fill="x", expand=True)
         self._button(speed_row, "Lưu", self._apply_auto_2048_speed, "soft").pack(side="left", padx=(6, 0))
 
@@ -205,15 +205,15 @@ class Dashboard:
         for index, (title, variable) in enumerate(cards):
             card = ctk.CTkFrame(overview, fg_color="#f7faff", corner_radius=14)
             card.grid(row=0, column=index, sticky="ew", padx=(8 if index else 0, 0), pady=8)
-            ctk.CTkLabel(card, text=title, text_color="#6d8098", font=("Segoe UI", 10)).pack(anchor="w", padx=10, pady=(7, 0))
-            ctk.CTkLabel(card, textvariable=variable, text_color="#20324a", font=("Segoe UI", 15, "bold")).pack(anchor="w", padx=10, pady=(0, 7))
+            ctk.CTkLabel(card, text=title, text_color="#6d8098", font=("Segoe UI", 15)).pack(anchor="w", padx=10, pady=(7, 0))
+            ctk.CTkLabel(card, textvariable=variable, text_color="#20324a", font=("Segoe UI", 22, "bold")).pack(anchor="w", padx=10, pady=(0, 7))
             overview.columnconfigure(index, weight=1)
         progress_card = self._card(right_panel)
         progress_card.grid(row=1, column=0, sticky="nsew")
         progress_head = ctk.CTkFrame(progress_card, fg_color="transparent")
         progress_head.pack(fill="x", padx=12, pady=(10, 5))
-        ctk.CTkLabel(progress_head, text="Tiến trình profile", text_color="#20324a", font=("Segoe UI", 13, "bold")).pack(side="left")
-        ctk.CTkLabel(progress_head, textvariable=self.open_profiles_text, fg_color="#dceaff", text_color="#4171bd", corner_radius=10, padx=8, pady=3, font=("Segoe UI", 10, "bold")).pack(side="right")
+        ctk.CTkLabel(progress_head, text="Tiến trình profile", text_color="#20324a", font=("Segoe UI", 20, "bold")).pack(side="left")
+        ctk.CTkLabel(progress_head, textvariable=self.open_profiles_text, fg_color="#dceaff", text_color="#4171bd", corner_radius=10, padx=8, pady=3, font=("Segoe UI", 15, "bold")).pack(side="right")
         self.table = ctk.CTkScrollableFrame(progress_card, fg_color="transparent", scrollbar_button_color="#b8c8dc", scrollbar_button_hover_color="#8fa9c7")
         self.table.pack(fill="both", expand=True, padx=(9, 5), pady=(0, 9))
 
@@ -225,14 +225,14 @@ class Dashboard:
         coordinate_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
         coord_head = ctk.CTkFrame(coordinate_frame, fg_color="transparent")
         coord_head.pack(fill="x", padx=10, pady=(8, 0))
-        ctk.CTkLabel(coord_head, text="Lấy tọa độ", text_color="#20324a", font=("Segoe UI", 12, "bold")).pack(side="left")
+        ctk.CTkLabel(coord_head, text="Lấy tọa độ", text_color="#20324a", font=("Segoe UI", 18, "bold")).pack(side="left")
         self._button(coord_head, "Copy x,y", self._copy_coordinate_xy, "soft").pack(side="right")
         self._button(coord_head, "JSON", self._copy_coordinate_json, "soft").pack(side="right", padx=5)
-        ctk.CTkLabel(coordinate_frame, textvariable=self.coordinate_text, text_color="#52657d", font=("Consolas", 10), anchor="w", justify="left", wraplength=280).pack(fill="x", padx=10, pady=(5, 8))
+        ctk.CTkLabel(coordinate_frame, textvariable=self.coordinate_text, text_color="#52657d", font=("Consolas", 15), anchor="w", justify="left", wraplength=420).pack(fill="x", padx=10, pady=(5, 8))
         log_frame = self._card(bottom)
         log_frame.grid(row=0, column=1, sticky="nsew")
-        ctk.CTkLabel(log_frame, text="Nhật ký gần nhất", text_color="#20324a", font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=10, pady=(8, 4))
-        self.log = ctk.CTkTextbox(log_frame, height=72, state="disabled", font=("Consolas", 10), corner_radius=10, fg_color="#f3f7fc", text_color="#52657d")
+        ctk.CTkLabel(log_frame, text="Nhật ký gần nhất", text_color="#20324a", font=("Segoe UI", 18, "bold")).pack(anchor="w", padx=10, pady=(8, 4))
+        self.log = ctk.CTkTextbox(log_frame, height=96, state="disabled", font=("Consolas", 15), corner_radius=12, fg_color="#f3f7fc", text_color="#52657d")
         self.log.pack(fill="both", expand=True, padx=10, pady=(0, 8))
 
     @staticmethod
@@ -241,8 +241,8 @@ class Dashboard:
 
     @staticmethod
     def _section_label(parent: tk.Misc, title: str, description: str) -> None:
-        ctk.CTkLabel(parent, text=title, text_color="#20324a", font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=12, pady=(10, 0))
-        ctk.CTkLabel(parent, text=description, text_color="#6d8098", font=("Segoe UI", 10), wraplength=220, justify="left").pack(anchor="w", padx=12, pady=(2, 0))
+        ctk.CTkLabel(parent, text=title, text_color="#20324a", font=("Segoe UI", 18, "bold")).pack(anchor="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(parent, text=description, text_color="#6d8098", font=("Segoe UI", 15), wraplength=300, justify="left").pack(anchor="w", padx=12, pady=(2, 0))
 
     @staticmethod
     def _button(parent: tk.Misc, text: str, command: object, kind: str) -> ctk.CTkButton:
@@ -252,7 +252,7 @@ class Dashboard:
             "soft": ("#e8f0fb", "#d8e5f5", "#4c6686"),
         }
         foreground, hover, text_color = palette[kind]
-        return ctk.CTkButton(parent, text=text, command=command, height=32, corner_radius=11, border_spacing=4, fg_color=foreground, hover_color=hover, text_color=text_color, font=("Segoe UI", 10, "bold"))
+        return ctk.CTkButton(parent, text=text, command=command, height=42, corner_radius=13, border_spacing=5, fg_color=foreground, hover_color=hover, text_color=text_color, font=("Segoe UI", 15, "bold"))
 
     def _refresh_sync_button(self) -> None:
         self.sync_button.configure(text=self.sync_button_text.get())
@@ -276,14 +276,14 @@ class Dashboard:
             top.pack(fill="x", padx=10, pady=(7, 0))
             identity = ctk.CTkFrame(top, fg_color="transparent")
             identity.pack(side="left", fill="x", expand=True)
-            ctk.CTkLabel(identity, text=profile.name, text_color="#20324a", font=("Segoe UI", 11, "bold")).pack(side="left")
-            ctk.CTkLabel(identity, text=f"  {profile.id} · {profile.mode.value}", text_color="#6d8098", font=("Segoe UI", 10)).pack(side="left")
-            state_badge = ctk.CTkLabel(top, text="Đã dừng", fg_color="#e8eef5", text_color="#52657d", corner_radius=9, font=("Segoe UI", 10, "bold"), padx=7, pady=2)
+            ctk.CTkLabel(identity, text=profile.name, text_color="#20324a", font=("Segoe UI", 16, "bold")).pack(side="left")
+            ctk.CTkLabel(identity, text=f"  {profile.id} · {profile.mode.value}", text_color="#6d8098", font=("Segoe UI", 15)).pack(side="left")
+            state_badge = ctk.CTkLabel(top, text="Đã dừng", fg_color="#e8eef5", text_color="#52657d", corner_radius=10, font=("Segoe UI", 15, "bold"), padx=9, pady=3)
             state_badge.pack(side="right")
             detail = ctk.CTkFrame(item, fg_color="transparent")
             detail.pack(fill="x", padx=10, pady=(2, 4))
-            ctk.CTkLabel(detail, textvariable=status, text_color="#52657d", font=("Segoe UI", 10), anchor="w").pack(side="left", fill="x", expand=True)
-            ctk.CTkLabel(detail, textvariable=resources, text_color="#7f90a5", font=("Segoe UI", 10)).pack(side="right")
+            ctk.CTkLabel(detail, textvariable=status, text_color="#52657d", font=("Segoe UI", 15), anchor="w").pack(side="left", fill="x", expand=True)
+            ctk.CTkLabel(detail, textvariable=resources, text_color="#7f90a5", font=("Segoe UI", 15)).pack(side="right")
             controls = ctk.CTkFrame(item, fg_color="transparent")
             controls.pack(fill="x", padx=10, pady=(0, 7))
             self._button(controls, "Mở", lambda profile_id=profile.id: self._submit(profile_id, CommandKind.OPEN), "primary").pack(side="left")
