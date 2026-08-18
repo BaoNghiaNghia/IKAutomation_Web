@@ -223,6 +223,7 @@ class Dashboard(QWidget):
         self.config.profiles=[p for p in self.config.profiles if p.id!=pid]; save_config(self.config); self.runner.sync_profiles(); self._draw_rows()
     def _authorize_windows(self, action:str) -> bool:
         try:
+            self.showNormal(); self.raise_(); self.activateWindow(); QApplication.processEvents()
             return require_windows_hello(action=action)
         except WindowsAuthenticationError as error:
             self._warning("Không xác thực được", str(error)); return False
