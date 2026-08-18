@@ -558,7 +558,9 @@ class MultiProfileRunner:
                 count += 1
         return count
 
-    def arrange_windows(self) -> int:
+    def arrange_windows(self, columns_per_row: int | None = None) -> int:
+        if columns_per_row is not None and not 2 <= int(columns_per_row) <= 6:
+            raise ValueError("Số cửa sổ mỗi hàng phải từ 2 đến 6")
         opened: list[tuple[str, int, int, int]] = []
         for profile in self.config.profiles:
             worker = self.workers.get(profile.id)
@@ -583,6 +585,7 @@ class MultiProfileRunner:
             window_width,
             window_height,
             len(opened),
+            columns_per_row=columns_per_row,
         )
         for (profile_id, _hwnd, _outer_width, _outer_height), (x, y) in zip(
             opened, positions, strict=True

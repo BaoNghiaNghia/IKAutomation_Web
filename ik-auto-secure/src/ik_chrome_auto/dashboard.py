@@ -61,6 +61,7 @@ class Dashboard:
         self.viewport_width = tk.StringVar(value=str(self.config.browser.viewport_width))
         self.viewport_height = tk.StringVar(value=str(self.config.browser.viewport_height))
         self.auto_resize = tk.BooleanVar(value=self.config.browser.auto_resize)
+        self.windows_per_row = tk.StringVar(value=str(self.config.browser.windows_per_row))
         self.config.browser.low_memory_mode = True
         save_config(self.config)
         self.total_profiles_text = tk.StringVar(value="0")
@@ -163,16 +164,24 @@ class Dashboard:
 
         viewport_card = self._card(left_panel)
         viewport_card.pack(fill="x", pady=(0, 7))
-        self._section_label(viewport_card, "Cấu hình browser", "Viewport và cửa sổ.")
+        self._section_label(viewport_card, "Bố cục cửa sổ", "Số cửa sổ Chrome trên mỗi hàng (2–6).")
         viewport_row = ctk.CTkFrame(viewport_card, fg_color="transparent")
         viewport_row.pack(fill="x", padx=12, pady=(6, 5))
-        ctk.CTkEntry(viewport_row, textvariable=self.viewport_width, width=62, height=34, corner_radius=11, font=self._font(13)).pack(side="left")
-        ctk.CTkLabel(viewport_row, text="×", text_color="#6d8098", width=16).pack(side="left")
-        ctk.CTkEntry(viewport_row, textvariable=self.viewport_height, width=62, height=34, corner_radius=11, font=self._font(13)).pack(side="left")
-        self._button(viewport_row, "Áp dụng", self._apply_size_all, "soft").pack(side="right")
-        ctk.CTkCheckBox(viewport_card, text="Tự resize khi mở", variable=self.auto_resize, font=self._font(13), checkbox_width=21, checkbox_height=21).pack(anchor="w", padx=12)
+        ctk.CTkLabel(viewport_row, text="Cửa sổ / hàng", text_color="#52657d", font=self._font(12, "bold")).pack(side="left")
+        self.windows_per_row_box = ctk.CTkComboBox(
+            viewport_row,
+            variable=self.windows_per_row,
+            values=("2", "3", "4", "5", "6"),
+            width=78,
+            height=34,
+            state="readonly",
+            corner_radius=11,
+            font=self._font(13),
+        )
+        self.windows_per_row_box.pack(side="left", padx=(8, 0))
+        self._button(viewport_row, "Lưu", self._apply_windows_per_row, "soft").pack(side="right")
         window_row = ctk.CTkFrame(viewport_card, fg_color="transparent")
-        window_row.pack(fill="x", padx=12, pady=(6, 0))
+        window_row.pack(fill="x", padx=12, pady=(2, 0))
         self._button(window_row, "Sắp xếp", self._arrange_windows, "soft").pack(side="left")
         self.drag_button = self._button(window_row, self.drag_button_text.get(), self._toggle_all_drag_items, "soft")
         self.drag_button.pack(side="left", padx=(5, 0))
@@ -355,6 +364,21 @@ class Dashboard:
             f"Đã lưu viewport {width}×{height} px; đang áp cho tất cả profile đang mở"
         )
 
+    def _apply_windows_per_row(self) -> int | None:
+        try:
+            columns = int(self.windows_per_row.get())
+        except ValueError:
+            messagebox.showerror("Bố cục không hợp lệ", "Hãy chọn số từ 2 đến 6.", parent=self.root)
+            return None
+        if not 2 <= columns <= 6:
+            messagebox.showerror("Bố cục không hợp lệ", "Số cửa sổ mỗi hàng phải từ 2 đến 6.", parent=self.root)
+            return None
+        self.config.browser.windows_per_row = columns
+        self.windows_per_row.set(str(columns))
+        save_config(self.config)
+        self._append_log(f"Đã đặt bố cục: {columns} cửa sổ trên một hàng")
+        return columns
+
     def _apply_size_profile(self, profile_id: str) -> None:
         try:
             width, height = self._parse_viewport()
@@ -514,8 +538,11 @@ class Dashboard:
         self._append_log(f"Đã {action} {opened} cửa sổ profile")
 
     def _arrange_windows(self) -> None:
+        columns = self._apply_windows_per_row()
+        if columns is None:
+            return
         try:
-            count = self.runner.arrange_windows()
+            count = self.runner.arrange_windows(columns)
         except Exception as error:
             messagebox.showerror("Không sắp xếp được", str(error), parent=self.root)
             return
@@ -526,7 +553,9 @@ class Dashboard:
                 parent=self.root,
             )
             return
-        self._append_log(f"Đang sắp xếp {count} cửa sổ từ trái sang phải, trên xuống dưới")
+        self._append_log(
+            f"Đang sắp xếp {count} cửa sổ: {columns} cửa sổ mỗi hàng, trái sang phải"
+        )
 
     def _copy_coordinate_xy(self) -> None:
         if self.last_coordinate is None:

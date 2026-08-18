@@ -12,6 +12,7 @@
       "width": 500,
       "height": 300
     },
+    "windows_per_row": 3,
     "slow_mo_ms": 0,
     "startup_timeout_ms": 90000
   },

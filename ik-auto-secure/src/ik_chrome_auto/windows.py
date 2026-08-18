@@ -46,13 +46,18 @@ def calculate_tiled_positions(
     count: int,
     *,
     gap: int = 8,
+    columns_per_row: int | None = None,
 ) -> list[tuple[int, int]]:
     """Return left-to-right, top-to-bottom positions inside the desktop work area."""
     if count <= 0:
         return []
     width = max(1, int(window_width))
     height = max(1, int(window_height))
-    columns = max(1, (work_area.width + gap) // (width + gap))
+    columns = (
+        max(1, int(columns_per_row))
+        if columns_per_row is not None
+        else max(1, (work_area.width + gap) // (width + gap))
+    )
     rows = max(1, (work_area.height + gap) // (height + gap))
     capacity = max(1, columns * rows)
     positions: list[tuple[int, int]] = []

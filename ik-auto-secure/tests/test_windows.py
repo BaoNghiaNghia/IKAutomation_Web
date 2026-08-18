@@ -42,6 +42,16 @@ def test_calculate_tiled_positions_honors_offset_work_area() -> None:
     assert positions == [(100, 50), (500, 50)]
 
 
+def test_calculate_tiled_positions_honors_requested_windows_per_row() -> None:
+    work_area = WindowRect(0, 0, 1800, 900)
+
+    positions = calculate_tiled_positions(
+        work_area, 500, 300, 4, gap=10, columns_per_row=3
+    )
+
+    assert positions == [(0, 0), (510, 0), (1020, 0), (0, 310)]
+
+
 def test_rgb_png_encoder_round_trips_exact_pixels() -> None:
     rgb = bytes((255, 0, 0, 0, 255, 0, 0, 0, 255, 250, 240, 230))
     image = decode_png(encode_rgb_png(2, 2, rgb))
