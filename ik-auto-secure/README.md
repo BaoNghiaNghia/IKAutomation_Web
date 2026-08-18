@@ -28,6 +28,15 @@ The browser-farming architecture and migration plan are documented in
 2. Review `target_url` and the smallest necessary `capture.allowed_hosts`.
 3. Run `setup.cmd`, then `run.cmd`.
 
+For one safe preparation/check command, run:
+
+```powershell
+.\run-browser-check.ps1
+```
+
+It prepares the environment, runs Doctor and browser-worker tests, then opens
+the dashboard. Add `-NoDashboard` to stop after the checks.
+
 Run tests from an activated virtual environment:
 
 ```powershell
