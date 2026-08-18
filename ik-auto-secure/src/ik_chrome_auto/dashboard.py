@@ -56,6 +56,9 @@ class Dashboard(QWidget):
         self.last_coordinate: tuple[str, dict[str, object]] | None = None
         self.inspecting_profile_id: str | None = None
         self.auto_profiles: set[str] = set()
+        self._auto_arrange_targets: set[str] | None = None
+        self._auto_arrange_states: dict[str, WorkerState] = {}
+        self._auto_arrange_deadline = 0.0
         self.drag_visible = True
         self._last_resources = self._last_trim = 0.0
         self._build()
@@ -80,7 +83,7 @@ class Dashboard(QWidget):
         head = QHBoxLayout(); title = SubtitleLabel("IK Auto"); title.setStyleSheet("font-size:22px;font-weight:700;"); head.addWidget(title); head.addWidget(QLabel("Browser control")); head.addStretch(); secure = QLabel("●  Local & secure"); secure.setStyleSheet("background:#d9f7e8;color:#087443;border-radius:12px;padding:5px 10px;font-weight:600;"); head.addWidget(secure); root.addLayout(head)
         body = QHBoxLayout(); root.addLayout(body, 1)
         left = QWidget(); left.setMinimumWidth(340); left.setMaximumWidth(390); ll = QVBoxLayout(left); ll.setContentsMargins(0,0,0,0); ll.setSpacing(8); body.addWidget(left)
-        accounts = self._card(); al = QVBoxLayout(accounts); al.addWidget(StrongBodyLabel("Tài khoản Chrome")); al.addWidget(self._muted("Mỗi tài khoản có một phiên browser riêng, lưu cục bộ.")); actions = QHBoxLayout(); add = self._icon_button(FIF.ADD, "Thêm tài khoản", primary=True); add.clicked.connect(self._add_profile); open_all = PrimaryPushButton("Mở tất cả"); open_all.clicked.connect(self.runner.open_all); stop_all = PushButton("Dừng tất cả"); stop_all.clicked.connect(self.runner.stop_all); actions.addWidget(add); actions.addWidget(open_all); actions.addWidget(stop_all); actions.addStretch(); al.addLayout(actions); ll.addWidget(accounts)
+        accounts = self._card(); al = QVBoxLayout(accounts); al.addWidget(StrongBodyLabel("Tài khoản Chrome")); al.addWidget(self._muted("Mỗi tài khoản có một phiên browser riêng, lưu cục bộ.")); actions = QHBoxLayout(); add = self._icon_button(FIF.ADD, "Thêm tài khoản", primary=True); add.clicked.connect(self._add_profile); open_all = PrimaryPushButton("Mở tất cả"); open_all.clicked.connect(self._open_all_and_arrange); stop_all = PushButton("Dừng tất cả"); stop_all.clicked.connect(self.runner.stop_all); actions.addWidget(add); actions.addWidget(open_all); actions.addWidget(stop_all); actions.addStretch(); al.addLayout(actions); ll.addWidget(accounts)
         arrange_card = self._card(); acl = QVBoxLayout(arrange_card); acl.addWidget(StrongBodyLabel("Sắp xếp cửa sổ")); acl.addWidget(self._muted("Chọn số cửa sổ trên mỗi hàng rồi áp dụng cho Chrome đang mở.")); row = QHBoxLayout(); row.addWidget(QLabel("Số cửa sổ / hàng")); row.addStretch(); self.windows_per_row = ComboBox(); self.windows_per_row.addItems(["2","3","4","5","6"]); self.windows_per_row.setCurrentText(str(self.config.browser.windows_per_row)); self.windows_per_row.currentTextChanged.connect(self._apply_windows_per_row); row.addWidget(self.windows_per_row); acl.addLayout(row); apply = PrimaryPushButton("Áp dụng & sắp xếp"); apply.clicked.connect(self._arrange); acl.addWidget(apply); tools = QHBoxLayout(); self.drag = PushButton("Ẩn nút kéo"); self.drag.clicked.connect(self._toggle_drag); self.pin = CheckBox("Luôn nổi trên các cửa sổ khác"); self.pin.stateChanged.connect(lambda _s: self.runner.set_all_topmost(self.pin.isChecked())); tools.addWidget(self.drag); tools.addWidget(self.pin); acl.addLayout(tools); ll.addWidget(arrange_card)
         automation = self._card(); au = QVBoxLayout(automation); au.addWidget(StrongBodyLabel("Tự động hóa")); au.addWidget(self._muted("Sync thao tác · Auto 2048")); sync = QHBoxLayout(); self.master = ComboBox(); sync.addWidget(self.master,1); self.sync = PushButton("Bật sync chuột"); self.sync.clicked.connect(self._toggle_sync); sync.addWidget(self.sync); au.addLayout(sync); self.sync_status = self._muted("Sync đang tắt"); au.addWidget(self.sync_status); speed = QHBoxLayout(); self.speed = ComboBox(); self.speed.addItems(list(SPEED_LABELS.values())); self.speed.setCurrentText(SPEED_LABELS[self.config.auto_2048_speed]); save_speed = PushButton("Lưu tốc độ"); save_speed.clicked.connect(self._save_speed); speed.addWidget(self.speed,1); speed.addWidget(save_speed); au.addLayout(speed); ll.addWidget(automation); ll.addStretch()
         right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8); body.addWidget(right,1)
@@ -115,6 +118,37 @@ class Dashboard(QWidget):
 
     def _apply_windows_per_row(self, _value: str | None=None) -> int:
         value=int(self.windows_per_row.currentText()); self.config.browser.windows_per_row=value; save_config(self.config); return value
+    def _open_all_and_arrange(self) -> None:
+        self._apply_windows_per_row()
+        self._auto_arrange_targets = {profile.id for profile in self.config.profiles if profile.enabled}
+        self._auto_arrange_states.clear()
+        self._auto_arrange_deadline = time.monotonic() + self.config.browser.startup_timeout_ms / 1000
+        self.runner.open_all()
+        self._append_log("Đang mở tất cả profile; sẽ tự sắp xếp Chrome khi sẵn sàng")
+    def _finish_auto_arrange_if_ready(self) -> None:
+        targets = self._auto_arrange_targets
+        if targets is None:
+            return
+        if not targets:
+            self._auto_arrange_targets = None
+            return
+        ready = {
+            profile_id
+            for profile_id, state in self._auto_arrange_states.items()
+            if state in {WorkerState.READY, WorkerState.COMPLETED}
+        }
+        settled = ready | {
+            profile_id for profile_id, state in self._auto_arrange_states.items() if state == WorkerState.ERROR
+        }
+        if settled != targets and time.monotonic() < self._auto_arrange_deadline:
+            return
+        self._auto_arrange_targets = None
+        try:
+            count = self.runner.arrange_windows(self.config.browser.windows_per_row)
+        except Exception as error:
+            self._append_log(f"Không tự sắp xếp được Chrome: {error}")
+            return
+        self._append_log(f"Đã tự sắp xếp {count} Chrome theo grid {self.config.browser.windows_per_row} cột")
     def _arrange(self) -> None:
         try: count=self.runner.arrange_windows(self._apply_windows_per_row())
         except Exception as error: self._error("Không sắp xếp được",str(error)); return
@@ -169,7 +203,7 @@ class Dashboard(QWidget):
     def _poll(self) -> None:
         try:
             while True:
-                snap=self.updates.get_nowait(); row=self.rows.get(snap.profile_id)
+                snap=self.updates.get_nowait(); self._auto_arrange_states[snap.profile_id] = snap.state; row=self.rows.get(snap.profile_id)
                 if row:
                     row.status.setText(snap.message); text,bg,fg=self._state(snap.state); row.badge.setText(text); row.badge.setStyleSheet(f"background:{bg};color:{fg};border-radius:10px;padding:3px 8px;")
                     if snap.state==WorkerState.STOPPED or "2048" in snap.message: self.auto_profiles.discard(snap.profile_id); row.auto.setText("Auto 2048")
@@ -179,6 +213,7 @@ class Dashboard(QWidget):
             while True:
                 pid,event=self.coordinate_updates.get_nowait(); self.last_coordinate=(pid,event); self.coordinate.setText(format_coordinate(pid,event))
         except queue.Empty: pass
+        self._finish_auto_arrange_if_ready()
         now=time.monotonic()
         if now-self._last_resources>=2:
             try:
