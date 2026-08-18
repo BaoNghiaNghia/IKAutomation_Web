@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -402,15 +403,29 @@ class ChromeProfileSession:
             if username is None or password is None:
                 continue
             try:
-                username.fill(credential.username, timeout=3_000)
-                password.fill(credential.password, timeout=3_000)
-                frame.get_by_role(
+                self._paced_login_input(username, credential.username)
+                time.sleep(random.uniform(0.18, 0.36))
+                self._paced_login_input(password, credential.password)
+                time.sleep(random.uniform(0.30, 0.55))
+                login_button = frame.get_by_role(
                     "button", name=re.compile(r"^(đăng nhập|login)$", re.IGNORECASE)
-                ).first.click(timeout=3_000)
+                ).first
+                login_button.hover(timeout=3_000)
+                time.sleep(random.uniform(0.12, 0.24))
+                login_button.click(timeout=3_000)
                 return True
             except Exception:
                 return False
         return False
+
+    @staticmethod
+    def _paced_login_input(locator: Any, value: str) -> None:
+        """Enter a credential through normal keyboard events, never log its value."""
+        locator.click(timeout=3_000)
+        locator.press("Control+A", timeout=3_000)
+        locator.press("Backspace", timeout=3_000)
+        for character in value:
+            locator.press_sequentially(character, delay=random.randint(42, 88), timeout=3_000)
 
     def resize(self, width: int, height: int) -> None:
         width, height = validate_viewport(int(width), int(height))

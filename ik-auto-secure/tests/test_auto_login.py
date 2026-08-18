@@ -12,8 +12,15 @@ class _Input:
     def __init__(self) -> None:
         self.value = ""
 
-    def fill(self, value: str, *, timeout: int) -> None:
-        self.value = value
+    def click(self, *, timeout: int) -> None:
+        pass
+
+    def press(self, key: str, *, timeout: int) -> None:
+        if key in {"Control+A", "Backspace"}:
+            self.value = ""
+
+    def press_sequentially(self, value: str, *, delay: int, timeout: int) -> None:
+        self.value += value
 
 
 class _Button:
@@ -23,6 +30,9 @@ class _Button:
 
         def click(self, *, timeout: int) -> None:
             self.parent.clicked = True
+
+        def hover(self, *, timeout: int) -> None:
+            pass
 
     def __init__(self) -> None:
         self.clicked = False
@@ -58,6 +68,7 @@ def test_auto_login_fills_form_and_clicks_login(tmp_path: Path, monkeypatch) -> 
     session._page = _Page(frame)  # type: ignore[assignment]
     values = iter([username, password])
     monkeypatch.setattr(session, "_first_visible_input", lambda *_args: next(values))
+    monkeypatch.setattr(browser.time, "sleep", lambda _seconds: None)
 
     class Store:
         def load(self, _profile_id: str) -> object:
