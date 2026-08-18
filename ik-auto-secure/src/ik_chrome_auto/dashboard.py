@@ -12,7 +12,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QGuiApplication
 from PySide6.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QMessageBox, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
-from qfluentwidgets import CardWidget, CheckBox, ComboBox, LineEdit, PasswordLineEdit, PrimaryPushButton, PushButton, StrongBodyLabel, SubtitleLabel
+from qfluentwidgets import CardWidget, CheckBox, ComboBox, FluentIcon as FIF, LineEdit, PasswordLineEdit, PrimaryToolButton, PushButton, StrongBodyLabel, SubtitleLabel, ToolButton
 
 from ik_chrome_auto.config import ensure_data_dirs, load_config, save_config, unique_profile_id
 from ik_chrome_auto.interaction import format_coordinate
@@ -80,19 +80,26 @@ class Dashboard(QWidget):
         head = QHBoxLayout(); title = SubtitleLabel("IK Auto"); title.setStyleSheet("font-size:22px;font-weight:700;"); head.addWidget(title); head.addWidget(QLabel("Browser control")); head.addStretch(); secure = QLabel("●  Local & secure"); secure.setStyleSheet("background:#d9f7e8;color:#087443;border-radius:12px;padding:5px 10px;font-weight:600;"); head.addWidget(secure); root.addLayout(head)
         body = QHBoxLayout(); root.addLayout(body, 1)
         left = QWidget(); left.setMinimumWidth(340); left.setMaximumWidth(390); ll = QVBoxLayout(left); ll.setContentsMargins(0,0,0,0); ll.setSpacing(8); body.addWidget(left)
-        accounts = self._card(); al = QVBoxLayout(accounts); al.addWidget(StrongBodyLabel("Tài khoản Chrome")); al.addWidget(self._muted("Mỗi tài khoản có một phiên browser riêng, lưu cục bộ.")); ar = QHBoxLayout(); add = PrimaryPushButton("+ Thêm tài khoản"); add.clicked.connect(self._add_profile); ar.addWidget(add); ar.addStretch(); al.addLayout(ar); actions = QHBoxLayout(); open_all = PrimaryPushButton("Mở tất cả"); open_all.clicked.connect(self.runner.open_all); stop_all = PushButton("Dừng tất cả"); stop_all.clicked.connect(self.runner.stop_all); actions.addWidget(open_all,1); actions.addWidget(stop_all); al.addLayout(actions); ll.addWidget(accounts)
-        arrange_card = self._card(); acl = QVBoxLayout(arrange_card); acl.addWidget(StrongBodyLabel("Sắp xếp cửa sổ")); acl.addWidget(self._muted("Chọn số cửa sổ trên mỗi hàng rồi áp dụng cho Chrome đang mở.")); row = QHBoxLayout(); row.addWidget(QLabel("Số cửa sổ / hàng")); row.addStretch(); self.windows_per_row = ComboBox(); self.windows_per_row.addItems(["2","3","4","5","6"]); self.windows_per_row.setCurrentText(str(self.config.browser.windows_per_row)); self.windows_per_row.currentTextChanged.connect(self._apply_windows_per_row); row.addWidget(self.windows_per_row); acl.addLayout(row); apply = PrimaryPushButton("Áp dụng & sắp xếp"); apply.clicked.connect(self._arrange); acl.addWidget(apply); tools = QHBoxLayout(); self.drag = PushButton("Ẩn nút kéo"); self.drag.clicked.connect(self._toggle_drag); self.pin = CheckBox("Luôn nổi trên các cửa sổ khác"); self.pin.stateChanged.connect(lambda _s: self.runner.set_all_topmost(self.pin.isChecked())); tools.addWidget(self.drag); tools.addWidget(self.pin); acl.addLayout(tools); ll.addWidget(arrange_card)
-        automation = self._card(); au = QVBoxLayout(automation); au.addWidget(StrongBodyLabel("Tự động hóa")); au.addWidget(self._muted("Sync thao tác · Auto 2048")); sync = QHBoxLayout(); self.master = ComboBox(); sync.addWidget(self.master,1); self.sync = PushButton("Bật sync chuột"); self.sync.clicked.connect(self._toggle_sync); sync.addWidget(self.sync); au.addLayout(sync); self.sync_status = self._muted("Sync đang tắt"); au.addWidget(self.sync_status); speed = QHBoxLayout(); self.speed = ComboBox(); self.speed.addItems(list(SPEED_LABELS.values())); self.speed.setCurrentText(SPEED_LABELS[self.config.auto_2048_speed]); save_speed = PushButton("Lưu tốc độ"); save_speed.clicked.connect(self._save_speed); speed.addWidget(self.speed,1); speed.addWidget(save_speed); au.addLayout(speed); ll.addWidget(automation); ll.addStretch()
+        accounts = self._card(); al = QVBoxLayout(accounts); al.addWidget(StrongBodyLabel("Tài khoản Chrome")); al.addWidget(self._muted("Mỗi tài khoản có một phiên browser riêng, lưu cục bộ.")); actions = QHBoxLayout(); add = self._icon_button(FIF.ADD, "Thêm tài khoản", primary=True); add.clicked.connect(self._add_profile); open_all = self._icon_button(FIF.PLAY, "Mở tất cả", primary=True); open_all.clicked.connect(self.runner.open_all); stop_all = self._icon_button(FIF.CLOSE, "Dừng tất cả"); stop_all.clicked.connect(self.runner.stop_all); actions.addWidget(add); actions.addWidget(open_all); actions.addWidget(stop_all); actions.addStretch(); al.addLayout(actions); ll.addWidget(accounts)
+        arrange_card = self._card(); acl = QVBoxLayout(arrange_card); acl.addWidget(StrongBodyLabel("Sắp xếp cửa sổ")); acl.addWidget(self._muted("Chọn số cửa sổ trên mỗi hàng rồi áp dụng cho Chrome đang mở.")); row = QHBoxLayout(); row.addWidget(QLabel("Số cửa sổ / hàng")); row.addStretch(); self.windows_per_row = ComboBox(); self.windows_per_row.addItems(["2","3","4","5","6"]); self.windows_per_row.setCurrentText(str(self.config.browser.windows_per_row)); self.windows_per_row.currentTextChanged.connect(self._apply_windows_per_row); row.addWidget(self.windows_per_row); apply = self._icon_button(FIF.SEND, "Áp dụng & sắp xếp", primary=True); apply.clicked.connect(self._arrange); row.addWidget(apply); acl.addLayout(row); tools = QHBoxLayout(); self.drag = self._icon_button(FIF.GAME, "Ẩn nút kéo"); self.drag.clicked.connect(self._toggle_drag); self.pin = CheckBox("Luôn nổi trên các cửa sổ khác"); self.pin.stateChanged.connect(lambda _s: self.runner.set_all_topmost(self.pin.isChecked())); tools.addWidget(self.drag); tools.addWidget(self.pin); acl.addLayout(tools); ll.addWidget(arrange_card)
+        automation = self._card(); au = QVBoxLayout(automation); au.addWidget(StrongBodyLabel("Tự động hóa")); au.addWidget(self._muted("Sync thao tác · Auto 2048")); sync = QHBoxLayout(); self.master = ComboBox(); sync.addWidget(self.master,1); self.sync = self._icon_button(FIF.SYNC, "Bật sync chuột"); self.sync.clicked.connect(self._toggle_sync); sync.addWidget(self.sync); au.addLayout(sync); self.sync_status = self._muted("Sync đang tắt"); au.addWidget(self.sync_status); speed = QHBoxLayout(); self.speed = ComboBox(); self.speed.addItems(list(SPEED_LABELS.values())); self.speed.setCurrentText(SPEED_LABELS[self.config.auto_2048_speed]); save_speed = self._icon_button(FIF.SAVE, "Lưu tốc độ"); save_speed.clicked.connect(self._save_speed); speed.addWidget(self.speed,1); speed.addWidget(save_speed); au.addLayout(speed); ll.addWidget(automation); ll.addStretch()
         right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8); body.addWidget(right,1)
         metrics = QHBoxLayout(); self.total, self.opened, self.ram, self.cpu = QLabel("0"), QLabel("0"), QLabel("0 MB"), QLabel("0.0%");
         for label, value in (("Tổng profile",self.total),("Đang mở",self.opened),("RAM Chrome",self.ram),("CPU Chrome",self.cpu)):
             card = self._card(); ml=QVBoxLayout(card); ml.addWidget(self._muted(label)); value.setStyleSheet("font-size:19px;font-weight:700;"); ml.addWidget(value); metrics.addWidget(card)
         rl.addLayout(metrics)
         progress = self._card(); pl = QVBoxLayout(progress); ph = QHBoxLayout(); ph.addWidget(StrongBodyLabel("Tiến trình profile")); ph.addStretch(); self.open_badge = QLabel("0 đang mở"); self.open_badge.setStyleSheet("background:#e2edff;color:#2767bd;border-radius:10px;padding:3px 8px;"); ph.addWidget(self.open_badge); pl.addLayout(ph); self.table_layout = QVBoxLayout(); self.table_layout.setSpacing(6); content=QWidget(); content.setLayout(self.table_layout); self.scroll=QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setWidget(content); pl.addWidget(self.scroll,1); rl.addWidget(progress,1)
-        foot=QHBoxLayout(); coords=self._card(); cl=QVBoxLayout(coords); ch=QHBoxLayout(); ch.addWidget(StrongBodyLabel("Lấy tọa độ")); ch.addStretch(); bjson=PushButton("JSON"); bjson.clicked.connect(self._copy_json); bxy=PushButton("Copy x,y"); bxy.clicked.connect(self._copy_xy); ch.addWidget(bjson); ch.addWidget(bxy); cl.addLayout(ch); self.coordinate= self._muted("Chưa đo tọa độ"); cl.addWidget(self.coordinate); foot.addWidget(coords,2); logs=self._card(); logl=QVBoxLayout(logs); logl.addWidget(StrongBodyLabel("Nhật ký gần nhất")); self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setFixedHeight(86); logl.addWidget(self.log); foot.addWidget(logs,3); rl.addLayout(foot)
+        foot=QHBoxLayout(); coords=self._card(); cl=QVBoxLayout(coords); ch=QHBoxLayout(); ch.addWidget(StrongBodyLabel("Lấy tọa độ")); ch.addStretch(); bjson=self._icon_button(FIF.COPY, "Copy JSON tọa độ"); bjson.clicked.connect(self._copy_json); bxy=self._icon_button(FIF.COPY, "Copy tọa độ x,y"); bxy.clicked.connect(self._copy_xy); ch.addWidget(bjson); ch.addWidget(bxy); cl.addLayout(ch); self.coordinate= self._muted("Chưa đo tọa độ"); cl.addWidget(self.coordinate); foot.addWidget(coords,2); logs=self._card(); logl=QVBoxLayout(logs); logl.addWidget(StrongBodyLabel("Nhật ký gần nhất")); self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setFixedHeight(86); logl.addWidget(self.log); foot.addWidget(logs,3); rl.addLayout(foot)
 
     @staticmethod
     def _card() -> CardWidget: return CardWidget()
+    @staticmethod
+    def _icon_button(icon: FIF, tooltip: str, primary: bool = False) -> ToolButton:
+        button = PrimaryToolButton() if primary else ToolButton()
+        button.setIcon(icon)
+        button.setToolTip(tooltip)
+        button.setFixedSize(34, 34)
+        return button
     @staticmethod
     def _muted(text: str) -> QLabel:
         label=QLabel(text); label.setStyleSheet("color:#62758e; background:transparent;"); label.setWordWrap(True); return label
@@ -103,7 +110,7 @@ class Dashboard(QWidget):
             if item.widget(): item.widget().deleteLater()
         self.rows.clear(); ids=[p.id for p in self.config.profiles]; self.master.clear(); self.master.addItems(ids)
         for profile in self.config.profiles:
-            card=self._card(); layout=QVBoxLayout(card); top=QHBoxLayout(); top.addWidget(StrongBodyLabel(profile.name)); top.addWidget(self._muted(f"{profile.id} · {profile.mode.value}")); top.addStretch(); badge=QLabel("Đã dừng"); badge.setStyleSheet("background:#f1f5f9;color:#475569;border-radius:10px;padding:3px 8px;"); top.addWidget(badge); layout.addLayout(top); status=self._muted("Đã dừng"); resource=self._muted("—"); details=QHBoxLayout(); details.addWidget(status,1); details.addWidget(resource); layout.addLayout(details); buttons=QHBoxLayout(); open_btn=PrimaryPushButton("Mở"); open_btn.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.OPEN)); buttons.addWidget(open_btn); auto=PushButton("Auto 2048"); auto.clicked.connect(lambda _=False,pid=profile.id:self._toggle_auto(pid)); buttons.addWidget(auto); shot=PushButton("Ảnh"); shot.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.SCREENSHOT)); buttons.addWidget(shot); inspect=PushButton("Đo"); inspect.clicked.connect(lambda _=False,pid=profile.id:self._toggle_inspector(pid)); buttons.addWidget(inspect); buttons.addStretch(); delete=PushButton("Xóa"); delete.clicked.connect(lambda _=False,pid=profile.id:self._remove_profile(pid)); buttons.addWidget(delete); layout.addLayout(buttons); self.table_layout.addWidget(card); self.rows[profile.id]=ProfileRow(status,resource,badge,inspect,auto)
+            card=self._card(); layout=QVBoxLayout(card); top=QHBoxLayout(); top.addWidget(StrongBodyLabel(profile.name)); top.addWidget(self._muted(f"{profile.id} · {profile.mode.value}")); top.addStretch(); badge=QLabel("Đã dừng"); badge.setStyleSheet("background:#f1f5f9;color:#475569;border-radius:10px;padding:3px 8px;"); top.addWidget(badge); layout.addLayout(top); status=self._muted("Đã dừng"); resource=self._muted("—"); details=QHBoxLayout(); details.addWidget(status,1); details.addWidget(resource); layout.addLayout(details); buttons=QHBoxLayout(); open_btn=self._icon_button(FIF.PLAY,"Mở profile",primary=True); open_btn.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.OPEN)); buttons.addWidget(open_btn); auto=self._icon_button(FIF.GAME,"Bật Auto 2048"); auto.clicked.connect(lambda _=False,pid=profile.id:self._toggle_auto(pid)); buttons.addWidget(auto); shot=self._icon_button(FIF.CAMERA,"Chụp ảnh"); shot.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.SCREENSHOT)); buttons.addWidget(shot); inspect=self._icon_button(FIF.SEARCH,"Đo tọa độ"); inspect.clicked.connect(lambda _=False,pid=profile.id:self._toggle_inspector(pid)); buttons.addWidget(inspect); buttons.addStretch(); delete=self._icon_button(FIF.DELETE,"Xóa profile"); delete.clicked.connect(lambda _=False,pid=profile.id:self._remove_profile(pid)); buttons.addWidget(delete); layout.addLayout(buttons); self.table_layout.addWidget(card); self.rows[profile.id]=ProfileRow(status,resource,badge,inspect,auto)
         self.table_layout.addStretch()
 
     def _apply_windows_per_row(self, _value: str | None=None) -> int:
@@ -113,23 +120,23 @@ class Dashboard(QWidget):
         except Exception as error: self._error("Không sắp xếp được",str(error)); return
         self._append_log("Chưa có cửa sổ để sắp xếp" if not count else f"Đã sắp xếp {count} cửa sổ")
     def _toggle_drag(self) -> None:
-        self.drag_visible=not self.drag_visible; self.runner.set_all_drag_items_visible(self.drag_visible); self.drag.setText("Ẩn nút kéo" if self.drag_visible else "Hiện nút kéo")
+        self.drag_visible=not self.drag_visible; self.runner.set_all_drag_items_visible(self.drag_visible); self.drag.setToolTip("Ẩn nút kéo" if self.drag_visible else "Hiện nút kéo")
     def _toggle_sync(self) -> None:
-        if self.runner.sync_enabled: self.runner.disable_sync(); self.sync.setText("Bật sync chuột"); self.sync_status.setText("Sync đang tắt"); return
+        if self.runner.sync_enabled: self.runner.disable_sync(); self.sync.setToolTip("Bật sync chuột"); self.sync_status.setText("Sync đang tắt"); return
         master=self.master.currentText(); opened=[p.id for p in self.config.profiles if self.runner.has_open_session(p.id)]
         if master not in opened or len(opened)<2: self._warning("Chưa đủ profile","Hãy mở master và ít nhất một follower trước khi bật sync."); return
-        self.runner.enable_sync(master); self.sync.setText("Tắt sync chuột"); self.sync_status.setText(f"MASTER: {master} → {len(opened)-1} follower")
+        self.runner.enable_sync(master); self.sync.setToolTip("Tắt sync chuột"); self.sync_status.setText(f"MASTER: {master} → {len(opened)-1} follower")
     def _save_speed(self) -> None:
         speed=next((key for key,label in SPEED_LABELS.items() if label==self.speed.currentText()),Auto2048Speed.BALANCED); self.runner.set_auto_2048_speed(speed); self.config.auto_2048_speed=speed; save_config(self.config)
     def _toggle_auto(self,pid:str) -> None:
         row=self.rows[pid]
-        if pid in self.auto_profiles: self.auto_profiles.remove(pid); row.auto.setText("Auto 2048"); self.runner.submit(pid,CommandKind.STOP_2048)
-        else: self.auto_profiles.add(pid); row.auto.setText("Dừng 2048"); self.runner.submit(pid,CommandKind.START_2048)
+        if pid in self.auto_profiles: self.auto_profiles.remove(pid); row.auto.setToolTip("Bật Auto 2048"); self.runner.submit(pid,CommandKind.STOP_2048)
+        else: self.auto_profiles.add(pid); row.auto.setToolTip("Dừng Auto 2048"); self.runner.submit(pid,CommandKind.START_2048)
     def _toggle_inspector(self,pid:str) -> None:
-        if self.inspecting_profile_id==pid: self.runner.set_inspector(pid,False); self.rows[pid].inspect.setText("Đo"); self.inspecting_profile_id=None; return
+        if self.inspecting_profile_id==pid: self.runner.set_inspector(pid,False); self.rows[pid].inspect.setToolTip("Đo tọa độ"); self.inspecting_profile_id=None; return
         if not self.runner.has_open_session(pid): self._warning("Profile chưa mở","Hãy bấm Mở profile trước khi bật đo tọa độ."); return
-        if self.inspecting_profile_id: self.runner.set_inspector(self.inspecting_profile_id,False); self.rows[self.inspecting_profile_id].inspect.setText("Đo")
-        self.inspecting_profile_id=pid; self.runner.set_inspector(pid,True); self.rows[pid].inspect.setText("Tắt đo"); self.coordinate.setText(f"[{pid}] Click vào game để lấy tọa độ…")
+        if self.inspecting_profile_id: self.runner.set_inspector(self.inspecting_profile_id,False); self.rows[self.inspecting_profile_id].inspect.setToolTip("Đo tọa độ")
+        self.inspecting_profile_id=pid; self.runner.set_inspector(pid,True); self.rows[pid].inspect.setToolTip("Tắt đo tọa độ"); self.coordinate.setText(f"[{pid}] Click vào game để lấy tọa độ…")
     def _add_profile(self) -> None:
         dialog=AccountDialog(self)
         if dialog.exec()!=QDialog.DialogCode.Accepted: return
@@ -165,7 +172,7 @@ class Dashboard(QWidget):
                 snap=self.updates.get_nowait(); row=self.rows.get(snap.profile_id)
                 if row:
                     row.status.setText(snap.message); text,bg,fg=self._state(snap.state); row.badge.setText(text); row.badge.setStyleSheet(f"background:{bg};color:{fg};border-radius:10px;padding:3px 8px;")
-                    if snap.state==WorkerState.STOPPED or "2048" in snap.message: self.auto_profiles.discard(snap.profile_id); row.auto.setText("Auto 2048")
+                    if snap.state==WorkerState.STOPPED or "2048" in snap.message: self.auto_profiles.discard(snap.profile_id); row.auto.setToolTip("Bật Auto 2048")
                 self._append_log(f"[{snap.profile_id}] {snap.message}")
         except queue.Empty: pass
         try:
