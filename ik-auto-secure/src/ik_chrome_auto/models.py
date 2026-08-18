@@ -55,7 +55,7 @@ class BrowserSettings:
     auto_resize: bool = True
     viewport_width: int = 500
     viewport_height: int = 300
-    windows_per_row: int = 3
+    windows_per_row: int = 6
     slow_mo_ms: int = 0
     startup_timeout_ms: int = 90_000
 

@@ -91,7 +91,7 @@ def load_config(path: Path) -> AppConfig:
         auto_resize=bool(browser_raw.get("auto_resize", True)),
         viewport_width=int(viewport.get("width", 500)),
         viewport_height=int(viewport.get("height", 300)),
-        windows_per_row=min(6, max(2, int(browser_raw.get("windows_per_row", 3)))),
+        windows_per_row=min(6, max(2, int(browser_raw.get("windows_per_row", 6)))),
         slow_mo_ms=int(browser_raw.get("slow_mo_ms", 0)),
         startup_timeout_ms=int(browser_raw.get("startup_timeout_ms", 90_000)),
     )

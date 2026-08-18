@@ -41,7 +41,7 @@ def test_load_resolves_relative_paths(tmp_path: Path) -> None:
     assert config.browser.low_memory_mode is True
     assert config.browser.viewport_width == 500
     assert config.browser.viewport_height == 300
-    assert config.browser.windows_per_row == 3
+    assert config.browser.windows_per_row == 6
     assert config.auto_2048_speed == Auto2048Speed.BALANCED
     assert config.capture.capture_response_bodies is False
     assert config.capture.network_capture_enabled is False
