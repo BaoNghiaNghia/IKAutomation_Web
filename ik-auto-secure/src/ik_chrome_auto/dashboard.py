@@ -558,9 +558,9 @@ class Dashboard:
 
     def _add_profile(self) -> None:
         form = ctk.CTkToplevel(self.root)
-        form.title("Thêm tài khoản game")
-        form.geometry("500x560")
-        form.minsize(460, 520)
+        form.title("Thêm nhiều tài khoản game")
+        form.geometry("760x650")
+        form.minsize(680, 540)
         form.transient(self.root)
         form.grab_set()
         form.configure(fg_color="#eaf1f8")
@@ -575,80 +575,153 @@ class Dashboard:
         ).pack(anchor="w", padx=22, pady=(20, 2))
         ctk.CTkLabel(
             card,
-            text="Username và password được lưu mã hóa trong Windows Credential Manager.",
+            text="Mỗi hàng là một tài khoản. Password được lưu mã hóa trong Windows Credential Manager.",
             text_color="#62758e",
             font=self._font(11),
-            wraplength=420,
+            wraplength=660,
             justify="left",
         ).pack(anchor="w", padx=22, pady=(0, 16))
 
-        display_name = tk.StringVar()
-        username = tk.StringVar()
-        password = tk.StringVar()
-        password_confirm = tk.StringVar()
         show_password = tk.BooleanVar(value=False)
         status = tk.StringVar()
+        rows: list[dict[str, object]] = []
+        list_frame = ctk.CTkScrollableFrame(
+            card,
+            fg_color="#eef4fb",
+            corner_radius=14,
+            scrollbar_button_color="#b8c8dc",
+            scrollbar_button_hover_color="#8fa9c7",
+        )
+        list_frame.pack(fill="both", expand=True, padx=22, pady=(0, 9))
 
-        def field(label: str, variable: tk.StringVar, *, secret: bool = False) -> ctk.CTkEntry:
-            ctk.CTkLabel(
-                card, text=label, text_color="#334861", font=self._font(12, "bold")
-            ).pack(anchor="w", padx=22, pady=(8, 3))
-            entry = ctk.CTkEntry(
-                card,
-                textvariable=variable,
-                height=38,
-                corner_radius=11,
-                font=self._font(13),
-                show="●" if secret else "",
+        def refresh_rows() -> None:
+            for index, row in enumerate(rows, start=1):
+                row["title"].configure(text=f"Tài khoản {index:02d}")
+                row["remove"].configure(state="normal" if len(rows) > 1 else "disabled")
+
+        def remove_row(row: dict[str, object]) -> None:
+            rows.remove(row)
+            row["frame"].destroy()
+            refresh_rows()
+
+        def add_row() -> None:
+            username = tk.StringVar()
+            password = tk.StringVar()
+            row_frame = ctk.CTkFrame(list_frame, fg_color="#f9fcff", corner_radius=12)
+            row_frame.pack(fill="x", padx=8, pady=(8, 0))
+            row_frame.columnconfigure(0, weight=1)
+            row_frame.columnconfigure(1, weight=1)
+            title = ctk.CTkLabel(
+                row_frame,
+                text="",
+                text_color="#20324a",
+                font=self._font(13, "bold"),
             )
-            entry.pack(fill="x", padx=22)
-            return entry
-
-        name_entry = field("Tên hiển thị profile", display_name)
-        username_entry = field("Game username / email", username)
-        password_entry = field("Password", password, secret=True)
-        confirm_entry = field("Nhập lại password", password_confirm, secret=True)
+            title.grid(row=0, column=0, sticky="w", padx=12, pady=(8, 2))
+            row: dict[str, object] = {}
+            remove_button = self._button(
+                row_frame, "Xóa hàng", lambda: remove_row(row), "soft"
+            )
+            remove_button.grid(row=0, column=1, sticky="e", padx=12, pady=(8, 2))
+            ctk.CTkLabel(
+                row_frame, text="Username / email", text_color="#62758e", font=self._font(11)
+            ).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 2))
+            ctk.CTkLabel(
+                row_frame, text="Password", text_color="#62758e", font=self._font(11)
+            ).grid(row=1, column=1, sticky="w", padx=12, pady=(2, 2))
+            username_entry = ctk.CTkEntry(
+                row_frame,
+                textvariable=username,
+                placeholder_text="Nhập username hoặc email",
+                height=36,
+                corner_radius=10,
+                font=self._font(12),
+            )
+            username_entry.grid(row=2, column=0, sticky="ew", padx=(12, 5), pady=(0, 10))
+            password_entry = ctk.CTkEntry(
+                row_frame,
+                textvariable=password,
+                placeholder_text="Nhập password",
+                show="●" if not show_password.get() else "",
+                height=36,
+                corner_radius=10,
+                font=self._font(12),
+            )
+            password_entry.grid(row=2, column=1, sticky="ew", padx=(5, 12), pady=(0, 10))
+            row.update(
+                frame=row_frame,
+                title=title,
+                username=username,
+                password=password,
+                password_entry=password_entry,
+                remove=remove_button,
+            )
+            rows.append(row)
+            refresh_rows()
+            username_entry.focus_set()
 
         def toggle_password() -> None:
             marker = "" if show_password.get() else "●"
-            password_entry.configure(show=marker)
-            confirm_entry.configure(show=marker)
+            for row in rows:
+                row["password_entry"].configure(show=marker)
 
+        add_row()
+        controls = ctk.CTkFrame(card, fg_color="transparent")
+        controls.pack(fill="x", padx=22, pady=(0, 4))
+        self._button(controls, "+ Thêm hàng", add_row, "soft").pack(side="left")
         ctk.CTkCheckBox(
-            card,
-            text="Hiển thị password",
+            controls,
+            text="Hiện password",
             variable=show_password,
             command=toggle_password,
             font=self._font(11),
             checkbox_width=18,
             checkbox_height=18,
-        ).pack(anchor="w", padx=22, pady=(9, 2))
+        ).pack(side="right")
         ctk.CTkLabel(
             card,
             textvariable=status,
             text_color="#bd4a57",
             font=self._font(11),
-            wraplength=420,
+            wraplength=660,
             justify="left",
-        ).pack(anchor="w", padx=22)
+        ).pack(anchor="w", padx=22, pady=(0, 2))
 
-        def save_account() -> None:
-            name = display_name.get().strip()
-            account_username = username.get().strip()
-            account_password = password.get()
-            confirmation = password_confirm.get()
-            if not name or not account_username or not account_password:
-                status.set("Hãy nhập tên hiển thị, username và password.")
+        def save_accounts() -> None:
+            account_rows = [
+                (row["username"].get().strip(), row["password"].get()) for row in rows
+            ]
+            if not any(username or password for username, password in account_rows):
+                status.set("Hãy nhập username và password cho ít nhất một tài khoản.")
                 return
-            if account_password != confirmation:
-                password.set("")
-                password_confirm.set("")
-                status.set("Password nhập lại không khớp. Hãy nhập lại.")
-                password_entry.focus_set()
+            invalid = [
+                str(index)
+                for index, (username, password) in enumerate(account_rows, start=1)
+                if bool(username) != bool(password)
+            ]
+            if invalid:
+                status.set("Hàng " + ", ".join(invalid) + " cần có đủ username và password.")
                 return
-            profile_id = unique_profile_id(name, {profile.id for profile in self.config.profiles})
-            credential_saved = False
-            profile_added = False
+            account_rows = [item for item in account_rows if item[0] and item[1]]
+            existing_ids = {profile.id for profile in self.config.profiles}
+            profiles: list[ProfileConfig] = []
+            credentials: list[tuple[str, str, str]] = []
+            start_number = len(self.config.profiles) + 1
+            for offset, (account_username, account_password) in enumerate(account_rows):
+                number = start_number + offset
+                profile_id = unique_profile_id(f"account-{number}", existing_ids)
+                existing_ids.add(profile_id)
+                profiles.append(
+                    ProfileConfig(
+                        id=profile_id,
+                        name=f"Tài khoản {number:02d}",
+                        mode=ProfileMode.MANAGED,
+                        user_data_dir=(self.config.data_dir / "profiles" / profile_id).resolve(),
+                        enabled=True,
+                    )
+                )
+                credentials.append((profile_id, account_username, account_password))
+            saved_ids: list[str] = []
             store = None
             try:
                 from ik_chrome_auto.credential_store import (
@@ -657,53 +730,45 @@ class Dashboard:
                 )
 
                 store = WindowsCredentialStore()
-                store.save(
-                    AccountCredential(profile_id, account_username, account_password)
-                )
-                credential_saved = True
-                profile = ProfileConfig(
-                    id=profile_id,
-                    name=name,
-                    mode=ProfileMode.MANAGED,
-                    user_data_dir=(self.config.data_dir / "profiles" / profile_id).resolve(),
-                    enabled=True,
-                )
-                self.config.profiles.append(profile)
-                profile_added = True
+                for profile_id, account_username, account_password in credentials:
+                    store.save(AccountCredential(profile_id, account_username, account_password))
+                    saved_ids.append(profile_id)
+                self.config.profiles.extend(profiles)
                 save_config(self.config)
-                profile.user_data_dir.mkdir(parents=True, exist_ok=True)
+                for profile in profiles:
+                    assert profile.user_data_dir is not None
+                    profile.user_data_dir.mkdir(parents=True, exist_ok=True)
                 self.runner.sync_profiles()
                 self._draw_rows()
             except Exception as error:
-                if profile_added:
-                    self.config.profiles = [
-                        item for item in self.config.profiles if item.id != profile_id
-                    ]
+                if profiles:
+                    new_ids = {profile.id for profile in profiles}
+                    self.config.profiles = [item for item in self.config.profiles if item.id not in new_ids]
                     try:
                         save_config(self.config)
                     except Exception:
                         pass
-                if credential_saved and store is not None:
-                    try:
-                        store.delete(profile_id)
-                    except Exception:
-                        pass
+                if store is not None:
+                    for profile_id in saved_ids:
+                        try:
+                            store.delete(profile_id)
+                        except Exception:
+                            pass
                 status.set(f"Không lưu được tài khoản: {error}")
                 return
             finally:
                 # Do not retain secrets in Tk variables after the save attempt.
-                password.set("")
-                password_confirm.set("")
-            self._append_log(f"Đã thêm profile {name} ({profile_id}); credential đã mã hóa")
+                for row in rows:
+                    row["password"].set("")
+            self._append_log(f"Đã thêm {len(profiles)} profile; credential đã mã hóa")
             form.destroy()
 
         actions = ctk.CTkFrame(card, fg_color="transparent")
-        actions.pack(fill="x", padx=22, pady=(14, 18))
+        actions.pack(fill="x", padx=22, pady=(8, 18))
         self._button(actions, "Hủy", form.destroy, "soft").pack(side="right")
-        self._button(actions, "Lưu tài khoản", save_account, "primary").pack(
+        self._button(actions, "Lưu tất cả", save_accounts, "primary").pack(
             side="right", padx=(0, 8)
         )
-        name_entry.focus_set()
 
     def _remove_profile(self, profile_id: str) -> None:
         profile = self.config.profile(profile_id)
