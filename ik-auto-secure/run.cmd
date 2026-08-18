@@ -72,5 +72,5 @@ if not defined BOOTSTRAP_PYTHON (
   python -c "import sys; raise SystemExit(0 if (3,11) ^<= sys.version_info[:2] ^< (3,14) else 1)" >nul 2>nul
   if !errorlevel! equ 0 set "BOOTSTRAP_PYTHON=python"
 )
-if not defined BOOTSTRAP_PYTHON if exist "%LocalAppData%\Programs\Python\Python313\python.exe" set "BOOTSTRAP_PYTHON=\"%LocalAppData%\Programs\Python\Python313\python.exe\""
+if not defined BOOTSTRAP_PYTHON if exist "%LocalAppData%\Programs\Python\Python313\python.exe" set "BOOTSTRAP_PYTHON="%LocalAppData%\Programs\Python\Python313\python.exe""
 exit /b 0
