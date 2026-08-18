@@ -93,12 +93,14 @@ class Dashboard:
         self.root.title("IK Auto — Browser Control")
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
-        width = max(860, round(screen_width * 0.60))
-        height = max(570, round(screen_height * 0.64))
-        left = max(0, (screen_width - width) // 2)
-        top = max(0, (screen_height - height) // 2)
+        width = max(360, screen_width // 3)
+        height = max(260, screen_height // 3)
+        # Leave room for the Windows taskbar while anchoring the compact
+        # control panel at the lower-right corner of the active display.
+        left = max(0, screen_width - width - 12)
+        top = max(0, screen_height - height - 48)
         self.root.geometry(f"{width}x{height}+{left}+{top}")
-        self.root.minsize(860, 570)
+        self.root.minsize(360, 260)
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         ctk.set_appearance_mode("light")
@@ -133,7 +135,12 @@ class Dashboard:
         body.columnconfigure(0, weight=0, minsize=260)
         body.columnconfigure(1, weight=1)
         body.rowconfigure(0, weight=1)
-        left_panel = ctk.CTkFrame(body, fg_color="transparent")
+        left_panel = ctk.CTkScrollableFrame(
+            body,
+            fg_color="transparent",
+            scrollbar_button_color="#b8c8dc",
+            scrollbar_button_hover_color="#8fa9c7",
+        )
         left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         right_panel = ctk.CTkFrame(body, fg_color="transparent")
         right_panel.grid(row=0, column=1, sticky="nsew")
