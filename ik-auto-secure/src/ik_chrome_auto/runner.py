@@ -87,6 +87,7 @@ class ProfileWorker:
         on_coordinate: CoordinateCallback,
         *,
         drag_item_visible: bool = True,
+        scrollbars_visible: bool = True,
         topmost: bool = False,
         auto_2048_speed: Auto2048Speed = Auto2048Speed.BALANCED,
     ) -> None:
@@ -107,6 +108,7 @@ class ProfileWorker:
         self._sync_source_enabled = False
         self._inspector_enabled = False
         self._drag_item_visible = drag_item_visible
+        self._scrollbars_visible = scrollbars_visible
         self._topmost = topmost
         self._auto_2048: Auto2048Player | None = None
         self._auto_2048_next_at = 0.0
@@ -236,6 +238,15 @@ class ProfileWorker:
                         ),
                     )
                     continue
+                if command.kind == CommandKind.SET_SCROLLBARS:
+                    self._scrollbars_visible = bool(command.payload.get("visible", True))
+                    if self.session is not None:
+                        self.session.set_scrollbars_visible(self._scrollbars_visible)
+                    self._publish(
+                        WorkerState.READY if self.session is not None else WorkerState.STOPPED,
+                        "Đã hiện thanh cuộn" if self._scrollbars_visible else "Đã ẩn thanh cuộn",
+                    )
+                    continue
                 if command.kind == CommandKind.SET_TOPMOST:
                     self._topmost = bool(command.payload.get("enabled", False))
                     if self.session is not None:
@@ -306,6 +317,7 @@ class ProfileWorker:
             self.session.set_sync_source(self._sync_source_enabled)
             self.session.set_inspector(self._inspector_enabled)
             self.session.set_drag_item_visible(self._drag_item_visible)
+            self.session.set_scrollbars_visible(self._scrollbars_visible)
             if self._topmost:
                 self.session.set_topmost(True)
         elif navigate:
@@ -452,6 +464,7 @@ class MultiProfileRunner:
         self.sync_enabled = False
         self.sync_master_id: str | None = None
         self.drag_items_visible = True
+        self.scrollbars_visible = True
         self.windows_topmost = False
         self.auto_2048_speed = config.auto_2048_speed
         self._resource_cpu_samples: dict[str, tuple[float, float]] = {}
@@ -474,6 +487,7 @@ class MultiProfileRunner:
                     self._on_input,
                     self.on_coordinate,
                     drag_item_visible=self.drag_items_visible,
+                    scrollbars_visible=self.scrollbars_visible,
                     topmost=self.windows_topmost,
                     auto_2048_speed=self.auto_2048_speed,
                 )
@@ -542,6 +556,20 @@ class MultiProfileRunner:
                 continue
             worker.submit(
                 WorkerCommand(CommandKind.SET_DRAG_ITEM, {"visible": self.drag_items_visible})
+            )
+            if worker.session is not None:
+                count += 1
+        return count
+
+    def set_all_scrollbars_visible(self, visible: bool) -> int:
+        self.scrollbars_visible = bool(visible)
+        count = 0
+        for profile in self.config.profiles:
+            worker = self.workers.get(profile.id)
+            if worker is None:
+                continue
+            worker.submit(
+                WorkerCommand(CommandKind.SET_SCROLLBARS, {"visible": self.scrollbars_visible})
             )
             if worker.session is not None:
                 count += 1

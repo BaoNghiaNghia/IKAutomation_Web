@@ -60,6 +60,7 @@ class Dashboard(QWidget):
         self._auto_arrange_states: dict[str, WorkerState] = {}
         self._auto_arrange_deadline = 0.0
         self.drag_visible = True
+        self.scrollbars_visible = True
         self._last_resources = self._last_trim = 0.0
         self._build()
         self._draw_rows()
@@ -77,6 +78,13 @@ class Dashboard(QWidget):
             CardWidget { background: #ffffff; border: 1px solid #dce6f3; border-radius: 14px; }
             QLabel { background: transparent; color: #172b4d; }
             QScrollArea, QScrollArea > QWidget > QWidget { border: none; background: transparent; }
+            QScrollBar:vertical { width: 6px; margin: 3px 1px; background: transparent; }
+            QScrollBar::handle:vertical { min-height: 24px; border-radius: 3px; background: #b8c7d9; }
+            QScrollBar::handle:vertical:hover { background: #8fa6c2; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar:horizontal { height: 6px; margin: 1px 3px; background: transparent; }
+            QScrollBar::handle:horizontal { min-width: 24px; border-radius: 3px; background: #b8c7d9; }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
             QTextEdit { background: #f5f8fc; border: 1px solid #dce6f3; border-radius: 9px; color: #52657d; }
         """)
         root = QVBoxLayout(self); root.setContentsMargins(14, 12, 14, 14); root.setSpacing(10)
@@ -84,7 +92,7 @@ class Dashboard(QWidget):
         body = QHBoxLayout(); root.addLayout(body, 1)
         left = QWidget(); left.setMinimumWidth(340); left.setMaximumWidth(390); ll = QVBoxLayout(left); ll.setContentsMargins(0,0,0,0); ll.setSpacing(8); body.addWidget(left)
         accounts = self._card(); al = QVBoxLayout(accounts); al.addWidget(StrongBodyLabel("Tài khoản Chrome")); al.addWidget(self._muted("Mỗi tài khoản có một phiên browser riêng, lưu cục bộ.")); actions = QHBoxLayout(); add = self._icon_button(FIF.ADD, "Thêm tài khoản", primary=True); add.clicked.connect(self._add_profile); open_all = PrimaryPushButton("Mở tất cả"); open_all.clicked.connect(self._open_all_and_arrange); stop_all = PushButton("Dừng tất cả"); stop_all.clicked.connect(self.runner.stop_all); actions.addWidget(add); actions.addWidget(open_all); actions.addWidget(stop_all); actions.addStretch(); al.addLayout(actions); ll.addWidget(accounts)
-        arrange_card = self._card(); acl = QVBoxLayout(arrange_card); acl.addWidget(StrongBodyLabel("Sắp xếp cửa sổ")); acl.addWidget(self._muted("Chọn số cửa sổ trên mỗi hàng rồi áp dụng cho Chrome đang mở.")); row = QHBoxLayout(); row.addWidget(QLabel("Số cửa sổ / hàng")); row.addStretch(); self.windows_per_row = ComboBox(); self.windows_per_row.addItems(["2","3","4","5","6"]); self.windows_per_row.setCurrentText(str(self.config.browser.windows_per_row)); self.windows_per_row.currentTextChanged.connect(self._apply_windows_per_row); row.addWidget(self.windows_per_row); acl.addLayout(row); apply = PrimaryPushButton("Áp dụng & sắp xếp"); apply.clicked.connect(self._arrange); acl.addWidget(apply); tools = QHBoxLayout(); self.drag = PushButton("Ẩn nút kéo"); self.drag.clicked.connect(self._toggle_drag); self.pin = CheckBox("Luôn nổi trên các cửa sổ khác"); self.pin.stateChanged.connect(lambda _s: self.runner.set_all_topmost(self.pin.isChecked())); tools.addWidget(self.drag); tools.addWidget(self.pin); acl.addLayout(tools); ll.addWidget(arrange_card)
+        arrange_card = self._card(); acl = QVBoxLayout(arrange_card); acl.addWidget(StrongBodyLabel("Sắp xếp cửa sổ")); acl.addWidget(self._muted("Chọn số cửa sổ trên mỗi hàng rồi áp dụng cho Chrome đang mở.")); row = QHBoxLayout(); row.addWidget(QLabel("Số cửa sổ / hàng")); row.addStretch(); self.windows_per_row = ComboBox(); self.windows_per_row.addItems(["2","3","4","5","6"]); self.windows_per_row.setCurrentText(str(self.config.browser.windows_per_row)); self.windows_per_row.currentTextChanged.connect(self._apply_windows_per_row); row.addWidget(self.windows_per_row); acl.addLayout(row); apply = PrimaryPushButton("Áp dụng & sắp xếp"); apply.clicked.connect(self._arrange); acl.addWidget(apply); tools = QHBoxLayout(); self.drag = PushButton("Ẩn nút kéo"); self.drag.clicked.connect(self._toggle_drag); self.scrollbars = PushButton("Ẩn thanh cuộn"); self.scrollbars.clicked.connect(self._toggle_scrollbars); self.pin = CheckBox("Luôn nổi trên các cửa sổ khác"); self.pin.stateChanged.connect(lambda _s: self.runner.set_all_topmost(self.pin.isChecked())); tools.addWidget(self.drag); tools.addWidget(self.scrollbars); acl.addLayout(tools); acl.addWidget(self.pin); ll.addWidget(arrange_card)
         automation = self._card(); au = QVBoxLayout(automation); au.addWidget(StrongBodyLabel("Tự động hóa")); au.addWidget(self._muted("Sync thao tác · Auto 2048")); sync = QHBoxLayout(); self.master = ComboBox(); sync.addWidget(self.master,1); self.sync = PushButton("Bật sync chuột"); self.sync.clicked.connect(self._toggle_sync); sync.addWidget(self.sync); au.addLayout(sync); self.sync_status = self._muted("Sync đang tắt"); au.addWidget(self.sync_status); speed = QHBoxLayout(); self.speed = ComboBox(); self.speed.addItems(list(SPEED_LABELS.values())); self.speed.setCurrentText(SPEED_LABELS[self.config.auto_2048_speed]); save_speed = PushButton("Lưu tốc độ"); save_speed.clicked.connect(self._save_speed); speed.addWidget(self.speed,1); speed.addWidget(save_speed); au.addLayout(speed); ll.addWidget(automation); ll.addStretch()
         right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8); body.addWidget(right,1)
         metrics = QHBoxLayout(); self.total, self.opened, self.ram, self.cpu = QLabel("0"), QLabel("0"), QLabel("0 MB"), QLabel("0.0%");
@@ -155,6 +163,14 @@ class Dashboard(QWidget):
         self._append_log("Chưa có cửa sổ để sắp xếp" if not count else f"Đã sắp xếp {count} cửa sổ")
     def _toggle_drag(self) -> None:
         self.drag_visible=not self.drag_visible; self.runner.set_all_drag_items_visible(self.drag_visible); self.drag.setText("Ẩn nút kéo" if self.drag_visible else "Hiện nút kéo")
+    def _toggle_scrollbars(self) -> None:
+        self.scrollbars_visible = not self.scrollbars_visible
+        count = self.runner.set_all_scrollbars_visible(self.scrollbars_visible)
+        self.scrollbars.setText("Ẩn thanh cuộn" if self.scrollbars_visible else "Hiện thanh cuộn")
+        self._append_log(
+            ("Đã hiện" if self.scrollbars_visible else "Đã ẩn")
+            + f" thanh cuộn trên {count} Chrome đang mở"
+        )
     def _toggle_sync(self) -> None:
         if self.runner.sync_enabled: self.runner.disable_sync(); self.sync.setText("Bật sync chuột"); self.sync_status.setText("Sync đang tắt"); return
         master=self.master.currentText(); opened=[p.id for p in self.config.profiles if self.runner.has_open_session(p.id)]

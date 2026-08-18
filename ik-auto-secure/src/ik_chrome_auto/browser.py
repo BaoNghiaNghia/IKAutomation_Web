@@ -92,6 +92,7 @@ class ChromeProfileSession:
         self._sync_source = False
         self._inspector_enabled = False
         self._drag_item_visible = True
+        self._scrollbars_visible = True
         self._window_handle: int | None = None
         self._topmost = False
         self._configured_frames: dict[int, str] = {}
@@ -693,6 +694,11 @@ class ChromeProfileSession:
         self._drag_item_visible = bool(visible)
         self._configure_interaction_frames(force=True)
 
+    def set_scrollbars_visible(self, visible: bool) -> None:
+        """Show or hide page scrollbars without changing scroll behaviour."""
+        self._scrollbars_visible = bool(visible)
+        self._configure_interaction_frames(force=True)
+
     @property
     def window_handle(self) -> int | None:
         if is_window(self._window_handle):
@@ -802,7 +808,7 @@ class ChromeProfileSession:
             active_keys.add(key)
             signature = (
                 f"{frame.url}|{self._sync_source}|{self._inspector_enabled}|"
-                f"{self._drag_item_visible}"
+                f"{self._drag_item_visible}|{self._scrollbars_visible}"
             )
             if not force and self._configured_frames.get(key) == signature:
                 continue
@@ -816,6 +822,22 @@ class ChromeProfileSession:
                 frame.evaluate(
                     "visible => window.__IK_SET_DRAG_ITEM_VISIBLE?.(visible)",
                     self._drag_item_visible,
+                )
+                frame.evaluate(
+                    """visible => {
+                        const styleId = '__ik_auto_scrollbars';
+                        let style = document.getElementById(styleId);
+                        if (!style) {
+                            style = document.createElement('style');
+                            style.id = styleId;
+                            (document.head || document.documentElement).appendChild(style);
+                        }
+                        style.textContent = visible ? '' : `
+                            html, body, * { scrollbar-width: none !important; -ms-overflow-style: none !important; }
+                            *::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
+                        `;
+                    }""",
+                    self._scrollbars_visible,
                 )
                 self._configured_frames[key] = signature
             except Exception:

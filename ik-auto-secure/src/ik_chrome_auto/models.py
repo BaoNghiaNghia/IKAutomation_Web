@@ -36,6 +36,7 @@ class CommandKind(StrEnum):
     SET_SYNC_SOURCE = "set_sync_source"
     SET_INSPECTOR = "set_inspector"
     SET_DRAG_ITEM = "set_drag_item"
+    SET_SCROLLBARS = "set_scrollbars"
     MOVE_WINDOW = "move_window"
     SET_TOPMOST = "set_topmost"
     START_2048 = "start_2048"

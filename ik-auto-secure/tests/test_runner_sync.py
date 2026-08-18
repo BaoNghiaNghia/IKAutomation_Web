@@ -84,6 +84,31 @@ def test_global_drag_toggle_routes_to_every_profile() -> None:
     )
 
 
+def test_global_scrollbar_toggle_routes_to_every_profile() -> None:
+    runner = make_runner()
+    runner.config = type(
+        "Config",
+        (),
+        {
+            "profiles": [
+                type("Profile", (), {"id": "master"})(),
+                type("Profile", (), {"id": "follower-open"})(),
+                type("Profile", (), {"id": "follower-closed"})(),
+            ]
+        },
+    )()
+
+    opened = runner.set_all_scrollbars_visible(False)
+
+    assert opened == 2
+    assert runner.scrollbars_visible is False
+    assert all(
+        worker.commands[-1].kind == CommandKind.SET_SCROLLBARS
+        and worker.commands[-1].payload == {"visible": False}
+        for worker in runner.workers.values()
+    )
+
+
 def test_2048_speed_modes_are_ordered_from_safe_to_turbo() -> None:
     delays = [
         AUTO_2048_TIMINGS[speed].move_delay_seconds
