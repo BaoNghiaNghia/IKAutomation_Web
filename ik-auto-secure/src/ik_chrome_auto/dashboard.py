@@ -7,8 +7,10 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import messagebox, simpledialog
 from tkinter.scrolledtext import ScrolledText
+
+import ttkbootstrap as ttk
 
 from ik_chrome_auto.config import (
     ensure_data_dirs,
@@ -101,12 +103,8 @@ class Dashboard:
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
 
-        style = ttk.Style(self.root)
-        style.configure("Accent.TButton", font=("Segoe UI", 9, "bold"), padding=(9, 5))
-        style.configure("Danger.TButton", font=("Segoe UI", 9, "bold"), padding=(9, 5))
-        style.configure("Compact.TButton", font=("Segoe UI", 8), padding=(6, 3))
-        style.configure("CardTitle.TLabel", foreground="#64748b", font=("Segoe UI", 9))
-        style.configure("CardValue.TLabel", foreground="#0f172a", font=("Segoe UI", 15, "bold"))
+        style = ttk.Style()
+        style.configure("TButton", font=("Segoe UI", 8), padding=(7, 3))
         self.root.configure(bg="#f5f7fb")
 
         parent = tk.Frame(self.root, bg="#f5f7fb", padx=12, pady=10)
@@ -147,12 +145,12 @@ class Dashboard:
         profile_head = tk.Frame(profiles_card, bg="#ffffff")
         profile_head.pack(fill="x")
         tk.Label(profile_head, text="Chrome profiles", bg="#ffffff", fg="#0f172a", font=("Segoe UI", 11, "bold")).pack(side="left")
-        ttk.Button(profile_head, text="+ Thêm", command=self._add_profile, style="Accent.TButton").pack(side="right")
+        ttk.Button(profile_head, text="+ Thêm", command=self._add_profile, bootstyle="primary").pack(side="right")
         tk.Label(profiles_card, text="Phiên browser độc lập, lưu cục bộ.", bg="#ffffff", fg="#64748b", font=("Segoe UI", 8)).pack(anchor="w", pady=(3, 7))
         action_row = tk.Frame(profiles_card, bg="#ffffff")
         action_row.pack(fill="x")
-        ttk.Button(action_row, text="Mở tất cả", command=self.runner.open_all, style="Accent.TButton").pack(side="left", fill="x", expand=True)
-        ttk.Button(action_row, text="Dừng tất cả", command=self.runner.stop_all, style="Danger.TButton").pack(side="left", fill="x", expand=True, padx=(6, 0))
+        ttk.Button(action_row, text="Mở tất cả", command=self.runner.open_all, bootstyle="primary").pack(side="left", fill="x", expand=True)
+        ttk.Button(action_row, text="Dừng tất cả", command=self.runner.stop_all, bootstyle="danger").pack(side="left", fill="x", expand=True, padx=(6, 0))
 
         viewport_card = self._card(left_panel)
         viewport_card.pack(fill="x", pady=(0, 7))
@@ -163,12 +161,12 @@ class Dashboard:
         tk.Label(viewport_row, text="×", bg="#ffffff", fg="#64748b").pack(side="left", padx=5)
         ttk.Entry(viewport_row, textvariable=self.viewport_height, width=7).pack(side="left")
         tk.Label(viewport_row, text="px", bg="#ffffff", fg="#64748b").pack(side="left", padx=5)
-        ttk.Button(viewport_row, text="Áp dụng", command=self._apply_size_all, style="Compact.TButton").pack(side="right")
+        ttk.Button(viewport_row, text="Áp dụng", command=self._apply_size_all, bootstyle="primary-outline").pack(side="right")
         ttk.Checkbutton(viewport_card, text="Tự resize khi mở", variable=self.auto_resize).pack(anchor="w")
         window_row = tk.Frame(viewport_card, bg="#ffffff")
         window_row.pack(fill="x", pady=(6, 0))
-        ttk.Button(window_row, text="Sắp xếp", command=self._arrange_windows, style="Compact.TButton").pack(side="left")
-        ttk.Button(window_row, textvariable=self.drag_button_text, command=self._toggle_all_drag_items, style="Compact.TButton").pack(side="left", padx=(5, 0))
+        ttk.Button(window_row, text="Sắp xếp", command=self._arrange_windows, bootstyle="secondary-outline").pack(side="left")
+        ttk.Button(window_row, textvariable=self.drag_button_text, command=self._toggle_all_drag_items, bootstyle="secondary-outline").pack(side="left", padx=(5, 0))
         ttk.Checkbutton(viewport_card, text="Ghim cửa sổ lên trên", variable=self.pin_windows, command=self._toggle_pin_windows).pack(anchor="w", pady=(4, 0))
 
         automation_card = self._card(left_panel)
@@ -178,7 +176,7 @@ class Dashboard:
         master_row.pack(fill="x", pady=(6, 4))
         self.master_box = ttk.Combobox(master_row, textvariable=self.sync_master, state="readonly", width=16)
         self.master_box.pack(side="left", fill="x", expand=True)
-        ttk.Button(master_row, textvariable=self.sync_button_text, command=self._toggle_sync, style="Compact.TButton").pack(side="left", padx=(6, 0))
+        ttk.Button(master_row, textvariable=self.sync_button_text, command=self._toggle_sync, bootstyle="info-outline").pack(side="left", padx=(6, 0))
         tk.Label(automation_card, textvariable=self.sync_status, bg="#ffffff", fg="#2563eb", font=("Segoe UI", 9)).pack(anchor="w")
         ttk.Separator(automation_card, orient="horizontal").pack(fill="x", pady=7)
         tk.Label(automation_card, text="Tốc độ Auto 2048", bg="#ffffff", fg="#475569", font=("Segoe UI", 9, "bold")).pack(anchor="w")
@@ -186,7 +184,7 @@ class Dashboard:
         speed_row.pack(fill="x", pady=(5, 0))
         self.auto_2048_speed_box = ttk.Combobox(speed_row, textvariable=self.auto_2048_speed_text, values=tuple(AUTO_2048_SPEED_LABELS.values()), state="readonly", width=18)
         self.auto_2048_speed_box.pack(side="left", fill="x", expand=True)
-        ttk.Button(speed_row, text="Lưu", command=self._apply_auto_2048_speed, style="Compact.TButton").pack(side="left", padx=(6, 0))
+        ttk.Button(speed_row, text="Lưu", command=self._apply_auto_2048_speed, bootstyle="secondary-outline").pack(side="left", padx=(6, 0))
 
         overview = self._card(right_panel)
         overview.grid(row=0, column=0, sticky="ew", pady=(0, 7))
@@ -234,8 +232,8 @@ class Dashboard:
         coord_head = tk.Frame(coordinate_frame, bg="#ffffff")
         coord_head.pack(fill="x")
         tk.Label(coord_head, text="Lấy tọa độ", bg="#ffffff", fg="#0f172a", font=("Segoe UI", 10, "bold")).pack(side="left")
-        ttk.Button(coord_head, text="Copy x,y", command=self._copy_coordinate_xy, style="Compact.TButton").pack(side="right")
-        ttk.Button(coord_head, text="Copy JSON", command=self._copy_coordinate_json, style="Compact.TButton").pack(side="right", padx=5)
+        ttk.Button(coord_head, text="Copy x,y", command=self._copy_coordinate_xy, bootstyle="secondary-outline").pack(side="right")
+        ttk.Button(coord_head, text="Copy JSON", command=self._copy_coordinate_json, bootstyle="secondary-outline").pack(side="right", padx=5)
         tk.Label(coordinate_frame, textvariable=self.coordinate_text, bg="#ffffff", fg="#475569", font=("Consolas", 9), anchor="w", justify="left", wraplength=700).pack(fill="x", pady=(5, 0))
         log_frame = self._card(bottom)
         log_frame.grid(row=0, column=1, sticky="nsew")
@@ -299,13 +297,13 @@ class Dashboard:
                 controls,
                 text="Mở",
                 command=lambda profile_id=profile.id: self._submit(profile_id, CommandKind.OPEN),
-                style="Compact.TButton",
+                bootstyle="primary-outline",
             ).pack(side="left")
             auto_2048_button = ttk.Button(
                 controls,
                 text="Auto 2048",
                 command=lambda profile_id=profile.id: self._toggle_auto_2048(profile_id),
-                style="Compact.TButton",
+                bootstyle="info-outline",
             )
             auto_2048_button.pack(side="left", padx=(5, 0))
             ttk.Button(
@@ -314,20 +312,20 @@ class Dashboard:
                 command=lambda profile_id=profile.id: self._submit(
                     profile_id, CommandKind.SCREENSHOT
                 ),
-                style="Compact.TButton",
+                bootstyle="secondary-outline",
             ).pack(side="left", padx=5)
             inspect_button = ttk.Button(
                 controls,
                 text="Đo",
                 command=lambda profile_id=profile.id: self._toggle_inspector(profile_id),
-                style="Compact.TButton",
+                bootstyle="secondary-outline",
             )
             inspect_button.pack(side="left", padx=5)
             ttk.Button(
                 controls,
                 text="Xóa",
                 command=lambda profile_id=profile.id: self._remove_profile(profile_id),
-                style="Compact.TButton",
+                bootstyle="danger-outline",
             ).pack(side="right")
             self.rows[profile.id] = ProfileRow(
                 profile,
@@ -712,6 +710,6 @@ class Dashboard:
 
 
 def run_dashboard(config_path: Path) -> None:
-    root = tk.Tk()
+    root = ttk.Window(themename="litera")
     Dashboard(root, config_path)
     root.mainloop()
