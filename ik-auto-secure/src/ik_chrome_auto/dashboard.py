@@ -688,8 +688,17 @@ class Dashboard:
             )
             title.grid(row=0, column=0, sticky="w", padx=10, pady=(6, 3))
             row: dict[str, object] = {}
-            remove_button = self._button(
-                row_frame, "Xóa hàng", lambda: remove_row(row), "soft"
+            remove_button = ctk.CTkButton(
+                row_frame,
+                text="×",
+                command=lambda: remove_row(row),
+                width=30,
+                height=28,
+                corner_radius=9,
+                fg_color="#e8eef5",
+                hover_color="#d7e0ea",
+                text_color="#718096",
+                font=self._font(18, "bold"),
             )
             remove_button.grid(row=0, column=1, sticky="e", padx=10, pady=(6, 3))
             username_entry = ctk.CTkEntry(
