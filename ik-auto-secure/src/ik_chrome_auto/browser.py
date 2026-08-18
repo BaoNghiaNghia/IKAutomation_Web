@@ -92,7 +92,7 @@ class ChromeProfileSession:
         self._sync_source = False
         self._inspector_enabled = False
         self._drag_item_visible = True
-        self._scrollbars_visible = True
+        self._scrollbars_visible = False
         self._window_handle: int | None = None
         self._topmost = False
         self._configured_frames: dict[int, str] = {}

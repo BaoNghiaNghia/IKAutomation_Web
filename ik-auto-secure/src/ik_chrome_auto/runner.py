@@ -87,7 +87,7 @@ class ProfileWorker:
         on_coordinate: CoordinateCallback,
         *,
         drag_item_visible: bool = True,
-        scrollbars_visible: bool = True,
+        scrollbars_visible: bool = False,
         topmost: bool = False,
         auto_2048_speed: Auto2048Speed = Auto2048Speed.BALANCED,
     ) -> None:
@@ -464,7 +464,7 @@ class MultiProfileRunner:
         self.sync_enabled = False
         self.sync_master_id: str | None = None
         self.drag_items_visible = True
-        self.scrollbars_visible = True
+        self.scrollbars_visible = False
         self.windows_topmost = False
         self.auto_2048_speed = config.auto_2048_speed
         self._resource_cpu_samples: dict[str, tuple[float, float]] = {}
