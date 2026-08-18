@@ -7,7 +7,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import messagebox, simpledialog
+from tkinter import messagebox
 
 import customtkinter as ctk
 
@@ -552,23 +552,153 @@ class Dashboard:
         self._append_log("Đã copy JSON tọa độ")
 
     def _add_profile(self) -> None:
-        name = simpledialog.askstring("Thêm Chrome profile", "Tên tài khoản/profile:", parent=self.root)
-        if not name:
-            return
-        profile_id = unique_profile_id(name, {profile.id for profile in self.config.profiles})
-        profile = ProfileConfig(
-            id=profile_id,
-            name=name.strip(),
-            mode=ProfileMode.MANAGED,
-            user_data_dir=(self.config.data_dir / "profiles" / profile_id).resolve(),
-            enabled=True,
+        form = ctk.CTkToplevel(self.root)
+        form.title("Thêm tài khoản game")
+        form.geometry("500x560")
+        form.minsize(460, 520)
+        form.transient(self.root)
+        form.grab_set()
+        form.configure(fg_color="#eaf1f8")
+
+        card = ctk.CTkFrame(form, fg_color="#f9fcff", corner_radius=20)
+        card.pack(fill="both", expand=True, padx=18, pady=18)
+        ctk.CTkLabel(
+            card,
+            text="Thêm tài khoản game",
+            text_color="#20324a",
+            font=("Segoe UI", 22, "bold"),
+        ).pack(anchor="w", padx=22, pady=(20, 2))
+        ctk.CTkLabel(
+            card,
+            text="Username và password được lưu mã hóa trong Windows Credential Manager.",
+            text_color="#62758e",
+            font=("Segoe UI", 11),
+            wraplength=420,
+            justify="left",
+        ).pack(anchor="w", padx=22, pady=(0, 16))
+
+        display_name = tk.StringVar()
+        username = tk.StringVar()
+        password = tk.StringVar()
+        password_confirm = tk.StringVar()
+        show_password = tk.BooleanVar(value=False)
+        status = tk.StringVar()
+
+        def field(label: str, variable: tk.StringVar, *, secret: bool = False) -> ctk.CTkEntry:
+            ctk.CTkLabel(
+                card, text=label, text_color="#334861", font=("Segoe UI", 12, "bold")
+            ).pack(anchor="w", padx=22, pady=(8, 3))
+            entry = ctk.CTkEntry(
+                card,
+                textvariable=variable,
+                height=38,
+                corner_radius=11,
+                font=("Segoe UI", 13),
+                show="●" if secret else "",
+            )
+            entry.pack(fill="x", padx=22)
+            return entry
+
+        name_entry = field("Tên hiển thị profile", display_name)
+        username_entry = field("Game username / email", username)
+        password_entry = field("Password", password, secret=True)
+        confirm_entry = field("Nhập lại password", password_confirm, secret=True)
+
+        def toggle_password() -> None:
+            marker = "" if show_password.get() else "●"
+            password_entry.configure(show=marker)
+            confirm_entry.configure(show=marker)
+
+        ctk.CTkCheckBox(
+            card,
+            text="Hiển thị password",
+            variable=show_password,
+            command=toggle_password,
+            font=("Segoe UI", 11),
+            checkbox_width=18,
+            checkbox_height=18,
+        ).pack(anchor="w", padx=22, pady=(9, 2))
+        ctk.CTkLabel(
+            card,
+            textvariable=status,
+            text_color="#bd4a57",
+            font=("Segoe UI", 11),
+            wraplength=420,
+            justify="left",
+        ).pack(anchor="w", padx=22)
+
+        def save_account() -> None:
+            name = display_name.get().strip()
+            account_username = username.get().strip()
+            account_password = password.get()
+            confirmation = password_confirm.get()
+            if not name or not account_username or not account_password:
+                status.set("Hãy nhập tên hiển thị, username và password.")
+                return
+            if account_password != confirmation:
+                password.set("")
+                password_confirm.set("")
+                status.set("Password nhập lại không khớp. Hãy nhập lại.")
+                password_entry.focus_set()
+                return
+            profile_id = unique_profile_id(name, {profile.id for profile in self.config.profiles})
+            credential_saved = False
+            profile_added = False
+            store = None
+            try:
+                from ik_chrome_auto.credential_store import (
+                    AccountCredential,
+                    WindowsCredentialStore,
+                )
+
+                store = WindowsCredentialStore()
+                store.save(
+                    AccountCredential(profile_id, account_username, account_password)
+                )
+                credential_saved = True
+                profile = ProfileConfig(
+                    id=profile_id,
+                    name=name,
+                    mode=ProfileMode.MANAGED,
+                    user_data_dir=(self.config.data_dir / "profiles" / profile_id).resolve(),
+                    enabled=True,
+                )
+                self.config.profiles.append(profile)
+                profile_added = True
+                save_config(self.config)
+                profile.user_data_dir.mkdir(parents=True, exist_ok=True)
+                self.runner.sync_profiles()
+                self._draw_rows()
+            except Exception as error:
+                if profile_added:
+                    self.config.profiles = [
+                        item for item in self.config.profiles if item.id != profile_id
+                    ]
+                    try:
+                        save_config(self.config)
+                    except Exception:
+                        pass
+                if credential_saved and store is not None:
+                    try:
+                        store.delete(profile_id)
+                    except Exception:
+                        pass
+                status.set(f"Không lưu được tài khoản: {error}")
+                return
+            finally:
+                # Do not retain secrets in Tk variables after the save attempt.
+                password.set("")
+                password_confirm.set("")
+            self._append_log(f"Đã thêm profile {name} ({profile_id}); credential đã mã hóa")
+            form.destroy()
+
+        actions = ctk.CTkFrame(card, fg_color="transparent")
+        actions.pack(fill="x", padx=22, pady=(14, 18))
+        self._button(actions, "Hủy", form.destroy, "soft").pack(side="right")
+        self._button(actions, "Lưu tài khoản", save_account, "primary").pack(
+            side="right", padx=(0, 8)
         )
-        self.config.profiles.append(profile)
-        save_config(self.config)
-        profile.user_data_dir.mkdir(parents=True, exist_ok=True)
-        self.runner.sync_profiles()
-        self._draw_rows()
-        self._append_log(f"Đã thêm profile {name} ({profile_id})")
+        name_entry.focus_set()
 
     def _remove_profile(self, profile_id: str) -> None:
         profile = self.config.profile(profile_id)
@@ -576,6 +706,7 @@ class Dashboard:
             "Bỏ profile",
             (
                 f"Bỏ '{profile.name}' khỏi dashboard?\n\n"
+                "Credential mã hóa của profile cũng sẽ bị xóa khỏi Windows Vault.\n"
                 "Thư mục cookie/cache vẫn được giữ lại và không bị xóa."
             ),
             parent=self.root,
@@ -593,11 +724,19 @@ class Dashboard:
         worker = self.runner.workers.get(profile_id)
         if worker:
             worker.shutdown()
+        try:
+            from ik_chrome_auto.credential_store import WindowsCredentialStore
+
+            WindowsCredentialStore().delete(profile_id)
+        except Exception as error:
+            self._append_log(f"[{profile_id}] không xóa được credential Windows Vault: {error}")
         self.config.profiles = [item for item in self.config.profiles if item.id != profile_id]
         save_config(self.config)
         self.runner.sync_profiles()
         self._draw_rows()
-        self._append_log(f"Đã bỏ profile {profile.name}; dữ liệu trên đĩa vẫn còn")
+        self._append_log(
+            f"Đã bỏ profile {profile.name} và credential mã hóa; dữ liệu trên đĩa vẫn còn"
+        )
 
     def _poll_updates(self) -> None:
         try:
