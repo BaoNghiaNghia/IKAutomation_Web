@@ -27,7 +27,8 @@ The browser-farming architecture and migration plan are documented in
 Double-click `run.cmd`, or run it from Command Prompt. It performs all setup
 only when needed, checks Chrome/configuration, runs the browser-worker test,
 then opens the dashboard. On the first run it creates `.venv`, installs missing
-packages, and creates `config.json` from `config.example.json`.
+packages, and creates `config.json` from `config.example.json`. If a compatible
+Python is missing, it installs Python 3.13 through Windows `winget` first.
 
 Run tests from an activated virtual environment:
 

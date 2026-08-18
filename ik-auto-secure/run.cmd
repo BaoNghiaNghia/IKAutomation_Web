@@ -8,21 +8,13 @@ set "PYTHONUTF8=1"
 echo [1/5] Checking Python environment...
 if exist "%VENV_PYTHON%" goto :check_dependencies
 
-set "BOOTSTRAP_PYTHON="
-for %%V in (3.13 3.12 3.11) do (
-  if not defined BOOTSTRAP_PYTHON (
-    py -%%V -c "import sys; raise SystemExit(0 if (3,11) ^<= sys.version_info[:2] ^< (3,14) else 1)" >nul 2>nul
-    if !errorlevel! equ 0 set "BOOTSTRAP_PYTHON=py -%%V"
-  )
-)
+call :find_python
 if not defined BOOTSTRAP_PYTHON (
-  python -c "import sys; raise SystemExit(0 if (3,11) ^<= sys.version_info[:2] ^< (3,14) else 1)" >nul 2>nul
-  if !errorlevel! equ 0 set "BOOTSTRAP_PYTHON=python"
-)
-if not defined BOOTSTRAP_PYTHON (
-  echo Python 3.11, 3.12 or 3.13 is required.
-  pause
-  exit /b 1
+  echo Python 3.11-3.13 was not found. Installing Python 3.13 with winget...
+  where winget >nul 2>nul || goto :missing_winget
+  winget install --id Python.Python.3.13 --exact --source winget --accept-package-agreements --accept-source-agreements || goto :failed
+  call :find_python
+  if not defined BOOTSTRAP_PYTHON goto :python_install_not_found
 )
 echo Creating .venv for the first run...
 %BOOTSTRAP_PYTHON% -m venv "%PROJECT_DIR%.venv" || goto :failed
@@ -55,3 +47,30 @@ echo.
 echo The check or dashboard stopped with an error. Review the message above.
 pause
 exit /b 1
+
+:missing_winget
+echo winget is not available, so Python could not be installed automatically.
+echo Install Python 3.13 from https://www.python.org/downloads/ then run this file again.
+pause
+exit /b 1
+
+:python_install_not_found
+echo Python was installed but Windows has not exposed it to this process yet.
+echo Close this window and run run.cmd again.
+pause
+exit /b 1
+
+:find_python
+set "BOOTSTRAP_PYTHON="
+for %%V in (3.13 3.12 3.11) do (
+  if not defined BOOTSTRAP_PYTHON (
+    py -%%V -c "import sys; raise SystemExit(0 if (3,11) ^<= sys.version_info[:2] ^< (3,14) else 1)" >nul 2>nul
+    if !errorlevel! equ 0 set "BOOTSTRAP_PYTHON=py -%%V"
+  )
+)
+if not defined BOOTSTRAP_PYTHON (
+  python -c "import sys; raise SystemExit(0 if (3,11) ^<= sys.version_info[:2] ^< (3,14) else 1)" >nul 2>nul
+  if !errorlevel! equ 0 set "BOOTSTRAP_PYTHON=python"
+)
+if not defined BOOTSTRAP_PYTHON if exist "%LocalAppData%\Programs\Python\Python313\python.exe" set "BOOTSTRAP_PYTHON=\"%LocalAppData%\Programs\Python\Python313\python.exe\""
+exit /b 0
