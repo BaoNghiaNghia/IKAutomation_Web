@@ -21,6 +21,25 @@ from ik_chrome_auto.runner import AUTO_2048_TIMINGS, MultiProfileRunner
 from ik_chrome_auto.windows_auth import WindowsAuthenticationError, require_windows_hello
 
 SPEED_LABELS = {key: f"{value.label} ({value.move_delay_seconds:.2f}s)" for key, value in AUTO_2048_TIMINGS.items()}
+_launch_terminal_window = 0
+
+
+def capture_launch_terminal_window() -> None:
+    """Remember the foreground terminal before the dashboard takes focus."""
+    global _launch_terminal_window
+    if os.name != "nt" or os.environ.get("IK_AUTO_MINIMIZE_CONSOLE") != "1":
+        return
+    try:
+        import ctypes
+        candidate = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+        class_name = ctypes.create_unicode_buffer(128)
+        ctypes.windll.user32.GetClassNameW(candidate, class_name, len(class_name))
+        if class_name.value in {"ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS"}:
+            _launch_terminal_window = candidate
+        else:
+            _launch_terminal_window = int(ctypes.windll.kernel32.GetConsoleWindow() or 0)
+    except OSError:
+        _launch_terminal_window = 0
 
 
 def minimize_launch_console() -> None:
@@ -28,7 +47,7 @@ def minimize_launch_console() -> None:
         return
     try:
         import ctypes
-        window = ctypes.windll.kernel32.GetConsoleWindow()
+        window = _launch_terminal_window or ctypes.windll.kernel32.GetConsoleWindow()
         if window:
             ctypes.windll.user32.ShowWindow(window, 6)
     except OSError:
@@ -306,4 +325,4 @@ class AccountManagerDialog(QDialog):
 
 
 def run_dashboard(config_path:Path)->None:
-    app=QApplication.instance() or QApplication([]); app.setApplicationName("IK Auto"); dashboard=Dashboard(config_path); dashboard.show(); QTimer.singleShot(250,minimize_launch_console); app.exec()
+    capture_launch_terminal_window(); app=QApplication.instance() or QApplication([]); app.setApplicationName("IK Auto"); dashboard=Dashboard(config_path); dashboard.show(); QTimer.singleShot(500,minimize_launch_console); app.exec()
