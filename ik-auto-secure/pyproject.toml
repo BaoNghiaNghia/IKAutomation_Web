@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ik-chrome-auto"
+version = "2.0.0"
+description = "Privacy-first multi-profile Chrome manager for ik.playfun.vn"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "playwright>=1.54,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<10",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+ik-chrome-auto = "ik_chrome_auto.__main__:main"
+ik-chrome-doctor = "ik_chrome_auto.doctor:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ik_chrome_auto = ["assets/*.png"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
