@@ -42,6 +42,19 @@ KNOWN_CHROME_PATHS = (
     Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
 )
 
+LOGIN_USERNAME_SELECTORS = (
+    "input[autocomplete='username']",
+    "input[type='email']",
+    "input[name*='email' i]",
+    "input[name*='user' i]",
+    "input[placeholder*='Email' i]",
+    "input[placeholder*='Tên đăng nhập' i]",
+)
+LOGIN_PASSWORD_SELECTORS = (
+    "input[autocomplete='current-password']",
+    "input[type='password']",
+)
+
 
 def _image_has_visible_content(image: RGBImage) -> bool:
     """Reject empty WebGL toDataURL captures (transparent/solid black)."""
@@ -152,6 +165,8 @@ class ChromeProfileSession:
             )
         if navigate and not self._is_target(self.page.url):
             self.goto()
+        elif navigate:
+            self.auto_login_if_needed()
         self._bind_native_window()
         return self.page
 
@@ -356,6 +371,46 @@ class ChromeProfileSession:
         )
         self._configure_interaction_frames(force=True)
         self._apply_profile_title()
+        self.auto_login_if_needed()
+
+    @staticmethod
+    def _first_visible_input(frame: Frame, selectors: tuple[str, ...]) -> Any | None:
+        for selector in selectors:
+            try:
+                locator = frame.locator(selector).first
+                if locator.count() and locator.is_visible(timeout=500):
+                    return locator
+            except Exception:
+                continue
+        return None
+
+    def auto_login_if_needed(self) -> bool:
+        """Fill the game login form only when the profile has no active session."""
+        try:
+            from ik_chrome_auto.credential_store import WindowsCredentialStore
+
+            credential = WindowsCredentialStore().load(self.profile.id)
+        except Exception:
+            return False
+        if credential is None:
+            return False
+        for frame in self.page.frames:
+            if not is_allowed_url(frame.url, self.config.capture.allowed_hosts):
+                continue
+            username = self._first_visible_input(frame, LOGIN_USERNAME_SELECTORS)
+            password = self._first_visible_input(frame, LOGIN_PASSWORD_SELECTORS)
+            if username is None or password is None:
+                continue
+            try:
+                username.fill(credential.username, timeout=3_000)
+                password.fill(credential.password, timeout=3_000)
+                frame.get_by_role(
+                    "button", name=re.compile(r"^(đăng nhập|login)$", re.IGNORECASE)
+                ).first.click(timeout=3_000)
+                return True
+            except Exception:
+                return False
+        return False
 
     def resize(self, width: int, height: int) -> None:
         width, height = validate_viewport(int(width), int(height))
