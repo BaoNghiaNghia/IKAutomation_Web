@@ -591,32 +591,32 @@ class Dashboard:
         self.root.update_idletasks()
         root_width = self.root.winfo_width()
         root_height = self.root.winfo_height()
-        form_width = min(760, max(560, root_width - 40))
-        form_height = min(650, max(420, root_height - 40))
+        form_width = min(680, max(540, root_width - 70))
+        form_height = min(450, max(350, root_height - 80))
         form_left = max(0, self.root.winfo_rootx() + (root_width - form_width) // 2)
         form_top = max(0, self.root.winfo_rooty() + (root_height - form_height) // 2)
         form.geometry(f"{form_width}x{form_height}+{form_left}+{form_top}")
-        form.minsize(560, 420)
+        form.minsize(540, 350)
         form.transient(self.root)
         form.grab_set()
         form.configure(fg_color="#eaf1f8")
 
         card = ctk.CTkFrame(form, fg_color="#f9fcff", corner_radius=20)
-        card.pack(fill="both", expand=True, padx=18, pady=18)
+        card.pack(fill="both", expand=True, padx=14, pady=14)
         ctk.CTkLabel(
             card,
             text="Thêm tài khoản game",
             text_color="#20324a",
-            font=self._font(22, "bold"),
-        ).pack(anchor="w", padx=22, pady=(20, 2))
+            font=self._font(19, "bold"),
+        ).pack(anchor="w", padx=18, pady=(14, 1))
         ctk.CTkLabel(
             card,
             text="Mỗi hàng là một tài khoản. Password được lưu mã hóa trong Windows Credential Manager.",
             text_color="#62758e",
-            font=self._font(11),
-            wraplength=660,
+            font=self._font(10),
+            wraplength=600,
             justify="left",
-        ).pack(anchor="w", padx=22, pady=(0, 16))
+        ).pack(anchor="w", padx=18, pady=(0, 9))
 
         show_password = tk.BooleanVar(value=False)
         status = tk.StringVar()
@@ -625,10 +625,11 @@ class Dashboard:
             card,
             fg_color="#eef4fb",
             corner_radius=14,
+            height=132,
             scrollbar_button_color="#b8c8dc",
             scrollbar_button_hover_color="#8fa9c7",
         )
-        list_frame.pack(fill="both", expand=True, padx=22, pady=(0, 9))
+        list_frame.pack(fill="x", expand=False, padx=18, pady=(0, 7))
 
         def refresh_rows() -> None:
             for index, row in enumerate(rows, start=1):
@@ -644,46 +645,40 @@ class Dashboard:
             username = tk.StringVar()
             password = tk.StringVar()
             row_frame = ctk.CTkFrame(list_frame, fg_color="#f9fcff", corner_radius=12)
-            row_frame.pack(fill="x", padx=8, pady=(8, 0))
+            row_frame.pack(fill="x", padx=6, pady=(6, 0))
             row_frame.columnconfigure(0, weight=1)
             row_frame.columnconfigure(1, weight=1)
             title = ctk.CTkLabel(
                 row_frame,
                 text="",
                 text_color="#20324a",
-                font=self._font(13, "bold"),
+                font=self._font(12, "bold"),
             )
-            title.grid(row=0, column=0, sticky="w", padx=12, pady=(8, 2))
+            title.grid(row=0, column=0, sticky="w", padx=10, pady=(6, 3))
             row: dict[str, object] = {}
             remove_button = self._button(
                 row_frame, "Xóa hàng", lambda: remove_row(row), "soft"
             )
-            remove_button.grid(row=0, column=1, sticky="e", padx=12, pady=(8, 2))
-            ctk.CTkLabel(
-                row_frame, text="Username / email", text_color="#62758e", font=self._font(11)
-            ).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 2))
-            ctk.CTkLabel(
-                row_frame, text="Password", text_color="#62758e", font=self._font(11)
-            ).grid(row=1, column=1, sticky="w", padx=12, pady=(2, 2))
+            remove_button.grid(row=0, column=1, sticky="e", padx=10, pady=(6, 3))
             username_entry = ctk.CTkEntry(
                 row_frame,
                 textvariable=username,
                 placeholder_text="Nhập username hoặc email",
-                height=36,
+                height=32,
                 corner_radius=10,
-                font=self._font(12),
+                font=self._font(11),
             )
-            username_entry.grid(row=2, column=0, sticky="ew", padx=(12, 5), pady=(0, 10))
+            username_entry.grid(row=1, column=0, sticky="ew", padx=(10, 4), pady=(0, 7))
             password_entry = ctk.CTkEntry(
                 row_frame,
                 textvariable=password,
                 placeholder_text="Nhập password",
                 show="●" if not show_password.get() else "",
-                height=36,
+                height=32,
                 corner_radius=10,
-                font=self._font(12),
+                font=self._font(11),
             )
-            password_entry.grid(row=2, column=1, sticky="ew", padx=(5, 12), pady=(0, 10))
+            password_entry.grid(row=1, column=1, sticky="ew", padx=(4, 10), pady=(0, 7))
             row.update(
                 frame=row_frame,
                 title=title,
@@ -703,14 +698,14 @@ class Dashboard:
 
         add_row()
         controls = ctk.CTkFrame(card, fg_color="transparent")
-        controls.pack(fill="x", padx=22, pady=(0, 4))
+        controls.pack(fill="x", padx=18, pady=(0, 2))
         self._button(controls, "+ Thêm hàng", add_row, "soft").pack(side="left")
         ctk.CTkCheckBox(
             controls,
             text="Hiện password",
             variable=show_password,
             command=toggle_password,
-            font=self._font(11),
+            font=self._font(10),
             checkbox_width=18,
             checkbox_height=18,
         ).pack(side="right")
@@ -718,10 +713,10 @@ class Dashboard:
             card,
             textvariable=status,
             text_color="#bd4a57",
-            font=self._font(11),
-            wraplength=660,
+            font=self._font(10),
+            wraplength=600,
             justify="left",
-        ).pack(anchor="w", padx=22, pady=(0, 2))
+        ).pack(anchor="w", padx=18, pady=(0, 1))
 
         def save_accounts() -> None:
             account_rows = [
@@ -803,7 +798,7 @@ class Dashboard:
             form.destroy()
 
         actions = ctk.CTkFrame(card, fg_color="transparent")
-        actions.pack(fill="x", padx=22, pady=(8, 18))
+        actions.pack(fill="x", padx=18, pady=(4, 12))
         self._button(actions, "Hủy", form.destroy, "soft").pack(side="right")
         self._button(actions, "Lưu tất cả", save_accounts, "primary").pack(
             side="right", padx=(0, 8)
