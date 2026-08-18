@@ -201,6 +201,14 @@ class Dashboard:
             command=lambda _value: self._apply_windows_per_row(),
             width=164,
             height=34,
+            corner_radius=10,
+            border_width=1,
+            border_color="#8797aa",
+            selected_color="#9fc6ff",
+            selected_hover_color="#82b3f4",
+            unselected_color="#f8fbff",
+            unselected_hover_color="#e4edf8",
+            text_color="#111827",
             font=self._font(13),
         )
         self.windows_per_row_box.pack(side="right")
