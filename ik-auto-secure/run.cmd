@@ -43,6 +43,7 @@ echo [4/5] Running Doctor and browser-session checks...
 "%VENV_PYTHON%" -m pytest "%PROJECT_DIR%tests\test_browser_worker.py" "%PROJECT_DIR%tests\test_credential_store.py" -q || goto :failed
 
 echo [5/5] Opening dashboard...
+set "IK_AUTO_MINIMIZE_CONSOLE=1"
 "%VENV_PYTHON%" -m ik_chrome_auto --config "%PROJECT_DIR%config.json" ui
 if errorlevel 1 goto :failed
 exit /b 0

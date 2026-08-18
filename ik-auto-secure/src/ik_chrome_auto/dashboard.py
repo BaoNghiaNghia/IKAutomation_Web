@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import tkinter as tk
 import time
@@ -32,6 +33,22 @@ AUTO_2048_SPEED_LABELS = {
     speed: f"{timing.label} ({timing.move_delay_seconds:.2f}s)"
     for speed, timing in AUTO_2048_TIMINGS.items()
 }
+
+
+def minimize_launch_console() -> None:
+    """Minimize only the console explicitly created by run.cmd on Windows."""
+    if os.name != "nt" or os.environ.get("IK_AUTO_MINIMIZE_CONSOLE") != "1":
+        return
+    try:
+        import ctypes
+
+        console_window = ctypes.windll.kernel32.GetConsoleWindow()
+        if console_window:
+            # SW_MINIMIZE keeps the terminal available on the taskbar for diagnostics.
+            ctypes.windll.user32.ShowWindow(console_window, 6)
+    except OSError:
+        # The dashboard must remain usable if it was started without a console.
+        return
 
 @dataclass(slots=True)
 class ProfileRow:
@@ -926,4 +943,6 @@ class Dashboard:
 def run_dashboard(config_path: Path) -> None:
     root = ctk.CTk()
     Dashboard(root, config_path)
+    # Let Tk finish its first paint before hiding the bootstrap terminal.
+    root.after_idle(lambda: root.after(250, minimize_launch_console))
     root.mainloop()
