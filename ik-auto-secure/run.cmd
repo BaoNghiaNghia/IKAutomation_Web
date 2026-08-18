@@ -1,4 +1,12 @@
 @echo off
+if /i "%~1"=="--locked" goto :locked
+
+set "IK_AUTO_RUN_SCRIPT=%~f0"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$created = $false; $mutex = [System.Threading.Mutex]::new($true, 'Local\IKAutoBrowserDashboard', [ref]$created); if (-not $created) { $mutex.Dispose(); Write-Host ''; Write-Host 'Ứng dụng IK Auto đang được mở. Hãy sử dụng dashboard hiện tại.' -ForegroundColor Yellow; Read-Host 'Nhấn Enter để đóng cửa sổ này'; exit 0 }; $exitCode = 1; try { & $env:ComSpec /d /c $env:IK_AUTO_RUN_SCRIPT --locked; $exitCode = $LASTEXITCODE } finally { $mutex.ReleaseMutex(); $mutex.Dispose() }; exit $exitCode"
+exit /b %errorlevel%
+
+:locked
+shift /1
 setlocal EnableExtensions EnableDelayedExpansion
 set "PROJECT_DIR=%~dp0"
 set "VENV_PYTHON=%PROJECT_DIR%.venv\Scripts\python.exe"
