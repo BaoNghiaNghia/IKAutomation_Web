@@ -6,7 +6,12 @@ set "PYTHONPATH=%PROJECT_DIR%src"
 set "PYTHONUTF8=1"
 
 echo [1/5] Checking Python environment...
-if exist "%VENV_PYTHON%" goto :check_dependencies
+if exist "%VENV_PYTHON%" (
+  "%VENV_PYTHON%" -c "import sys" >nul 2>nul
+  if not errorlevel 1 goto :check_dependencies
+  echo Existing .venv cannot start. Recreating it...
+  rmdir /s /q "%PROJECT_DIR%.venv" || goto :failed
+)
 
 call :find_python
 if not defined BOOTSTRAP_PYTHON (
