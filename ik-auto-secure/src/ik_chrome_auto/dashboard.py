@@ -195,7 +195,7 @@ class Dashboard(QWidget):
     @staticmethod
     def _set_profile_card_state(row: ProfileRow, state: WorkerState) -> None:
         if state in {WorkerState.STARTING, WorkerState.READY, WorkerState.RUNNING, WorkerState.COMPLETED}:
-            row.card.setStyleSheet("background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #effcf5,stop:0.52 #dcfce7,stop:1 #d1fae5);border:1px solid #86efac;border-radius:14px;")
+            row.card.setStyleSheet("CardWidget { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #effcf5,stop:0.52 #dcfce7,stop:1 #d1fae5); }")
         else:
             row.card.setStyleSheet("")
     def _toggle_sync(self) -> None:
