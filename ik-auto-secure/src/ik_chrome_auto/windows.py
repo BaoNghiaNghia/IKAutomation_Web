@@ -741,6 +741,26 @@ def move_window_position(hwnd: int, x: int, y: int, *, topmost: bool) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
+def move_window_outer(
+    hwnd: int, x: int, y: int, width: int, height: int, *, topmost: bool
+) -> None:
+    """Move and resize a native window using its full outer frame size."""
+    if not is_window(hwnd):
+        raise RuntimeError("Cửa sổ Chrome không còn tồn tại")
+    insert_after = -1 if topmost else -2
+    flags = 0x0010 | 0x0040  # SWP_NOACTIVATE | SWP_SHOWWINDOW
+    if not _user32.SetWindowPos(
+        wintypes.HWND(hwnd),
+        wintypes.HWND(insert_after),
+        int(x),
+        int(y),
+        max(1, int(width)),
+        max(1, int(height)),
+        flags,
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 def set_topmost(hwnd: int, enabled: bool) -> None:
     if not is_window(hwnd):
         raise RuntimeError("Cửa sổ Chrome không còn tồn tại")

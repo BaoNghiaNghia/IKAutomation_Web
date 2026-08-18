@@ -29,6 +29,7 @@ from ik_chrome_auto.windows import (
     get_window_rect,
     get_window_process_tree_usage,
     get_work_area,
+    move_window_outer,
     snapshot_process_parents,
     trim_window_process_tree,
     WindowRect,
@@ -580,14 +581,17 @@ class MultiProfileRunner:
             opened.append((profile.id, hwnd, outer, visible))
         if not opened:
             return 0
-        window_width = max(item[3].width for item in opened)
-        window_height = max(item[3].height for item in opened)
+        columns = int(columns_per_row or len(opened))
+        rows = max(1, (len(opened) + columns - 1) // columns)
+        work_area = get_work_area()
+        visible_width = max(1, work_area.width // columns)
+        visible_height = max(1, work_area.height // rows)
         positions = calculate_tiled_positions(
-            get_work_area(),
-            window_width,
-            window_height,
+            work_area,
+            visible_width,
+            visible_height,
             len(opened),
-            columns_per_row=columns_per_row,
+            columns_per_row=columns,
         )
         moved = 0
         for (profile_id, _hwnd, outer, visible), (x, y) in zip(
@@ -598,12 +602,17 @@ class MultiProfileRunner:
             if session is None:
                 continue
             try:
-                # Window placement is a native Win32 operation.  Apply it now
-                # instead of queuing behind browser work so the dashboard's
-                # "Áp dụng sắp xếp" button updates every running Chrome at once.
-                session.move_window(
+                # Resize the full Chrome frame to its grid cell as well as
+                # moving it. This makes a column selection visibly apply to
+                # profiles already running, rather than only to future opens.
+                frame_width = visible_width + (outer.width - visible.width)
+                frame_height = visible_height + (outer.height - visible.height)
+                move_window_outer(
+                    _hwnd,
                     x - (visible.left - outer.left),
                     y - (visible.top - outer.top),
+                    frame_width,
+                    frame_height,
                     topmost=self.windows_topmost,
                 )
                 moved += 1
