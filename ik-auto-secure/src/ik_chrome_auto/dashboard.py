@@ -132,7 +132,7 @@ class Dashboard:
 
         body = ctk.CTkFrame(parent, fg_color="transparent")
         body.pack(fill="both", expand=True)
-        body.columnconfigure(0, weight=0, minsize=260)
+        body.columnconfigure(0, weight=0, minsize=350)
         body.columnconfigure(1, weight=1)
         body.rowconfigure(0, weight=1)
         left_panel = ctk.CTkScrollableFrame(
@@ -242,7 +242,7 @@ class Dashboard:
     @staticmethod
     def _section_label(parent: tk.Misc, title: str, description: str) -> None:
         ctk.CTkLabel(parent, text=title, text_color="#20324a", font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=12, pady=(10, 0))
-        ctk.CTkLabel(parent, text=description, text_color="#6d8098", font=("Segoe UI", 12), wraplength=240, justify="left").pack(anchor="w", padx=12, pady=(2, 0))
+        ctk.CTkLabel(parent, text=description, text_color="#6d8098", font=("Segoe UI", 12), wraplength=320, justify="left").pack(anchor="w", padx=12, pady=(2, 0))
 
     @staticmethod
     def _button(parent: tk.Misc, text: str, command: object, kind: str) -> ctk.CTkButton:
@@ -252,7 +252,7 @@ class Dashboard:
             "soft": ("#e8f0fb", "#d8e5f5", "#4c6686"),
         }
         foreground, hover, text_color = palette[kind]
-        return ctk.CTkButton(parent, text=text, command=command, height=34, corner_radius=11, border_spacing=4, fg_color=foreground, hover_color=hover, text_color=text_color, font=("Segoe UI", 12, "bold"))
+        return ctk.CTkButton(parent, text=text, command=command, width=104, height=34, corner_radius=11, border_spacing=4, fg_color=foreground, hover_color=hover, text_color=text_color, font=("Segoe UI", 12, "bold"))
 
     def _refresh_sync_button(self) -> None:
         self.sync_button.configure(text=self.sync_button_text.get())
