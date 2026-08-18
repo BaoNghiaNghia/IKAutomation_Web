@@ -22,20 +22,12 @@ The browser-farming architecture and migration plan are documented in
 - Browser profiles contain login cookies. They are excluded from Git; keep the
   `data` folder on an encrypted, access-controlled Windows account.
 
-## Setup and run
+## Run
 
-1. Copy `config.example.json` to `config.json`.
-2. Review `target_url` and the smallest necessary `capture.allowed_hosts`.
-3. Run `setup.cmd`, then `run.cmd`.
-
-For one safe preparation/check command, run:
-
-```powershell
-.\run-browser-check.ps1
-```
-
-It prepares the environment, runs Doctor and browser-worker tests, then opens
-the dashboard. Add `-NoDashboard` to stop after the checks.
+Double-click `run.cmd`, or run it from Command Prompt. It performs all setup
+only when needed, checks Chrome/configuration, runs the browser-worker test,
+then opens the dashboard. On the first run it creates `.venv`, installs missing
+packages, and creates `config.json` from `config.example.json`.
 
 Run tests from an activated virtual environment:
 
