@@ -169,6 +169,11 @@ class ChromeProfileSession:
             "slow_mo": self.config.browser.slow_mo_ms,
             "locale": "vi-VN",
             "accept_downloads": False,
+            # Playwright disables Chromium's sandbox unless this is explicitly
+            # enabled.  On Windows Chrome supports its normal sandbox, so keep
+            # it on: this removes Chrome's visible --no-sandbox warning and is
+            # safer for a browser that signs into game accounts.
+            "chromium_sandbox": True,
         }
         args: list[str] = []
         if self.config.browser.app_mode:
