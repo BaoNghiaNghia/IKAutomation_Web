@@ -27,7 +27,7 @@ ik-chrome-doctor = "ik_chrome_auto.doctor:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-ik_chrome_auto = ["assets/*.png"]
+ik_chrome_auto = ["assets/*.png", "assets/*.ttf", "assets/*.txt"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
