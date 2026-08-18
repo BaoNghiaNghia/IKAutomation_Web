@@ -589,16 +589,27 @@ class MultiProfileRunner:
             len(opened),
             columns_per_row=columns_per_row,
         )
+        moved = 0
         for (profile_id, _hwnd, outer, visible), (x, y) in zip(
             opened, positions, strict=True
         ):
-            self.submit(
-                profile_id,
-                CommandKind.MOVE_WINDOW,
-                x=x - (visible.left - outer.left),
-                y=y - (visible.top - outer.top),
-            )
-        return len(opened)
+            worker = self.workers.get(profile_id)
+            session = worker.session if worker else None
+            if session is None:
+                continue
+            try:
+                # Window placement is a native Win32 operation.  Apply it now
+                # instead of queuing behind browser work so the dashboard's
+                # "Áp dụng sắp xếp" button updates every running Chrome at once.
+                session.move_window(
+                    x - (visible.left - outer.left),
+                    y - (visible.top - outer.top),
+                    topmost=self.windows_topmost,
+                )
+                moved += 1
+            except Exception:
+                continue
+        return moved
 
     def has_open_session(self, profile_id: str) -> bool:
         worker = self.workers.get(profile_id)
