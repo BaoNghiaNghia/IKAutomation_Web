@@ -18,6 +18,7 @@ from ik_chrome_auto.config import ensure_data_dirs, load_config, save_config, un
 from ik_chrome_auto.interaction import format_coordinate
 from ik_chrome_auto.models import Auto2048Speed, CommandKind, ProfileConfig, ProfileMode, WorkerSnapshot, WorkerState
 from ik_chrome_auto.runner import AUTO_2048_TIMINGS, MultiProfileRunner
+from ik_chrome_auto.windows_auth import WindowsAuthenticationError, require_windows_password
 
 SPEED_LABELS = {key: f"{value.label} ({value.move_delay_seconds:.2f}s)" for key, value in AUTO_2048_TIMINGS.items()}
 
@@ -188,6 +189,7 @@ class Dashboard(QWidget):
         if self.inspecting_profile_id: self.runner.set_inspector(self.inspecting_profile_id,False); self.rows[self.inspecting_profile_id].inspect.setText("Đo")
         self.inspecting_profile_id=pid; self.runner.set_inspector(pid,True); self.rows[pid].inspect.setText("Tắt đo"); self.coordinate.setText(f"[{pid}] Click vào game để lấy tọa độ…")
     def _manage_accounts(self) -> None:
+        if not self._authorize_windows("xem hoặc chỉnh sửa tài khoản game"): return
         dialog=AccountManagerDialog(self, self.config.profiles)
         if dialog.exec()!=QDialog.DialogCode.Accepted: return
         entries=dialog.accounts(); existing={p.id for p in self.config.profiles}; original={p.id:p for p in self.config.profiles if p.mode==ProfileMode.MANAGED}; unmanaged=[p for p in self.config.profiles if p.mode!=ProfileMode.MANAGED]; kept_ids={entry[0] for entry in entries if entry[0]}; removed_ids=set(original)-kept_ids
@@ -209,6 +211,7 @@ class Dashboard(QWidget):
             self.runner.sync_profiles(); self._draw_rows(); self._append_log(f"Đã lưu {len(updated)} tài khoản" + (f", thêm {added}" if added else ""))
         except Exception as error: self._error("Không lưu được tài khoản",str(error))
     def _remove_profile(self,pid:str) -> None:
+        if not self._authorize_windows("xóa tài khoản game"): return
         profile=self.config.profile(pid)
         if QMessageBox.question(self,"Bỏ profile",f"Bỏ '{profile.name}' khỏi dashboard?\n\nCredential mã hóa cũng sẽ bị xóa.")!=QMessageBox.StandardButton.Yes: return
         worker=self.runner.workers.get(pid)
@@ -218,6 +221,11 @@ class Dashboard(QWidget):
             WindowsCredentialStore().delete(pid)
         except Exception as error: self._append_log(str(error))
         self.config.profiles=[p for p in self.config.profiles if p.id!=pid]; save_config(self.config); self.runner.sync_profiles(); self._draw_rows()
+    def _authorize_windows(self, action:str) -> bool:
+        try:
+            return require_windows_password(parent_window=int(self.winId()), action=action)
+        except WindowsAuthenticationError as error:
+            self._warning("Không xác thực được", str(error)); return False
     def _copy_xy(self) -> None:
         if not self.last_coordinate:return
         _,event=self.last_coordinate; canvas=event.get("canvas"); value=f"{canvas.get('pixel_x_rounded')},{canvas.get('pixel_y_rounded')}" if isinstance(canvas,dict) else ""
