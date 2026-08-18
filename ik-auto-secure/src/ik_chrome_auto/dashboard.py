@@ -711,10 +711,13 @@ class Dashboard:
                 number = start_number + offset
                 profile_id = unique_profile_id(f"account-{number}", existing_ids)
                 existing_ids.add(profile_id)
+                username_preview = account_username[:6] + (
+                    "…" if len(account_username) > 6 else ""
+                )
                 profiles.append(
                     ProfileConfig(
                         id=profile_id,
-                        name=f"Tài khoản {number:02d}",
+                        name=f"Tài khoản {number:02d} · {username_preview}",
                         mode=ProfileMode.MANAGED,
                         user_data_dir=(self.config.data_dir / "profiles" / profile_id).resolve(),
                         enabled=True,
