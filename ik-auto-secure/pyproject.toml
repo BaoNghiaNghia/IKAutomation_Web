@@ -12,6 +12,8 @@ dependencies = [
   "playwright>=1.54,<2",
   "PySide6>=6.8,<7",
   "PySide6-Fluent-Widgets>=1.7,<2",
+  "winrt-Windows.Security.Credentials.UI>=3.2,<4; sys_platform == 'win32'",
+  "winrt-Windows.Foundation>=3.2,<4; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

@@ -18,7 +18,7 @@ from ik_chrome_auto.config import ensure_data_dirs, load_config, save_config, un
 from ik_chrome_auto.interaction import format_coordinate
 from ik_chrome_auto.models import Auto2048Speed, CommandKind, ProfileConfig, ProfileMode, WorkerSnapshot, WorkerState
 from ik_chrome_auto.runner import AUTO_2048_TIMINGS, MultiProfileRunner
-from ik_chrome_auto.windows_auth import WindowsAuthenticationError, require_windows_password
+from ik_chrome_auto.windows_auth import WindowsAuthenticationError, require_windows_hello
 
 SPEED_LABELS = {key: f"{value.label} ({value.move_delay_seconds:.2f}s)" for key, value in AUTO_2048_TIMINGS.items()}
 
@@ -223,7 +223,7 @@ class Dashboard(QWidget):
         self.config.profiles=[p for p in self.config.profiles if p.id!=pid]; save_config(self.config); self.runner.sync_profiles(); self._draw_rows()
     def _authorize_windows(self, action:str) -> bool:
         try:
-            return require_windows_password(parent_window=int(self.winId()), action=action)
+            return require_windows_hello(action=action)
         except WindowsAuthenticationError as error:
             self._warning("Không xác thực được", str(error)); return False
     def _copy_xy(self) -> None:
