@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import sys
 import threading
 from pathlib import Path
@@ -9,6 +10,26 @@ from ik_chrome_auto.actions import AutomationFunctions
 from ik_chrome_auto.browser import ChromeProfileSession
 from ik_chrome_auto.config import ensure_data_dirs, load_config
 from ik_chrome_auto.doctor import run_doctor
+
+
+def run_credential_command(action: str, account_id: str, username: str | None = None) -> int:
+    from ik_chrome_auto.credential_store import AccountCredential, WindowsCredentialStore
+
+    store = WindowsCredentialStore()
+    if action == "set":
+        safe_username = username or input("Game username: ").strip()
+        password = getpass.getpass("Game password (hidden): ")
+        store.save(AccountCredential(account_id, safe_username, password))
+        print(f"Đã lưu credential cho account '{account_id}' trong Windows Vault.")
+        return 0
+    if action == "verify":
+        print("Có credential." if store.exists(account_id) else "Không tìm thấy credential.")
+        return 0 if store.exists(account_id) else 1
+    if action == "delete":
+        deleted = store.delete(account_id)
+        print("Đã xóa credential." if deleted else "Không tìm thấy credential.")
+        return 0
+    raise ValueError(f"Credential action không hỗ trợ: {action}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,6 +43,15 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("profile")
     screenshot_parser = subparsers.add_parser("screenshot")
     screenshot_parser.add_argument("profile")
+    credential_parser = subparsers.add_parser("credential", help="Quản lý Windows Vault credential")
+    credential_subparsers = credential_parser.add_subparsers(dest="credential_action", required=True)
+    credential_set = credential_subparsers.add_parser("set")
+    credential_set.add_argument("account_id")
+    credential_set.add_argument("--username")
+    credential_verify = credential_subparsers.add_parser("verify")
+    credential_verify.add_argument("account_id")
+    credential_delete = credential_subparsers.add_parser("delete")
+    credential_delete.add_argument("account_id")
     return parser
 
 
@@ -64,6 +94,8 @@ def main() -> None:
         raise SystemExit(run_one(config_path, args.profile, "inspect"))
     elif command == "screenshot":
         raise SystemExit(run_one(config_path, args.profile, "screenshot"))
+    elif command == "credential":
+        raise SystemExit(run_credential_command(args.credential_action, args.account_id, getattr(args, "username", None)))
     else:
         parser.error(f"Lệnh không hỗ trợ: {command}")
 

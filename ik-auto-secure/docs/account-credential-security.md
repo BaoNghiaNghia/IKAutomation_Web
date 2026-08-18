@@ -52,6 +52,20 @@ cookie. Username và password cùng nằm trong credential entry của Windows V
 Ưu tiên giữ Chrome persistent profile đã đăng nhập. Chỉ dùng password để login
 lại khi session hết hạn; không đọc hay xuất cookie ra khỏi profile.
 
+## Lệnh đã tích hợp
+
+Sau khi chạy `run.cmd` để tạo môi trường, dùng Command Prompt tại thư mục tool:
+
+```bat
+.venv\Scripts\python.exe -m ik_chrome_auto credential set farm-01
+.venv\Scripts\python.exe -m ik_chrome_auto credential verify farm-01
+.venv\Scripts\python.exe -m ik_chrome_auto credential delete farm-01
+```
+
+Lệnh `set` hỏi username và password bằng prompt ẩn; password không xuất hiện
+trên command line, không đi vào shell history và không được in lại. `verify`
+chỉ trả có/không, không hiển thị username hoặc password.
+
 ## Phân quyền và ranh giới
 
 - Chỉ `admin` được thêm, thay password hoặc xóa credential.
