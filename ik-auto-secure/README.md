@@ -4,6 +4,9 @@ Windows desktop tool for operating separate Chrome profiles used with the IK
 portal. It retains the profile manager, window controls, input synchronisation
 and 2048 helper while making data collection explicit and bounded.
 
+The browser-farming architecture and migration plan are documented in
+[`docs/farm-automation-browser-spec.md`](docs/farm-automation-browser-spec.md).
+
 ## Safety defaults
 
 - Only `http`/`https` URLs whose hostname matches `capture.allowed_hosts` are
