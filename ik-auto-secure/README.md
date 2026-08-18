@@ -6,6 +6,8 @@ and 2048 helper while making data collection explicit and bounded.
 
 The browser-farming architecture and migration plan are documented in
 [`docs/farm-automation-browser-spec.md`](docs/farm-automation-browser-spec.md).
+Credential-storage requirements are documented in
+[`docs/account-credential-security.md`](docs/account-credential-security.md).
 
 ## Safety defaults
 
