@@ -681,6 +681,7 @@ class Dashboard:
             row_frame = ctk.CTkFrame(list_frame, fg_color="#f9fcff", corner_radius=12)
             row_frame.pack(fill="x", padx=6, pady=(6, 0))
             row_frame.columnconfigure(0, weight=1)
+            row_frame.columnconfigure(1, weight=1)
             title = ctk.CTkLabel(
                 row_frame,
                 text="",
@@ -701,7 +702,7 @@ class Dashboard:
                 text_color="#718096",
                 font=self._font(18, "bold"),
             )
-            remove_button.grid(row=0, column=0, sticky="e", padx=10, pady=(6, 3))
+            remove_button.grid(row=0, column=1, sticky="e", padx=10, pady=(6, 3))
             username_entry = ctk.CTkEntry(
                 row_frame,
                 textvariable=username,
@@ -710,7 +711,7 @@ class Dashboard:
                 corner_radius=10,
                 font=self._font(11),
             )
-            username_entry.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 5))
+            username_entry.grid(row=1, column=0, sticky="ew", padx=(10, 4), pady=(0, 7))
             password_entry = ctk.CTkEntry(
                 row_frame,
                 textvariable=password,
@@ -720,7 +721,7 @@ class Dashboard:
                 corner_radius=10,
                 font=self._font(11),
             )
-            password_entry.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 7))
+            password_entry.grid(row=1, column=1, sticky="ew", padx=(4, 10), pady=(0, 7))
             row.update(
                 frame=row_frame,
                 title=title,
