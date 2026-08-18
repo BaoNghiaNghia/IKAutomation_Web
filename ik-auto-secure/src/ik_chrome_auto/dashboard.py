@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QCloseEvent, QGuiApplication
-from PySide6.QtWidgets import QApplication, QDialog, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
+from PySide6.QtGui import QAction, QCloseEvent, QGuiApplication
+from PySide6.QtWidgets import QApplication, QDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
 from qfluentwidgets import CardWidget, CheckBox, ComboBox, FluentIcon as FIF, LineEdit, PasswordLineEdit, PrimaryPushButton, PrimaryToolButton, PushButton, StrongBodyLabel, SubtitleLabel, ToolButton
 
 from ik_chrome_auto.config import ensure_data_dirs, load_config, save_config, unique_profile_id
@@ -310,7 +310,7 @@ class AccountManagerDialog(QDialog):
             self.add_row(profile.id,username,password)
         if not self.rows: self.add_row()
     def add_row(self,profile_id:str|None=None,username_value:str="",password_value:str="")->None:
-        row=CardWidget(); row.setFixedHeight(104); row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed); layout=QVBoxLayout(row); layout.setContentsMargins(12,8,12,8); layout.setSpacing(7); header=QHBoxLayout(); header.addWidget(StrongBodyLabel(f"Tài khoản {len(self.rows)+1:02d}")); header.addStretch(); remove=PushButton("×"); remove.setToolTip("Xóa tài khoản"); remove.setFixedSize(32,28); header.addWidget(remove); layout.addLayout(header); fields=QHBoxLayout(); fields.setSpacing(8); username=LineEdit(); username.setPlaceholderText("Username / email"); username.setText(username_value); password=PasswordLineEdit(); password.setPlaceholderText("Password"); password.setText(password_value); fields.addWidget(username); fields.addWidget(password); layout.addLayout(fields); remove.clicked.connect(lambda:self.remove_row(row)); self.rows.append((profile_id,username,password,row)); self.list.addWidget(row)
+        row=CardWidget(); row.setFixedHeight(104); row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed); layout=QVBoxLayout(row); layout.setContentsMargins(12,8,12,8); layout.setSpacing(7); header=QHBoxLayout(); header.addWidget(StrongBodyLabel(f"Tài khoản {len(self.rows)+1:02d}")); header.addStretch(); remove=PushButton("×"); remove.setToolTip("Xóa tài khoản"); remove.setFixedSize(32,28); header.addWidget(remove); layout.addLayout(header); fields=QHBoxLayout(); fields.setSpacing(8); username=LineEdit(); username.addAction(QAction(FIF.PEOPLE.icon(),"Username",username),QLineEdit.ActionPosition.LeadingPosition); username.setPlaceholderText("Username / email"); username.setText(username_value); password=PasswordLineEdit(); password.addAction(QAction(FIF.FINGERPRINT.icon(),"Password",password),QLineEdit.ActionPosition.LeadingPosition); password.setPlaceholderText("Password"); password.setText(password_value); fields.addWidget(username); fields.addWidget(password); layout.addLayout(fields); remove.clicked.connect(lambda:self.remove_row(row)); self.rows.append((profile_id,username,password,row)); self.list.addWidget(row)
     def remove_row(self,row:QWidget)->None:
         self.rows=[item for item in self.rows if item[3] is not row]; self.list.removeWidget(row); row.deleteLater()
     def toggle_password(self,_state:int)->None:
