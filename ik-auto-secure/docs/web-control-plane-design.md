@@ -29,6 +29,8 @@ fresh verified frame.
 ## Next implementation slice
 
 1. Persist these contracts in PostgreSQL tables and append-only audit/events.
+   `SqliteControlStore` now supplies the same transactional contract for local
+   development and tests; deployment still requires PostgreSQL.
 2. Add authenticated HTTP endpoints that only create `CommandEnvelope`s.
 3. Add an outbound, TLS-authenticated Windows Agent that consumes commands and
    publishes snapshots; it must not expose ADB to the browser or Internet.
