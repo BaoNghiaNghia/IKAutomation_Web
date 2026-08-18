@@ -86,6 +86,7 @@ if sys.platform == "win32":
     _shell32 = ctypes.WinDLL("shell32", use_last_error=True)
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    _dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
 
     class _PROCESSENTRY32W(ctypes.Structure):
         _fields_ = [
@@ -457,6 +458,22 @@ def get_window_rect(hwnd: int) -> WindowRect:
     rect = wintypes.RECT()
     if not _user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
         raise ctypes.WinError(ctypes.get_last_error())
+    return WindowRect(rect.left, rect.top, rect.right, rect.bottom)
+
+
+def get_visible_window_rect(hwnd: int) -> WindowRect:
+    """Return the visible frame, excluding Windows' invisible resize border."""
+    outer = get_window_rect(hwnd)
+    if sys.platform != "win32":
+        return outer
+    rect = wintypes.RECT()
+    # DWMWA_EXTENDED_FRAME_BOUNDS omits the invisible resize margin which is
+    # included by GetWindowRect on Windows 10/11.
+    result = _dwmapi.DwmGetWindowAttribute(
+        wintypes.HWND(hwnd), 9, ctypes.byref(rect), ctypes.sizeof(rect)
+    )
+    if result != 0:
+        return outer
     return WindowRect(rect.left, rect.top, rect.right, rect.bottom)
 
 

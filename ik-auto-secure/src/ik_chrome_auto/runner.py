@@ -25,11 +25,13 @@ from ik_chrome_auto.reader import redact
 from ik_chrome_auto.storage import write_retained_png
 from ik_chrome_auto.windows import (
     calculate_tiled_positions,
+    get_visible_window_rect,
     get_window_rect,
     get_window_process_tree_usage,
     get_work_area,
     snapshot_process_parents,
     trim_window_process_tree,
+    WindowRect,
 )
 
 UpdateCallback = Callable[[WorkerSnapshot], None]
@@ -561,7 +563,7 @@ class MultiProfileRunner:
     def arrange_windows(self, columns_per_row: int | None = None) -> int:
         if columns_per_row is not None and not 2 <= int(columns_per_row) <= 6:
             raise ValueError("Số cửa sổ mỗi hàng phải từ 2 đến 6")
-        opened: list[tuple[str, int, int, int]] = []
+        opened: list[tuple[str, int, WindowRect, WindowRect]] = []
         for profile in self.config.profiles:
             worker = self.workers.get(profile.id)
             session = worker.session if worker else None
@@ -571,15 +573,15 @@ class MultiProfileRunner:
             if hwnd is None:
                 continue
             try:
-                rect = get_window_rect(hwnd)
-                outer_width, outer_height = rect.width, rect.height
+                outer = get_window_rect(hwnd)
+                visible = get_visible_window_rect(hwnd)
             except Exception:
                 continue
-            opened.append((profile.id, hwnd, outer_width, outer_height))
+            opened.append((profile.id, hwnd, outer, visible))
         if not opened:
             return 0
-        window_width = max(item[2] for item in opened)
-        window_height = max(item[3] for item in opened)
+        window_width = max(item[3].width for item in opened)
+        window_height = max(item[3].height for item in opened)
         positions = calculate_tiled_positions(
             get_work_area(),
             window_width,
@@ -587,14 +589,14 @@ class MultiProfileRunner:
             len(opened),
             columns_per_row=columns_per_row,
         )
-        for (profile_id, _hwnd, _outer_width, _outer_height), (x, y) in zip(
+        for (profile_id, _hwnd, outer, visible), (x, y) in zip(
             opened, positions, strict=True
         ):
             self.submit(
                 profile_id,
                 CommandKind.MOVE_WINDOW,
-                x=x,
-                y=y,
+                x=x - (visible.left - outer.left),
+                y=y - (visible.top - outer.top),
             )
         return len(opened)
 
