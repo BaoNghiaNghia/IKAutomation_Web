@@ -203,7 +203,8 @@ class Dashboard:
             height=34,
             corner_radius=10,
             border_width=1,
-            border_color="#8797aa",
+            # CTkSegmentedButton 5.2 uses fg_color for its outer border.
+            fg_color="#8797aa",
             selected_color="#9fc6ff",
             selected_hover_color="#82b3f4",
             unselected_color="#f8fbff",
