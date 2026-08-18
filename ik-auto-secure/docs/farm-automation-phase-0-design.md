@@ -111,8 +111,8 @@ không gửi thêm input mù.
 
 ## Thứ tự triển khai tiếp theo
 
-1. Tạo shared contract package và state-transition tests.
-2. Tạo Windows Agent local-only với `FakeDeviceAdapter`; hoàn tất lease,
+1. ✅ Tạo shared contract package và state-transition tests.
+2. ✅ Tạo Windows Agent local-only với `FakeDeviceAdapter`; hoàn tất lease,
    cancellation, checkpoint atomic và event sequence.
 3. Cài `GuardedInput` + `VisionEngine` interface cùng regression fixtures.
 4. Port one bounded cycle bằng fake adapter trước, sau đó mới LDPlayer/ADB.
