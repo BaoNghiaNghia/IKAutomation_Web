@@ -36,6 +36,7 @@ class ProfileRow:
     profile: ProfileConfig
     status: tk.StringVar
     resources: tk.StringVar
+    state_badge: tk.Label
     inspect_button: ttk.Button
     auto_2048_button: ttk.Button
 
@@ -88,51 +89,105 @@ class Dashboard:
         self.root.after(200, self._poll_updates)
 
     def _build(self) -> None:
-        self.root.title("IK Auto — Multi Profile")
+        self.root.title("IK Auto — Browser Control")
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
-        width = max(920, round(screen_width * 0.86))
-        height = max(620, round(screen_height * 0.82))
+        width = max(1040, round(screen_width * 0.72))
+        height = max(700, round(screen_height * 0.78))
         left = max(0, (screen_width - width) // 2)
         top = max(0, (screen_height - height) // 2)
         self.root.geometry(f"{width}x{height}+{left}+{top}")
-        self.root.minsize(900, 580)
+        self.root.minsize(1040, 680)
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
 
-        # Keep the original light/system appearance.  It is easier to scan
-        # across many profiles and follows the user's Windows theme.
         style = ttk.Style(self.root)
-        style.configure("Card.TFrame", relief="solid", borderwidth=1)
-        style.configure("CardValue.TLabel", font=("Segoe UI", 15, "bold"))
+        style.configure("Accent.TButton", font=("Segoe UI", 9, "bold"), padding=(11, 6))
+        style.configure("Danger.TButton", font=("Segoe UI", 9, "bold"), padding=(11, 6))
+        style.configure("Compact.TButton", font=("Segoe UI", 9), padding=(7, 4))
+        style.configure("CardTitle.TLabel", foreground="#64748b", font=("Segoe UI", 9))
+        style.configure("CardValue.TLabel", foreground="#0f172a", font=("Segoe UI", 15, "bold"))
+        self.root.configure(bg="#f5f7fb")
 
-        self.page_canvas = tk.Canvas(self.root, highlightthickness=0, borderwidth=0)
-        page_scrollbar = ttk.Scrollbar(
-            self.root,
-            orient="vertical",
-            command=self.page_canvas.yview,
-        )
-        self.page_canvas.configure(yscrollcommand=page_scrollbar.set)
-        page_scrollbar.pack(side="right", fill="y")
-        self.page_canvas.pack(side="left", fill="both", expand=True)
-        self.content = ttk.Frame(self.page_canvas)
-        self._content_window = self.page_canvas.create_window(
-            (0, 0),
-            window=self.content,
-            anchor="nw",
-        )
-        self.content.bind("<Configure>", self._update_page_scrollregion)
-        self.page_canvas.bind("<Configure>", self._resize_page_content)
-        self.root.bind_all("<MouseWheel>", self._scroll_dashboard, add="+")
-        parent = self.content
+        parent = tk.Frame(self.root, bg="#f5f7fb", padx=18, pady=14)
+        parent.pack(fill="both", expand=True)
+        header = tk.Frame(parent, bg="#f5f7fb")
+        header.pack(fill="x", pady=(0, 12))
+        tk.Label(
+            header,
+            text="Điều khiển browser Infinity Kingdom",
+            bg="#f5f7fb",
+            fg="#0f172a",
+            font=("Segoe UI", 16, "bold"),
+        ).pack(side="left")
+        tk.Label(
+            header,
+            text="Chrome profiles · local only",
+            bg="#e0ecff",
+            fg="#2563eb",
+            padx=10,
+            pady=5,
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="right")
 
-        header = ttk.Frame(parent, padding=12)
-        header.pack(fill="x")
-        ttk.Label(header, text="IK AUTO", font=("Segoe UI", 18, "bold")).pack(side="left")
-        ttk.Button(header, text="Add profile", command=self._add_profile).pack(side="right")
+        body = tk.Frame(parent, bg="#f5f7fb")
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=0, minsize=340)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+        left_panel = tk.Frame(body, bg="#f5f7fb")
+        left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        right_panel = tk.Frame(body, bg="#f5f7fb")
+        right_panel.grid(row=0, column=1, sticky="nsew")
+        right_panel.columnconfigure(0, weight=1)
+        right_panel.rowconfigure(1, weight=1)
 
-        overview = ttk.Frame(parent, padding=(12, 0, 12, 10))
-        overview.pack(fill="x")
+        profiles_card = self._card(left_panel)
+        profiles_card.pack(fill="x", pady=(0, 10))
+        profile_head = tk.Frame(profiles_card, bg="#ffffff")
+        profile_head.pack(fill="x")
+        tk.Label(profile_head, text="Chrome profiles", bg="#ffffff", fg="#0f172a", font=("Segoe UI", 11, "bold")).pack(side="left")
+        ttk.Button(profile_head, text="+ Thêm", command=self._add_profile, style="Accent.TButton").pack(side="right")
+        tk.Label(profiles_card, text="Mỗi profile là một phiên browser độc lập.", bg="#ffffff", fg="#64748b", font=("Segoe UI", 9)).pack(anchor="w", pady=(5, 9))
+        action_row = tk.Frame(profiles_card, bg="#ffffff")
+        action_row.pack(fill="x")
+        ttk.Button(action_row, text="Mở tất cả", command=self.runner.open_all, style="Accent.TButton").pack(side="left", fill="x", expand=True)
+        ttk.Button(action_row, text="Dừng tất cả", command=self.runner.stop_all, style="Danger.TButton").pack(side="left", fill="x", expand=True, padx=(8, 0))
+
+        viewport_card = self._card(left_panel)
+        viewport_card.pack(fill="x", pady=(0, 10))
+        self._section_label(viewport_card, "Cấu hình browser", "Kích thước game được áp khi mở profile.")
+        viewport_row = tk.Frame(viewport_card, bg="#ffffff")
+        viewport_row.pack(fill="x", pady=(8, 7))
+        ttk.Entry(viewport_row, textvariable=self.viewport_width, width=7).pack(side="left")
+        tk.Label(viewport_row, text="×", bg="#ffffff", fg="#64748b").pack(side="left", padx=5)
+        ttk.Entry(viewport_row, textvariable=self.viewport_height, width=7).pack(side="left")
+        tk.Label(viewport_row, text="px", bg="#ffffff", fg="#64748b").pack(side="left", padx=5)
+        ttk.Button(viewport_row, text="Áp dụng", command=self._apply_size_all, style="Compact.TButton").pack(side="right")
+        ttk.Checkbutton(viewport_card, text="Tự resize khi mở", variable=self.auto_resize).pack(anchor="w")
+        ttk.Button(viewport_card, text="Sắp xếp cửa sổ", command=self._arrange_windows, style="Compact.TButton").pack(anchor="w", pady=(8, 0))
+        ttk.Checkbutton(viewport_card, text="Ghim cửa sổ lên trên", variable=self.pin_windows, command=self._toggle_pin_windows).pack(anchor="w", pady=(5, 0))
+        ttk.Button(viewport_card, textvariable=self.drag_button_text, command=self._toggle_all_drag_items, style="Compact.TButton").pack(anchor="w", pady=(5, 0))
+
+        automation_card = self._card(left_panel)
+        automation_card.pack(fill="x")
+        self._section_label(automation_card, "Tự động hóa", "Đồng bộ thao tác và Auto 2048.")
+        master_row = tk.Frame(automation_card, bg="#ffffff")
+        master_row.pack(fill="x", pady=(8, 5))
+        self.master_box = ttk.Combobox(master_row, textvariable=self.sync_master, state="readonly", width=16)
+        self.master_box.pack(side="left", fill="x", expand=True)
+        ttk.Button(master_row, textvariable=self.sync_button_text, command=self._toggle_sync, style="Compact.TButton").pack(side="left", padx=(6, 0))
+        tk.Label(automation_card, textvariable=self.sync_status, bg="#ffffff", fg="#2563eb", font=("Segoe UI", 9)).pack(anchor="w")
+        ttk.Separator(automation_card, orient="horizontal").pack(fill="x", pady=9)
+        tk.Label(automation_card, text="Tốc độ Auto 2048", bg="#ffffff", fg="#475569", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        speed_row = tk.Frame(automation_card, bg="#ffffff")
+        speed_row.pack(fill="x", pady=(5, 0))
+        self.auto_2048_speed_box = ttk.Combobox(speed_row, textvariable=self.auto_2048_speed_text, values=tuple(AUTO_2048_SPEED_LABELS.values()), state="readonly", width=18)
+        self.auto_2048_speed_box.pack(side="left", fill="x", expand=True)
+        ttk.Button(speed_row, text="Lưu", command=self._apply_auto_2048_speed, style="Compact.TButton").pack(side="left", padx=(6, 0))
+
+        overview = self._card(right_panel)
+        overview.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         cards = (
             ("Tổng profile", self.total_profiles_text),
             ("Đang mở", self.open_profiles_text),
@@ -140,225 +195,141 @@ class Dashboard:
             ("CPU Chrome", self.cpu_usage_text),
         )
         for index, (title, variable) in enumerate(cards):
-            card = ttk.Frame(overview, padding=(14, 8), style="Card.TFrame")
-            card.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 6, 0))
-            ttk.Label(card, text=title, style="CardTitle.TLabel").pack(anchor="w")
-            ttk.Label(
-                card,
-                textvariable=variable,
-                style="CardValue.TLabel",
-                font=("Segoe UI", 15, "bold"),
-            ).pack(anchor="w")
+            card = tk.Frame(overview, bg="#ffffff", padx=12, pady=8)
+            card.grid(row=0, column=index, sticky="ew")
+            tk.Label(card, text=title, bg="#ffffff", fg="#64748b", font=("Segoe UI", 9)).pack(anchor="w")
+            tk.Label(card, textvariable=variable, bg="#ffffff", fg="#0f172a", font=("Segoe UI", 15, "bold")).pack(anchor="w", pady=(2, 0))
             overview.columnconfigure(index, weight=1)
-        toolbar = ttk.Frame(parent, padding=(12, 0, 12, 10))
-        toolbar.pack(fill="x")
-        ttk.Button(toolbar, text="Open all", command=self.runner.open_all).pack(side="left")
-        # ttk.Button(toolbar, text="Đọc tất cả", command=self.runner.read_all).pack(
-        #     side="left", padx=6
-        # )
-        ttk.Button(toolbar, text="Close all", command=self.runner.stop_all).pack(side="left")
-
-        automation_toolbar = ttk.Frame(parent, padding=(12, 0, 12, 10))
-        automation_toolbar.pack(fill="x")
-        ttk.Label(automation_toolbar, text="Game viewport:").pack(side="left")
-        ttk.Entry(automation_toolbar, textvariable=self.viewport_width, width=7).pack(
-            side="left", padx=(6, 2)
+        progress_card = self._card(right_panel)
+        progress_card.grid(row=1, column=0, sticky="nsew")
+        progress_head = tk.Frame(progress_card, bg="#ffffff")
+        progress_head.pack(fill="x", pady=(0, 8))
+        tk.Label(progress_head, text="Tiến trình profile", bg="#ffffff", fg="#0f172a", font=("Segoe UI", 11, "bold")).pack(side="left")
+        tk.Label(progress_head, textvariable=self.open_profiles_text, bg="#eef6ff", fg="#2563eb", font=("Segoe UI", 9, "bold"), padx=9, pady=3).pack(side="right")
+        profile_list = tk.Frame(progress_card, bg="#ffffff")
+        profile_list.pack(fill="both", expand=True)
+        self.profile_canvas = tk.Canvas(profile_list, bg="#ffffff", highlightthickness=0)
+        profile_scrollbar = ttk.Scrollbar(
+            profile_list, orient="vertical", command=self.profile_canvas.yview
         )
-        ttk.Label(automation_toolbar, text="×").pack(side="left")
-        ttk.Entry(automation_toolbar, textvariable=self.viewport_height, width=7).pack(
-            side="left", padx=(2, 6)
+        self.profile_canvas.configure(yscrollcommand=profile_scrollbar.set)
+        profile_scrollbar.pack(side="right", fill="y")
+        self.profile_canvas.pack(side="left", fill="both", expand=True)
+        self.table = tk.Frame(self.profile_canvas, bg="#ffffff")
+        self._profile_table_window = self.profile_canvas.create_window(
+            (0, 0), window=self.table, anchor="nw"
         )
-        ttk.Label(automation_toolbar, text="px").pack(side="left")
-        ttk.Checkbutton(
-            automation_toolbar,
-            text="Auto resize khi mở",
-            variable=self.auto_resize,
-        ).pack(side="left", padx=10)
-        ttk.Button(
-            automation_toolbar,
-            text="Lưu + fix size tất cả",
-            command=self._apply_size_all,
-        ).pack(side="left")
-        ttk.Separator(automation_toolbar, orient="vertical").pack(
-            side="left", fill="y", padx=14
-        )
-        ttk.Label(automation_toolbar, text="Profile master:").pack(side="left")
-        self.master_box = ttk.Combobox(
-            automation_toolbar,
-            textvariable=self.sync_master,
-            state="readonly",
-            width=15,
-        )
-        self.master_box.pack(side="left", padx=6)
-        ttk.Button(
-            automation_toolbar,
-            textvariable=self.sync_button_text,
-            command=self._toggle_sync,
-        ).pack(side="left")
-        ttk.Label(
-            automation_toolbar,
-            textvariable=self.sync_status,
-            foreground="#1f5f99",
-        ).pack(side="left", padx=10)
+        self.table.bind("<Configure>", self._update_profile_scrollregion)
+        self.profile_canvas.bind("<Configure>", self._resize_profile_table)
+        self.profile_canvas.bind("<MouseWheel>", self._scroll_profile_list)
 
-        window_toolbar = ttk.Frame(parent, padding=(12, 0, 12, 10))
-        window_toolbar.pack(fill="x")
-        ttk.Button(
-            window_toolbar,
-            text="Sắp xếp cửa sổ",
-            command=self._arrange_windows,
-        ).pack(side="left")
-        ttk.Checkbutton(
-            window_toolbar,
-            text="Pin",
-            variable=self.pin_windows,
-            command=self._toggle_pin_windows,
-        ).pack(side="left", padx=10)
-        ttk.Button(
-            window_toolbar,
-            textvariable=self.drag_button_text,
-            command=self._toggle_all_drag_items,
-        ).pack(side="left")
-        ttk.Separator(window_toolbar, orient="vertical").pack(
-            side="left", fill="y", padx=14
-        )
-        ttk.Label(window_toolbar, text="Tốc độ 2048:").pack(side="left")
-        self.auto_2048_speed_box = ttk.Combobox(
-            window_toolbar,
-            textvariable=self.auto_2048_speed_text,
-            values=tuple(AUTO_2048_SPEED_LABELS.values()),
-            state="readonly",
-            width=18,
-        )
-        self.auto_2048_speed_box.pack(side="left", padx=6)
-        ttk.Button(
-            window_toolbar,
-            text="Áp dụng",
-            command=self._apply_auto_2048_speed,
-        ).pack(side="left")
+        bottom = tk.Frame(right_panel, bg="#f5f7fb")
+        bottom.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        coordinate_frame = self._card(bottom)
+        coordinate_frame.pack(fill="x", pady=(0, 10))
+        coord_head = tk.Frame(coordinate_frame, bg="#ffffff")
+        coord_head.pack(fill="x")
+        tk.Label(coord_head, text="Lấy tọa độ", bg="#ffffff", fg="#0f172a", font=("Segoe UI", 10, "bold")).pack(side="left")
+        ttk.Button(coord_head, text="Copy x,y", command=self._copy_coordinate_xy, style="Compact.TButton").pack(side="right")
+        ttk.Button(coord_head, text="Copy JSON", command=self._copy_coordinate_json, style="Compact.TButton").pack(side="right", padx=5)
+        tk.Label(coordinate_frame, textvariable=self.coordinate_text, bg="#ffffff", fg="#475569", font=("Consolas", 9), anchor="w", justify="left", wraplength=700).pack(fill="x", pady=(5, 0))
+        log_frame = self._card(bottom)
+        log_frame.pack(fill="x")
+        tk.Label(log_frame, text="Nhật ký gần nhất", bg="#ffffff", fg="#0f172a", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 5))
+        self.log = ScrolledText(log_frame, height=6, state="disabled", font=("Consolas", 8), relief="flat", bg="#f8fafc", fg="#334155", padx=8, pady=6)
+        self.log.pack(fill="x")
 
-        table_container = ttk.Frame(parent, padding=(12, 0, 12, 8))
-        table_container.pack(fill="x")
-        self.table = table_container
-        headers = (
-            ("Profile", 24),
-            ("Mode", 10),
-            ("Status", 42),
-            ("Tài nguyên", 20),
-            ("Controls", 48),
-        )
-        for column, (label, width) in enumerate(headers):
-            ttk.Label(
-                table_container,
-                text=label,
-                width=width,
-                font=("Segoe UI", 9, "bold"),
-            ).grid(row=0, column=column, sticky="w", padx=3, pady=(0, 6))
-        table_container.columnconfigure(2, weight=1)
+    @staticmethod
+    def _card(parent: tk.Misc) -> tk.Frame:
+        return tk.Frame(parent, bg="#ffffff", highlightbackground="#e2e8f0", highlightthickness=1, padx=14, pady=12)
 
-        coordinate_frame = ttk.LabelFrame(parent, text="Lấy tọa độ dev", padding=8)
-        coordinate_frame.pack(fill="x", padx=12, pady=(0, 8))
-        ttk.Label(
-            coordinate_frame,
-            textvariable=self.coordinate_text,
-            font=("Consolas", 10, "bold"),
-        ).pack(side="left", fill="x", expand=True)
-        ttk.Button(coordinate_frame, text="Copy x,y", command=self._copy_coordinate_xy).pack(
-            side="right"
-        )
-        ttk.Button(
-            coordinate_frame,
-            text="Copy JSON",
-            command=self._copy_coordinate_json,
-        ).pack(side="right", padx=6)
+    @staticmethod
+    def _section_label(parent: tk.Misc, title: str, description: str) -> None:
+        tk.Label(parent, text=title, bg="#ffffff", fg="#0f172a", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        tk.Label(parent, text=description, bg="#ffffff", fg="#64748b", font=("Segoe UI", 9), wraplength=290, justify="left").pack(anchor="w", pady=(3, 0))
 
-        log_frame = ttk.LabelFrame(parent, text="Nhật ký dashboard — 10 dòng gần nhất", padding=8)
-        log_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        self.log = ScrolledText(log_frame, height=16, state="disabled", font=("Consolas", 9))
-        self.log.pack(fill="both", expand=True)
+    def _update_profile_scrollregion(self, _event: tk.Event[tk.Misc]) -> None:
+        self.profile_canvas.configure(scrollregion=self.profile_canvas.bbox("all"))
 
-    def _update_page_scrollregion(self, _event: tk.Event[tk.Misc]) -> None:
-        self.page_canvas.configure(scrollregion=self.page_canvas.bbox("all"))
+    def _resize_profile_table(self, event: tk.Event[tk.Misc]) -> None:
+        self.profile_canvas.itemconfigure(self._profile_table_window, width=event.width)
 
-    def _resize_page_content(self, event: tk.Event[tk.Misc]) -> None:
-        self.page_canvas.itemconfigure(self._content_window, width=event.width)
-
-    def _scroll_dashboard(self, event: tk.Event[tk.Misc]) -> str | None:
-        widget = self.root.winfo_containing(event.x_root, event.y_root)
-        if widget is not None and widget.winfo_class() in {"Text", "TCombobox"}:
-            return None
+    def _scroll_profile_list(self, event: tk.Event[tk.Misc]) -> str | None:
         delta = int(-event.delta / 120) if event.delta else 0
         if delta:
-            self.page_canvas.yview_scroll(delta, "units")
+            self.profile_canvas.yview_scroll(delta, "units")
             return "break"
         return None
 
     def _draw_rows(self) -> None:
-        for child in self.table.grid_slaves():
-            if int(child.grid_info()["row"]) > 0:
-                child.destroy()
+        for child in self.table.winfo_children():
+            child.destroy()
         self.rows.clear()
-        for row_index, profile in enumerate(self.config.profiles, start=1):
+        for profile in self.config.profiles:
             status = tk.StringVar(value="Đã dừng")
             resources = tk.StringVar(value="—")
-            ttk.Label(self.table, text=f"{profile.name}\n{profile.id}", width=24).grid(
-                row=row_index, column=0, sticky="w", padx=3, pady=5
+            item = tk.Frame(
+                self.table,
+                bg="#ffffff",
+                highlightbackground="#e2e8f0",
+                highlightthickness=1,
+                padx=11,
+                pady=8,
             )
-            ttk.Label(self.table, text=profile.mode.value, width=10).grid(
-                row=row_index, column=1, sticky="w", padx=3
-            )
-            ttk.Label(self.table, textvariable=status, width=42).grid(
-                row=row_index, column=2, sticky="ew", padx=3
-            )
-            ttk.Label(self.table, textvariable=resources, width=20).grid(
-                row=row_index, column=3, sticky="w", padx=3
-            )
-            controls = ttk.Frame(self.table)
-            controls.grid(row=row_index, column=4, sticky="w", padx=3)
+            item.pack(fill="x", pady=(0, 7))
+            top = tk.Frame(item, bg="#ffffff")
+            top.pack(fill="x")
+            identity = tk.Frame(top, bg="#ffffff")
+            identity.pack(side="left", fill="x", expand=True)
+            tk.Label(identity, text=profile.name, bg="#ffffff", fg="#0f172a", font=("Segoe UI", 10, "bold")).pack(side="left")
+            tk.Label(identity, text=f"  {profile.id} · {profile.mode.value}", bg="#ffffff", fg="#64748b", font=("Segoe UI", 8)).pack(side="left")
+            state_badge = tk.Label(top, text="Đã dừng", bg="#f1f5f9", fg="#475569", font=("Segoe UI", 8, "bold"), padx=8, pady=3)
+            state_badge.pack(side="right")
+            detail = tk.Frame(item, bg="#ffffff")
+            detail.pack(fill="x", pady=(5, 7))
+            tk.Label(detail, textvariable=status, bg="#ffffff", fg="#475569", font=("Segoe UI", 9), anchor="w").pack(side="left", fill="x", expand=True)
+            tk.Label(detail, textvariable=resources, bg="#ffffff", fg="#64748b", font=("Segoe UI", 8)).pack(side="right")
+            controls = tk.Frame(item, bg="#ffffff")
+            controls.pack(fill="x")
             ttk.Button(
                 controls,
                 text="Mở",
                 command=lambda profile_id=profile.id: self._submit(profile_id, CommandKind.OPEN),
-                width=6,
+                style="Compact.TButton",
             ).pack(side="left")
-            # ttk.Button(
-            #     controls,
-            #     text="Đọc data",
-            #     command=lambda profile_id=profile.id: self._submit(profile_id, CommandKind.READ),
-            #     width=8,
-            # ).pack(side="left", padx=3)
             auto_2048_button = ttk.Button(
                 controls,
                 text="Auto 2048",
                 command=lambda profile_id=profile.id: self._toggle_auto_2048(profile_id),
-                width=11,
+                style="Compact.TButton",
             )
-            auto_2048_button.pack(side="left", padx=(3, 0))
+            auto_2048_button.pack(side="left", padx=(5, 0))
             ttk.Button(
                 controls,
-                text="Screen shot",
+                text="Ảnh",
                 command=lambda profile_id=profile.id: self._submit(
                     profile_id, CommandKind.SCREENSHOT
                 ),
-                width=12,
-            ).pack(side="left", padx=3)
+                style="Compact.TButton",
+            ).pack(side="left", padx=5)
             inspect_button = ttk.Button(
                 controls,
-                text="Check",
+                text="Đo",
                 command=lambda profile_id=profile.id: self._toggle_inspector(profile_id),
-                width=6,
+                style="Compact.TButton",
             )
-            inspect_button.pack(side="left", padx=3)
+            inspect_button.pack(side="left", padx=5)
             ttk.Button(
                 controls,
-                text="Delete",
+                text="Xóa",
                 command=lambda profile_id=profile.id: self._remove_profile(profile_id),
-                width=7,
-            ).pack(side="left", padx=(3, 0))
+                style="Compact.TButton",
+            ).pack(side="right")
             self.rows[profile.id] = ProfileRow(
                 profile,
                 status,
                 resources,
+                state_badge,
                 inspect_button,
                 auto_2048_button,
             )
@@ -366,6 +337,20 @@ class Dashboard:
         self.master_box.configure(values=profile_ids)
         if profile_ids and self.sync_master.get() not in profile_ids:
             self.sync_master.set(profile_ids[0])
+
+    @staticmethod
+    def _state_style(state: WorkerState) -> tuple[str, str, str]:
+        if state in {WorkerState.READY, WorkerState.COMPLETED}:
+            return ("Sẵn sàng", "#dcfce7", "#15803d")
+        if state in {WorkerState.STARTING, WorkerState.RUNNING}:
+            return ("Đang chạy", "#dbeafe", "#2563eb")
+        if state == WorkerState.ERROR:
+            return ("Cần chú ý", "#fee2e2", "#b91c1c")
+        return ("Đã dừng", "#f1f5f9", "#475569")
+
+    def _set_row_state(self, row: ProfileRow, state: WorkerState) -> None:
+        label, background, foreground = self._state_style(state)
+        row.state_badge.configure(text=label, bg=background, fg=foreground)
 
     def _submit(self, profile_id: str, kind: CommandKind) -> None:
         self.runner.submit(profile_id, kind)
@@ -649,6 +634,7 @@ class Dashboard:
                 row = self.rows.get(snapshot.profile_id)
                 if row:
                     row.status.set(snapshot.message)
+                    self._set_row_state(row, snapshot.state)
                 if snapshot.state == WorkerState.STOPPED:
                     if self.inspecting_profile_id == snapshot.profile_id:
                         self.inspecting_profile_id = None
