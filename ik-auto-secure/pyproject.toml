@@ -9,8 +9,8 @@ description = "Privacy-first multi-profile Chrome manager for ik.playfun.vn"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
+  "customtkinter>=5.2,<6",
   "playwright>=1.54,<2",
-  "ttkbootstrap>=1.10,<2",
 ]
 
 [project.optional-dependencies]
