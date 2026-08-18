@@ -99,7 +99,7 @@ class Dashboard:
             value=AUTO_2048_SPEED_LABELS[self.config.auto_2048_speed]
         )
         self.drag_items_visible = True
-        self.drag_button_text = tk.StringVar(value="Ẩn drag tất cả")
+        self.drag_button_text = tk.StringVar(value="Ẩn nút kéo")
         self.pin_windows = tk.BooleanVar(value=False)
         self.table = ctk.CTkFrame(root)
         self.log: ctk.CTkTextbox
@@ -171,38 +171,55 @@ class Dashboard:
         profiles_card.pack(fill="x", pady=(0, 7))
         profile_head = ctk.CTkFrame(profiles_card, fg_color="transparent")
         profile_head.pack(fill="x", padx=12, pady=(10, 0))
-        ctk.CTkLabel(profile_head, text="Chrome profiles", text_color="#20324a", font=self._font(16, "bold")).pack(side="left")
-        self._button(profile_head, "+ Thêm", self._add_profile, "primary").pack(side="right")
-        ctk.CTkLabel(profiles_card, text="Phiên browser độc lập, lưu cục bộ.", text_color="#6d8098", font=self._font(12)).pack(anchor="w", padx=12, pady=(2, 7))
+        ctk.CTkLabel(profile_head, text="Tài khoản Chrome", text_color="#20324a", font=self._font(16, "bold")).pack(side="left")
+        self._button(profile_head, "+ Thêm tài khoản", self._add_profile, "primary").pack(side="right")
+        ctk.CTkLabel(profiles_card, text="Mỗi tài khoản có một phiên browser riêng, lưu cục bộ.", text_color="#6d8098", font=self._font(12), wraplength=300, justify="left").pack(anchor="w", padx=12, pady=(2, 7))
         action_row = ctk.CTkFrame(profiles_card, fg_color="transparent")
         action_row.pack(fill="x", padx=12, pady=(0, 10))
         self._button(action_row, "Mở tất cả", self.runner.open_all, "primary").pack(side="left", fill="x", expand=True)
-        self._button(action_row, "Dừng", self.runner.stop_all, "danger").pack(side="left", padx=(6, 0))
+        self._button(action_row, "Dừng tất cả", self.runner.stop_all, "danger").pack(side="left", padx=(6, 0))
 
         viewport_card = self._card(left_panel)
         viewport_card.pack(fill="x", pady=(0, 7))
-        self._section_label(viewport_card, "Bố cục cửa sổ", "Số cửa sổ Chrome trên mỗi hàng (2–6).")
+        self._section_label(
+            viewport_card,
+            "Sắp xếp cửa sổ",
+            "Chọn số cửa sổ trên mỗi hàng, rồi áp dụng cho các Chrome đang mở.",
+        )
         viewport_row = ctk.CTkFrame(viewport_card, fg_color="transparent")
         viewport_row.pack(fill="x", padx=12, pady=(6, 5))
-        ctk.CTkLabel(viewport_row, text="Cửa sổ / hàng", text_color="#52657d", font=self._font(12, "bold")).pack(side="left")
-        self.windows_per_row_box = ctk.CTkComboBox(
+        ctk.CTkLabel(
+            viewport_row,
+            text="Số cửa sổ / hàng",
+            text_color="#52657d",
+            font=self._font(12, "bold"),
+        ).pack(side="left")
+        self.windows_per_row_box = ctk.CTkSegmentedButton(
             viewport_row,
             variable=self.windows_per_row,
             values=("2", "3", "4", "5", "6"),
-            width=78,
+            command=lambda _value: self._apply_windows_per_row(),
+            width=164,
             height=34,
-            state="readonly",
-            corner_radius=11,
             font=self._font(13),
         )
-        self.windows_per_row_box.pack(side="left", padx=(8, 0))
-        self._button(viewport_row, "Lưu", self._apply_windows_per_row, "soft").pack(side="right")
+        self.windows_per_row_box.pack(side="right")
         window_row = ctk.CTkFrame(viewport_card, fg_color="transparent")
-        window_row.pack(fill="x", padx=12, pady=(2, 0))
-        self._button(window_row, "Sắp xếp", self._arrange_windows, "soft").pack(side="left")
+        window_row.pack(fill="x", padx=12, pady=(2, 4))
+        self._button(window_row, "Áp dụng & sắp xếp", self._arrange_windows, "primary").pack(
+            side="left", fill="x", expand=True
+        )
         self.drag_button = self._button(window_row, self.drag_button_text.get(), self._toggle_all_drag_items, "soft")
         self.drag_button.pack(side="left", padx=(5, 0))
-        ctk.CTkCheckBox(viewport_card, text="Ghim cửa sổ", variable=self.pin_windows, command=self._toggle_pin_windows, font=self._font(13), checkbox_width=21, checkbox_height=21).pack(anchor="w", padx=12, pady=(4, 10))
+        ctk.CTkCheckBox(
+            viewport_card,
+            text="Luôn nổi trên các cửa sổ khác",
+            variable=self.pin_windows,
+            command=self._toggle_pin_windows,
+            font=self._font(12),
+            checkbox_width=20,
+            checkbox_height=20,
+        ).pack(anchor="w", padx=12, pady=(2, 10))
 
         automation_card = self._card(left_panel)
         automation_card.pack(fill="x")
@@ -539,13 +556,11 @@ class Dashboard:
     def _toggle_all_drag_items(self) -> None:
         self.drag_items_visible = not self.drag_items_visible
         opened = self.runner.set_all_drag_items_visible(self.drag_items_visible)
-        self.drag_button_text.set(
-            "Ẩn drag tất cả" if self.drag_items_visible else "Hiện drag tất cả"
-        )
+        self.drag_button_text.set("Ẩn nút kéo" if self.drag_items_visible else "Hiện nút kéo")
         self.drag_button.configure(text=self.drag_button_text.get())
         action = "hiện" if self.drag_items_visible else "ẩn"
         self._append_log(
-            f"Đã {action} HTML button #drag-item trên {opened} profile đang mở"
+            f"Đã {action} nút kéo trên {opened} profile đang mở"
         )
 
     def _toggle_pin_windows(self) -> None:
