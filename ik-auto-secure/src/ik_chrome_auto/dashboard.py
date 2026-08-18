@@ -69,7 +69,13 @@ class Dashboard(QWidget):
         screen = QGuiApplication.primaryScreen().availableGeometry()
         self.setGeometry(screen.right() - screen.width() // 2 + 1, screen.bottom() - screen.height() // 2 + 1, screen.width() // 2, screen.height() // 2)
         self.setMinimumSize(780, 520)
-        self.setStyleSheet("QWidget { background:#eef4fb; color:#172b4d; font-family:Inter,Segoe UI; font-size:13px; } CardWidget { background:white; border:1px solid #dce6f3; border-radius:14px; } QScrollArea { border:none; } QTextEdit { background:#f5f8fc; border:1px solid #dce6f3; border-radius:9px; color:#52657d; }")
+        self.setStyleSheet("""
+            Dashboard { background: #eef4fb; color: #172b4d; font-family: Inter, Segoe UI; font-size: 13px; }
+            CardWidget { background: #ffffff; border: 1px solid #dce6f3; border-radius: 14px; }
+            QLabel { background: transparent; color: #172b4d; }
+            QScrollArea, QScrollArea > QWidget > QWidget { border: none; background: transparent; }
+            QTextEdit { background: #f5f8fc; border: 1px solid #dce6f3; border-radius: 9px; color: #52657d; }
+        """)
         root = QVBoxLayout(self); root.setContentsMargins(14, 12, 14, 14); root.setSpacing(10)
         head = QHBoxLayout(); title = SubtitleLabel("IK Auto"); title.setStyleSheet("font-size:22px;font-weight:700;"); head.addWidget(title); head.addWidget(QLabel("Browser control")); head.addStretch(); secure = QLabel("●  Local & secure"); secure.setStyleSheet("background:#d9f7e8;color:#087443;border-radius:12px;padding:5px 10px;font-weight:600;"); head.addWidget(secure); root.addLayout(head)
         body = QHBoxLayout(); root.addLayout(body, 1)
@@ -89,7 +95,7 @@ class Dashboard(QWidget):
     def _card() -> CardWidget: return CardWidget()
     @staticmethod
     def _muted(text: str) -> QLabel:
-        label=QLabel(text); label.setStyleSheet("color:#62758e;"); label.setWordWrap(True); return label
+        label=QLabel(text); label.setStyleSheet("color:#62758e; background:transparent;"); label.setWordWrap(True); return label
 
     def _draw_rows(self) -> None:
         while self.table_layout.count():
