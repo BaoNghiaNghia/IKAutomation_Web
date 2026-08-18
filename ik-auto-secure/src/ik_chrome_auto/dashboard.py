@@ -661,7 +661,9 @@ class Dashboard:
             scrollbar_button_color="#b8c8dc",
             scrollbar_button_hover_color="#8fa9c7",
         )
-        list_frame.pack(fill="x", expand=False, padx=18, pady=(0, 7))
+        # Keep controls at the bottom while letting the account list use any
+        # extra modal height.  It remains scrollable when many rows are added.
+        list_frame.pack(fill="both", expand=True, padx=18, pady=(0, 7))
 
         def refresh_rows() -> None:
             for index, row in enumerate(rows, start=1):
