@@ -567,6 +567,23 @@ class ProfileWorker:
                 self._farm_next_at = time.monotonic() + 1.2
                 self._publish(WorkerState.RUNNING, "Auto Farm: đã mở World Map, đang xác minh")
                 return
+            if decision.step == FarmStep.FIND_RESOURCE and state == FarmGameState.RESOURCE_SEARCH:
+                screenshot = self._save_farm_debug_capture("resource-plan-pending")
+                self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
+                self._log_farm(
+                    "resource_plan_pending",
+                    {
+                        "resource": decision.resource,
+                        "level": decision.level,
+                        "screenshot": str(screenshot) if screenshot else None,
+                    },
+                )
+                self._publish(
+                    WorkerState.RUNNING,
+                    f"Auto Farm: panel đã xác minh; chờ template chọn {decision.resource} cấp {decision.level}",
+                    f"Ảnh để port bước tiếp theo: {screenshot}" if screenshot else "",
+                )
+                return
             if decision.step == FarmStep.WAITING and state == FarmGameState.WORLD_MAP:
                 screenshot = self._save_farm_debug_capture("blocked-no-ready-team")
                 self._log_farm(

@@ -12,6 +12,7 @@ def test_city_requires_map_button_and_no_higher_priority_overlay() -> None:
     assert detect(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON, FarmTemplateId.WORLD_MAP_ANCHOR).state == DetectedGameState.WORLD_MAP
     assert detect(FarmTemplateId.BROWSER_CANVAS_READY_ANCHOR).state == DetectedGameState.UNKNOWN
     assert detect(FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON).state == DetectedGameState.UNKNOWN
+    assert detect(FarmTemplateId.BROWSER_RESOURCE_SEARCH_PANEL).state == DetectedGameState.RESOURCE_SEARCH_PANEL
 
 
 def test_detection_result_keeps_ready_team_slots() -> None:

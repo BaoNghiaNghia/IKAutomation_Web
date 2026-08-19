@@ -34,6 +34,7 @@ class FarmTemplateId(StrEnum):
     CITY_TO_WORLD_MAP_BUTTON = "city_to_world_map_button"
     BROWSER_CANVAS_READY_ANCHOR = "browser_canvas_ready_anchor"
     BROWSER_RESOURCE_SEARCH_BUTTON = "browser_resource_search_button"
+    BROWSER_RESOURCE_SEARCH_PANEL = "browser_resource_search_panel"
 
 
 class DetectedGameState(StrEnum):
@@ -86,8 +87,11 @@ class BrowserGameStateDetector:
             FarmTemplateId.LEVEL_MINUS_BUTTON,
             FarmTemplateId.RESOURCE_TAB_SELECTED,
             FarmTemplateId.RESOURCE_TAB_UNSELECTED,
+            FarmTemplateId.BROWSER_RESOURCE_SEARCH_PANEL,
         ))
-        panel_confirmed = panel_chrome and found[FarmTemplateId.SEARCH_BUTTON_ENABLED]
+        panel_confirmed = found[FarmTemplateId.BROWSER_RESOURCE_SEARCH_PANEL] or (
+            panel_chrome and found[FarmTemplateId.SEARCH_BUTTON_ENABLED]
+        )
         popup_signals = sum(found[item] for item in (
             FarmTemplateId.RESOURCE_POPUP_INFO_ANCHOR,
             FarmTemplateId.RESOURCE_POPUP_IRON_TITLE,
