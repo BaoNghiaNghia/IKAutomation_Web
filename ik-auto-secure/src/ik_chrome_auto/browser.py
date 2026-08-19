@@ -122,6 +122,7 @@ class ChromeProfileSession:
         self._page_cdp_session: Any | None = None
         self._direct_canvas_capture_supported: bool | None = None
         self._farm_matcher: Any | None = None
+        self._last_farm_capture_png: bytes | None = None
 
     @property
     def context(self) -> BrowserContext:
@@ -612,10 +613,17 @@ class ChromeProfileSession:
         from ik_chrome_auto.farm_matcher import BrowserCanvasMatcher
 
         png, surface = self.capture_game_surface_png(prefer_browser_capture=True)
+        # The worker can retain this exact input image on a failed preflight.
+        # It is intentionally kept only in memory until a diagnostic is needed.
+        self._last_farm_capture_png = png
         if self._farm_matcher is None:
             self._farm_matcher = BrowserCanvasMatcher()
         result = self._farm_matcher.detect(png)
         return result, surface, self._png_dimensions(png)
+
+    def last_farm_capture_png(self) -> bytes | None:
+        """Return the most recent CDP canvas capture for local diagnostics."""
+        return self._last_farm_capture_png
 
     @staticmethod
     def _png_dimensions(png: bytes) -> tuple[int, int]:

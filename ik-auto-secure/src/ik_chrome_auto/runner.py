@@ -102,6 +102,13 @@ class ProfileWorker:
         self.coordinate_log = JsonLineLog(
             config.data_dir / "logs" / f"coordinates-{profile.id}.jsonl"
         )
+        # Farm diagnostics stay separate from general dashboard events so a
+        # failed template can be investigated without sifting through UI logs.
+        self.farm_log = JsonLineLog(
+            config.data_dir / "logs" / f"farm-{profile.id}.jsonl",
+            max_bytes=2_000_000,
+            backups=2,
+        )
         self.stop_event = threading.Event()
         self.commands: queue.Queue[WorkerCommand] = queue.Queue()
         self.thread: threading.Thread | None = None
@@ -214,10 +221,12 @@ class ProfileWorker:
                     self._farm = FarmWorkflow()
                     self._farm_next_at = 0.0
                     self._farm_city_clicks = 0
+                    self._log_farm("started", {})
                     self._publish(WorkerState.RUNNING, "Auto Farm: đang preflight game canvas")
                     continue
                 if command.kind == CommandKind.STOP_FARM:
                     self._farm = None
+                    self._log_farm("stopped", {"reason": "user"})
                     self._publish(WorkerState.READY if self.session is not None else WorkerState.STOPPED, "Đã dừng Auto Farm")
                     continue
                 if command.kind == CommandKind.SET_2048_SPEED:
@@ -429,6 +438,16 @@ class ProfileWorker:
                 DetectedGameState.RESOURCE_EXPIRY_DIALOG: FarmGameState.RESOURCE_EXPIRY,
             }.get(detected.state, FarmGameState.UNKNOWN)
             city = detected.evidence_for(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
+            world = detected.evidence_for(FarmTemplateId.WORLD_MAP_ANCHOR)
+            self._log_farm(
+                "detection",
+                {
+                    "state": detected.state.value,
+                    "canvas": {"width": image_size[0], "height": image_size[1]},
+                    "city": self._evidence_payload(city),
+                    "world_map": self._evidence_payload(world),
+                },
+            )
             decision = self._farm.decide(state, target_verified=city.actionable)
             if decision.step == FarmStep.ENTER_WORLD_MAP and city.actionable:
                 if self._farm_city_clicks >= 2:
@@ -444,6 +463,7 @@ class ProfileWorker:
                     return
                 self.session.tap_farm_template(fresh_city.bounds, fresh_size)  # type: ignore[arg-type]
                 self._farm_city_clicks += 1
+                self._log_farm("tap_city_to_world_map", {"bounds": fresh_city.bounds})
                 self._farm_next_at = time.monotonic() + 1.2
                 self._publish(WorkerState.RUNNING, "Auto Farm: đã mở World Map, đang xác minh")
                 return
@@ -455,17 +475,53 @@ class ProfileWorker:
             if state == FarmGameState.UNKNOWN:
                 # Keep the worker safe, but expose the two decisive scores so
                 # a canvas/theme mismatch can be diagnosed without guessing.
-                world = detected.evidence_for(FarmTemplateId.WORLD_MAP_ANCHOR).confidence
+                screenshot = self._save_farm_debug_capture("unknown")
+                world_score = world.confidence
                 city_score = city.confidence
+                self._log_farm(
+                    "unknown_state",
+                    {
+                        "city_confidence": city_score,
+                        "world_map_confidence": world_score,
+                        "screenshot": str(screenshot) if screenshot else None,
+                    },
+                )
                 self._publish(
                     WorkerState.RUNNING,
-                    f"Auto Farm: {decision.message} (City={city_score:.2f}; World Map={world:.2f})",
+                    f"Auto Farm: {decision.message} (City={city_score:.2f}; World Map={world_score:.2f})",
+                    f"Log: {self.farm_log.path}" + (f" | Ảnh debug: {screenshot}" if screenshot else ""),
                 )
                 return
             self._publish(WorkerState.RUNNING, f"Auto Farm: {decision.message}")
         except Exception as error:
+            screenshot = self._save_farm_debug_capture("error")
+            self._log_farm(
+                "error",
+                {"type": type(error).__name__, "message": str(error), "screenshot": str(screenshot) if screenshot else None},
+            )
             self._farm = None
             self._publish(WorkerState.ERROR, f"Auto Farm đã dừng an toàn: {error}")
+
+    def _log_farm(self, event: str, payload: dict[str, object]) -> None:
+        self.farm_log.write(event, {"profile_id": self.profile.id, **payload})
+
+    @staticmethod
+    def _evidence_payload(evidence: object) -> dict[str, object]:
+        return {
+            "found": bool(getattr(evidence, "found", False)),
+            "confidence": round(float(getattr(evidence, "confidence", 0.0)), 4),
+            "bounds": getattr(evidence, "bounds", None),
+        }
+
+    def _save_farm_debug_capture(self, reason: str) -> Path | None:
+        if self.session is None:
+            return None
+        png = self.session.last_farm_capture_png()
+        if not png:
+            return None
+        folder = self.config.data_dir / "screenshots" / self.profile.id / "farm-debug"
+        path = folder / f"{reason}-{time.strftime('%Y%m%d-%H%M%S')}.png"
+        return write_retained_png(path, png, keep=10)
 
     def _close_session(self) -> None:
         self._auto_2048 = None

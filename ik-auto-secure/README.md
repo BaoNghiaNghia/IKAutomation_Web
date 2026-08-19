@@ -38,6 +38,18 @@ Run tests from an activated virtual environment:
 python -m pytest -q
 ```
 
+## Debug Auto Farm
+
+Khi bấm **Farm**, tool ghi log riêng theo từng profile tại
+`data\logs\farm-<profile-id>.jsonl`. Mỗi dòng có thời gian, trạng thái game,
+kích thước canvas, điểm khớp City/World Map và thao tác đã được xác minh.
+
+Nếu chưa nhận diện được game hoặc có lỗi an toàn, ảnh canvas CDP tương ứng được
+lưu tại `data\screenshots\<profile-id>\farm-debug`. Tool chỉ giữ 10 ảnh mới
+nhất/profile; log Auto Farm tự xoay vòng ở 2 MB với 2 bản sao lưu. Khi cần hỗ
+trợ, gửi file log cùng ảnh debug mới nhất; không gửi thư mục profile Chrome hay
+file credential.
+
 ## Build ứng dụng Windows
 
 Sau khi chạy `run.cmd` một lần, double-click [`build.cmd`](build.cmd). Script sẽ
