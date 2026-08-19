@@ -4,7 +4,15 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from ik_chrome_auto.farm_vision import BrowserGameStateDetector, DETECTION_TEMPLATES, FarmTemplateId, GameDetectionResult, TemplateEvidence
+from ik_chrome_auto.farm_vision import (
+    BrowserGameStateDetector,
+    DETECTION_TEMPLATES,
+    FarmTemplateId,
+    GameDetectionResult,
+    TeamRosterRow,
+    TeamRowState,
+    TemplateEvidence,
+)
 
 # The source pack was captured at 1280x720.  A browser canvas is frequently
 # stretched independently on each axis by its host page, so scaling from only
@@ -15,6 +23,12 @@ _REFERENCE_HEIGHT = 720
 _BROWSER_REFERENCE_WIDTH = 836
 _BROWSER_REFERENCE_HEIGHT = 433
 _READY_TEAM_LABEL = "ready_team_label.png"
+# Browser screenshots have their own HUD scaling. These are stable roster
+# layout proportions, not gameplay click coordinates. A matched Ready label
+# is mapped to its actual row before any scheduler decision is made.
+_ROSTER_TOP_RATIO = 0.425
+_ROSTER_ROW_HEIGHT_RATIO = 0.071
+_MAX_TEAM_ROWS = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,10 +183,21 @@ class BrowserCanvasMatcher:
             raise ValueError("Canvas screenshot không phải PNG hợp lệ")
         evidence = {template_id: self._match(image, template_id) for template_id in DETECTION_TEMPLATES}
         result = BrowserGameStateDetector().detect(evidence)
-        return replace(result, ready_teams=self._ready_teams(image))
+        roster = self._team_roster(image)
+        return replace(
+            result,
+            ready_teams=tuple(row.team for row in roster if row.state == TeamRowState.READY),
+            team_roster=roster,
+        )
 
-    def _ready_teams(self, image: object) -> tuple[int, ...]:
-        """Return available team slots from repeated `Sẵn sàng` canvas labels."""
+    def _team_roster(self, image: object) -> tuple[TeamRosterRow, ...]:
+        """Scan every unlocked roster row and classify it exactly once.
+
+        `Sẵn sàng` is positive ready evidence. A confirmed higher row proves
+        preceding rows exist (the game's unlock order); rows without that label
+        are Busy. This is the same conservative inference used by the ADB
+        availability service and prevents a gathering team being re-selected.
+        """
         import cv2
 
         template = self._load(_READY_TEAM_LABEL)
@@ -192,14 +217,14 @@ class BrowserCanvasMatcher:
         search_gray = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
         template_gray = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
         scores = cv2.matchTemplate(search_gray, template_gray, cv2.TM_CCOEFF_NORMED)
-        matches: list[int] = []
+        label_tops: list[int] = []
         while True:
             _, confidence, _, location = cv2.minMaxLoc(scores)
             if confidence < 0.48:
                 break
-            row_y = top + int(location[1])
-            if all(abs(row_y - existing) >= max(8, scaled_height) for existing in matches):
-                matches.append(row_y)
+            label_y = top + int(location[1])
+            if all(abs(label_y - existing) >= max(8, scaled_height) for existing in label_tops):
+                label_tops.append(label_y)
             cv2.rectangle(
                 scores,
                 (max(0, location[0] - scaled_width), max(0, location[1] - scaled_height)),
@@ -207,8 +232,23 @@ class BrowserCanvasMatcher:
                 -1,
                 thickness=-1,
             )
-        # The ADB-derived policy is intentionally limited to teams 2–5.
-        return tuple(range(2, min(5, len(matches) + 1) + 1))
+        roster_top = round(image_height * _ROSTER_TOP_RATIO)
+        row_height = max(1, round(image_height * _ROSTER_ROW_HEIGHT_RATIO))
+        ready = {
+            min(_MAX_TEAM_ROWS, max(1, round((label_top - roster_top) / row_height) + 1))
+            for label_top in label_tops
+        }
+        if not ready:
+            return ()
+        highest_confirmed = max(ready)
+        return tuple(
+            TeamRosterRow(
+                team=team,
+                state=TeamRowState.READY if team in ready else TeamRowState.BUSY,
+                evidence="ReadyLabel" if team in ready else "InferredPrecedingRow",
+            )
+            for team in range(1, highest_confirmed + 1)
+        )
 
     def _match(self, image: object, template_id: FarmTemplateId) -> TemplateEvidence:
         spec = SPECS.get(template_id)

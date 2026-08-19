@@ -14,6 +14,16 @@ waiting`.
 Mỗi cycle chỉ hoàn tất tối đa một dispatch đã xác minh. Fallback phải thử hết
 level của resource hiện tại trước khi chuyển resource kế tiếp.
 
+## Quét roster World Map
+
+- Mỗi cycle phải quét từng hàng đội đã mở, với số đội và trạng thái từng đội
+  được ghi log: `ready` hoặc `busy`.
+- Nhãn `Sẵn sàng` là bằng chứng dương cho đúng hàng đó. Nếu một hàng cao hơn
+  được xác nhận thì các hàng trước đó được coi là đã mở; hàng không có nhãn
+  `Sẵn sàng` được phân loại `busy`, không được chọn lại.
+- Scheduler chỉ chọn đội `ready` đầu tiên theo policy. Không được suy ra team
+  từ số lượng nhãn sẵn sàng.
+
 ## Quy tắc input và vision
 
 - Không input ở trạng thái `Unknown`.

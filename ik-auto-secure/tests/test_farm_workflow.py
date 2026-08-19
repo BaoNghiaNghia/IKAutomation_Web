@@ -41,6 +41,16 @@ def test_find_resource_keeps_the_planned_resource_and_level() -> None:
     assert (decision.resource, decision.level, decision.team) == ("iron", 7, 2)
 
 
+def test_busy_team_is_not_selected_when_roster_has_later_ready_team() -> None:
+    farm = FarmWorkflow()
+    farm.decide(FarmGameState.CITY)
+
+    decision = farm.decide(FarmGameState.WORLD_MAP, ready_teams=(1, 3, 4))
+
+    assert decision.team == 3
+    assert decision.step == FarmStep.OPEN_SEARCH
+
+
 def test_team_selection_cannot_advance_to_dispatch_without_selection_evidence() -> None:
     farm = FarmWorkflow()
     farm.decide(FarmGameState.CITY)

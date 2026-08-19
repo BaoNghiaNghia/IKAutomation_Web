@@ -59,6 +59,13 @@ class DetectedGameState(StrEnum):
     RESOURCE_EXPIRY_DIALOG = "resource_expiry_dialog"
 
 
+class TeamRowState(StrEnum):
+    """Scheduler-facing roster status, aligned with the ADB roster scan."""
+
+    READY = "ready"
+    BUSY = "busy"
+
+
 @dataclass(frozen=True, slots=True)
 class TemplateEvidence:
     template_id: FarmTemplateId
@@ -72,12 +79,27 @@ class TemplateEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class TeamRosterRow:
+    """One verified/inferred World Map team row.
+
+    A fresh Ready label proves its own numbered row exists.  As in the ADB
+    implementation, all preceding rows are then known to be unlocked; one of
+    those without a Ready label is Busy rather than silently treated ready.
+    """
+
+    team: int
+    state: TeamRowState
+    evidence: str
+
+
+@dataclass(frozen=True, slots=True)
 class GameDetectionResult:
     state: DetectedGameState
     evidence: tuple[TemplateEvidence, ...]
     successful: bool = True
     error: str | None = None
     ready_teams: tuple[int, ...] = ()
+    team_roster: tuple[TeamRosterRow, ...] = ()
 
     def evidence_for(self, template_id: FarmTemplateId) -> TemplateEvidence:
         return next((item for item in self.evidence if item.template_id == template_id), TemplateEvidence(template_id, False))

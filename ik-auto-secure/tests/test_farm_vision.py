@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from ik_chrome_auto.farm_vision import BrowserGameStateDetector, DetectedGameState, FarmTemplateId, GameDetectionResult, TemplateEvidence
+from ik_chrome_auto.farm_vision import (
+    BrowserGameStateDetector,
+    DetectedGameState,
+    FarmTemplateId,
+    GameDetectionResult,
+    TeamRosterRow,
+    TeamRowState,
+    TemplateEvidence,
+)
 
 
 def detect(*templates: FarmTemplateId):
@@ -18,8 +26,16 @@ def test_city_requires_map_button_and_no_higher_priority_overlay() -> None:
 
 
 def test_detection_result_keeps_ready_team_slots() -> None:
-    result = GameDetectionResult(DetectedGameState.WORLD_MAP, (), ready_teams=(2, 3, 4, 5))
-    assert result.ready_teams == (2, 3, 4, 5)
+    roster = (
+        TeamRosterRow(1, TeamRowState.READY, "ReadyLabel"),
+        TeamRosterRow(2, TeamRowState.BUSY, "InferredPrecedingRow"),
+        TeamRosterRow(3, TeamRowState.READY, "ReadyLabel"),
+    )
+    result = GameDetectionResult(DetectedGameState.WORLD_MAP, (), ready_teams=(1, 3), team_roster=roster)
+    assert result.ready_teams == (1, 3)
+    assert [(row.team, row.state.value) for row in result.team_roster] == [
+        (1, "ready"), (2, "busy"), (3, "ready"),
+    ]
 
 
 def test_panel_requires_two_independent_signals() -> None:

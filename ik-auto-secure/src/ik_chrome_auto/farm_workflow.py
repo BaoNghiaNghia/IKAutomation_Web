@@ -38,7 +38,9 @@ class FarmStep(StrEnum):
 class FarmPolicy:
     resources: tuple[str, ...] = ("iron", "stone", "wood", "food")
     levels: tuple[int, ...] = (7, 6, 5)
-    allowed_teams: tuple[int, ...] = (2, 3, 4, 5)
+    # The browser/ADB roster contains the four sequential in-game teams. Team
+    # 1 remains excluded by the established farm policy; 2–4 may be selected.
+    allowed_teams: tuple[int, ...] = (2, 3, 4)
     retry_delay_seconds: int = 30
 
 

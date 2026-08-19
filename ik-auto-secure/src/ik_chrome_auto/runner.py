@@ -12,7 +12,7 @@ from ik_chrome_auto.actions import ActionCancelled, AutomationFunctions
 from ik_chrome_auto.browser import ChromeProfileSession
 from ik_chrome_auto.event_log import JsonLineLog
 from ik_chrome_auto.game2048 import Auto2048Player, board_text
-from ik_chrome_auto.farm_vision import DetectedGameState, FarmTemplateId
+from ik_chrome_auto.farm_vision import DetectedGameState, FarmTemplateId, TeamRosterRow
 from ik_chrome_auto.farm_workflow import FarmGameState, FarmStep, FarmWorkflow
 from ik_chrome_auto.models import (
     AppConfig,
@@ -128,6 +128,7 @@ class ProfileWorker:
         self._farm_city_clicks = 0
         self._farm_world_map_click_at = 0.0
         self._farm_ready_teams: tuple[int, ...] = ()
+        self._farm_roster: tuple[TeamRosterRow, ...] = ()
         self._farm_search_clicks = 0
         self._farm_resource_tab_clicked_at = 0.0
         self._farm_resource_selected_at = 0.0
@@ -237,6 +238,7 @@ class ProfileWorker:
                     self._farm_city_clicks = 0
                     self._farm_world_map_click_at = 0.0
                     self._farm_ready_teams = ()
+                    self._farm_roster = ()
                     self._farm_search_clicks = 0
                     self._farm_resource_tab_clicked_at = 0.0
                     self._farm_resource_selected_at = 0.0
@@ -487,11 +489,14 @@ class ProfileWorker:
                 self._farm_expected_team_row,
             )
             ready_teams = detected.ready_teams
+            roster = detected.team_roster
             # The World Map transition hides the team HUD. Retain a roster
             # detected in the stable City frame and use it only for this farm
             # run; it is reset whenever Farm is started again.
             if ready_teams:
                 self._farm_ready_teams = ready_teams
+            if roster:
+                self._farm_roster = roster
             self._log_farm(
                 "detection",
                 {
@@ -514,6 +519,10 @@ class ProfileWorker:
                     "selected_border": self._evidence_payload(selected_border),
                     "expected_team_selected": expected_team_selected,
                     "dispatch_clicked": self._farm_dispatch_click_at > 0,
+                    "roster": [
+                        {"team": row.team, "state": row.state.value, "evidence": row.evidence}
+                        for row in roster
+                    ],
                     "ready_teams": ready_teams,
                 },
             )
@@ -590,9 +599,17 @@ class ProfileWorker:
                         "method": "browser_canvas_anchor",
                         "elapsed_seconds": round(elapsed_after_click, 2),
                         "ready_teams": self._farm_ready_teams,
+                        "roster": [
+                            {"team": row.team, "state": row.state.value, "evidence": row.evidence}
+                            for row in self._farm_roster
+                        ],
                     },
                 )
-                self._publish(WorkerState.RUNNING, f"Auto Farm: World Map đã xác minh; {decision.message}")
+                roster_summary = self._roster_summary(self._farm_roster)
+                self._publish(
+                    WorkerState.RUNNING,
+                    f"Auto Farm: World Map đã xác minh; {roster_summary}; {decision.message}",
+                )
                 return
             decision = self._farm.decide(
                 state,
@@ -979,6 +996,14 @@ class ProfileWorker:
             "confidence": round(float(getattr(evidence, "confidence", 0.0)), 4),
             "bounds": getattr(evidence, "bounds", None),
         }
+
+    @staticmethod
+    def _roster_summary(roster: tuple[TeamRosterRow, ...]) -> str:
+        if not roster:
+            return "chưa đọc được roster"
+        ready = ",".join(str(row.team) for row in roster if row.state.value == "ready") or "không có"
+        busy = ",".join(str(row.team) for row in roster if row.state.value == "busy") or "không có"
+        return f"đã quét {len(roster)} đội (sẵn sàng: {ready}; bận: {busy})"
 
     @staticmethod
     def _is_expected_team_selected(
