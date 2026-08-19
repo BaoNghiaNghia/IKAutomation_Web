@@ -39,3 +39,23 @@ def test_matcher_scales_height_independently_for_stretched_browser_canvas(tmp_pa
     assert evidence.found
     assert evidence.bounds is not None
     assert evidence.bounds[:2] == (100, 220)
+
+
+def test_matcher_honours_browser_template_reference_dimensions(tmp_path, monkeypatch) -> None:
+    import ik_chrome_auto.farm_matcher as matcher_module
+
+    template = np.zeros((20, 30, 3), dtype=np.uint8)
+    cv2.rectangle(template, (2, 2), (27, 17), (255, 255, 255), 2)
+    cv2.imwrite(str(tmp_path / "browser-city.png"), template)
+    monkeypatch.setitem(
+        matcher_module.SPECS,
+        FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON,
+        matcher_module.TemplateSpec("browser-city.png", threshold=0.78, region="lower_left", reference_width=800, reference_height=400),
+    )
+    canvas = np.zeros((200, 400, 3), dtype=np.uint8)
+    scaled = cv2.resize(template, (15, 10), interpolation=cv2.INTER_AREA)
+    canvas[150:160, 90:105] = scaled
+    evidence = BrowserCanvasMatcher(tmp_path)._match(canvas, FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
+    assert evidence.found
+    assert evidence.bounds is not None
+    assert evidence.bounds[:2] == (90, 150)

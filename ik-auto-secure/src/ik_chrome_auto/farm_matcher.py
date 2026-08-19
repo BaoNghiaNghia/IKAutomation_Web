@@ -19,11 +19,22 @@ class TemplateSpec:
     filename: str
     threshold: float = 0.84
     region: str = "all"
+    reference_width: int = _REFERENCE_WIDTH
+    reference_height: int = _REFERENCE_HEIGHT
 
 
 SPECS: dict[FarmTemplateId, TemplateSpec] = {
     FarmTemplateId.WORLD_MAP_ANCHOR: TemplateSpec("world_map_anchor.png", region="lower_left"),
-    FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON: TemplateSpec("city_to_world_map_button.png", region="lower_left"),
+    # The portal's current canvas uses a different City → World Map control
+    # from the LDPlayer build.  This browser-specific visual template was
+    # captured from the supported 835x432 game canvas, not a screen coordinate.
+    FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON: TemplateSpec(
+        "browser_city_to_world_map_button.png",
+        threshold=0.78,
+        region="lower_left",
+        reference_width=835,
+        reference_height=432,
+    ),
     FarmTemplateId.CONTINENT_MAP_TITLE: TemplateSpec("continent_map_title.png"),
     FarmTemplateId.CONTINENT_MAP_HOME_TERRITORY_ANCHOR: TemplateSpec("continent_map_home_territory_anchor.png", region="center"),
     FarmTemplateId.CONTINENT_MAP_PIN_BUTTON: TemplateSpec("continent_map_pin_button.png", region="top_left"),
@@ -69,8 +80,8 @@ class BrowserCanvasMatcher:
             return TemplateEvidence(template_id, False)
         template = self._load(template_id)
         image_height, image_width = image.shape[:2]
-        scaled_width = max(1, round(template.shape[1] * image_width / _REFERENCE_WIDTH))
-        scaled_height = max(1, round(template.shape[0] * image_height / _REFERENCE_HEIGHT))
+        scaled_width = max(1, round(template.shape[1] * image_width / spec.reference_width))
+        scaled_height = max(1, round(template.shape[0] * image_height / spec.reference_height))
         if scaled_width > image_width or scaled_height > image_height:
             return TemplateEvidence(template_id, False)
         scaled = cv2.resize(template, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
