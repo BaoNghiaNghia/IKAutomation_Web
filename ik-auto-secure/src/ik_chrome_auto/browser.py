@@ -526,13 +526,25 @@ class ChromeProfileSession:
             return box
         raise RuntimeError("Không xác định được vùng click của frame/canvas")
 
-    def capture_game_surface_png(self) -> tuple[bytes, dict[str, float]]:
-        """Capture the largest game canvas and return its viewport box."""
+    def capture_game_surface_png(
+        self, *, prefer_browser_capture: bool = False
+    ) -> tuple[bytes, dict[str, float]]:
+        """Capture the largest game canvas and return its viewport box.
+
+        Farm vision uses CDP capture even for headed Chrome. This avoids a
+        false "covered window" failure when the dashboard is foregrounded.
+        Auto 2048 keeps the desktop capture default because its WebGL surface
+        can otherwise briefly display a stale compositor frame.
+        """
         page = self.page
         self._ensure_page_runtime(page)
         frame = self.find_frame()
         canvas, box = self._largest_canvas(frame)
-        if sys.platform == "win32" and not self.config.browser.headless:
+        if (
+            sys.platform == "win32"
+            and not self.config.browser.headless
+            and not prefer_browser_capture
+        ):
             # In headed Chrome, even a single WebGL readback/screenshot can
             # make the compositor display a ghost frame. Never ask Chrome for
             # pixels in this mode; copy only what Windows already displays.
@@ -599,7 +611,7 @@ class ChromeProfileSession:
         """Classify the current game canvas with the ported ADB template pack."""
         from ik_chrome_auto.farm_matcher import BrowserCanvasMatcher
 
-        png, surface = self.capture_game_surface_png()
+        png, surface = self.capture_game_surface_png(prefer_browser_capture=True)
         if self._farm_matcher is None:
             self._farm_matcher = BrowserCanvasMatcher()
         result = self._farm_matcher.detect(png)

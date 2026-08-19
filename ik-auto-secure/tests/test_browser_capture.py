@@ -147,6 +147,19 @@ def test_headed_windows_capture_never_calls_chrome_screenshot(monkeypatch: Any) 
     assert canvas.screenshot_calls == 0
 
 
+def test_farm_capture_uses_cdp_when_headed(monkeypatch: Any) -> None:
+    session, canvas, context, _page = make_session()
+    session.config.browser.headless = False
+    session._direct_canvas_capture_supported = False
+    monkeypatch.setattr(browser_module.sys, "platform", "win32")
+
+    png, _ = session.capture_game_surface_png(prefer_browser_capture=True)
+
+    assert png == ASSET_PNG
+    assert context.new_session_calls == 1
+    assert canvas.screenshot_calls == 0
+
+
 def test_capture_and_swipe_reuse_one_page_cdp_session() -> None:
     session, canvas, context, _page = make_session()
     session._direct_canvas_capture_supported = False
