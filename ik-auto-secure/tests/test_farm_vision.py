@@ -10,6 +10,7 @@ def detect(*templates: FarmTemplateId):
 def test_city_requires_map_button_and_no_higher_priority_overlay() -> None:
     assert detect(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON).state == DetectedGameState.CITY
     assert detect(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON, FarmTemplateId.WORLD_MAP_ANCHOR).state == DetectedGameState.WORLD_MAP
+    assert detect(FarmTemplateId.BROWSER_CANVAS_READY_ANCHOR).state == DetectedGameState.UNKNOWN
 
 
 def test_panel_requires_two_independent_signals() -> None:

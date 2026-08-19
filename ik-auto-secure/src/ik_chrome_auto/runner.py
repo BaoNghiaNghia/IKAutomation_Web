@@ -126,6 +126,7 @@ class ProfileWorker:
         self._farm: FarmWorkflow | None = None
         self._farm_next_at = 0.0
         self._farm_city_clicks = 0
+        self._farm_world_map_click_at = 0.0
 
     def submit(self, command: WorkerCommand) -> None:
         self._ensure_thread()
@@ -221,6 +222,7 @@ class ProfileWorker:
                     self._farm = FarmWorkflow()
                     self._farm_next_at = 0.0
                     self._farm_city_clicks = 0
+                    self._farm_world_map_click_at = 0.0
                     self._log_farm("started", {})
                     self._publish(WorkerState.RUNNING, "Auto Farm: đang preflight game canvas")
                     continue
@@ -439,6 +441,7 @@ class ProfileWorker:
             }.get(detected.state, FarmGameState.UNKNOWN)
             city = detected.evidence_for(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
             world = detected.evidence_for(FarmTemplateId.WORLD_MAP_ANCHOR)
+            browser_canvas = detected.evidence_for(FarmTemplateId.BROWSER_CANVAS_READY_ANCHOR)
             self._log_farm(
                 "detection",
                 {
@@ -446,8 +449,35 @@ class ProfileWorker:
                     "canvas": {"width": image_size[0], "height": image_size[1]},
                     "city": self._evidence_payload(city),
                     "world_map": self._evidence_payload(world),
+                    "browser_canvas": self._evidence_payload(browser_canvas),
                 },
             )
+            # The website fades the normal HUD while World Map is loading.
+            # Wait through that transition, then accept the completed canvas
+            # only after its persistent browser anchor is visible.  This avoids
+            # a second City click while the first navigation is still active.
+            elapsed_after_click = time.monotonic() - self._farm_world_map_click_at
+            if (
+                self._farm_world_map_click_at > 0
+                and state == FarmGameState.UNKNOWN
+                and elapsed_after_click < 3.0
+            ):
+                self._farm_next_at = time.monotonic() + 0.8
+                self._publish(WorkerState.RUNNING, "Auto Farm: đang chờ World Map tải xong")
+                return
+            if (
+                self._farm_world_map_click_at > 0
+                and state == FarmGameState.UNKNOWN
+                and elapsed_after_click <= 8.0
+                and browser_canvas.found
+                and not city.found
+            ):
+                self._farm_world_map_click_at = 0.0
+                decision = self._farm.decide(FarmGameState.WORLD_MAP)
+                self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
+                self._log_farm("world_map_verified", {"method": "browser_canvas_anchor", "elapsed_seconds": round(elapsed_after_click, 2)})
+                self._publish(WorkerState.RUNNING, f"Auto Farm: World Map đã xác minh; {decision.message}")
+                return
             decision = self._farm.decide(state, target_verified=city.actionable)
             if decision.step == FarmStep.ENTER_WORLD_MAP and city.actionable:
                 if self._farm_city_clicks >= 2:
@@ -463,6 +493,7 @@ class ProfileWorker:
                     return
                 self.session.tap_farm_template(fresh_city.bounds, fresh_size)  # type: ignore[arg-type]
                 self._farm_city_clicks += 1
+                self._farm_world_map_click_at = time.monotonic()
                 self._log_farm("tap_city_to_world_map", {"bounds": fresh_city.bounds})
                 self._farm_next_at = time.monotonic() + 1.2
                 self._publish(WorkerState.RUNNING, "Auto Farm: đã mở World Map, đang xác minh")

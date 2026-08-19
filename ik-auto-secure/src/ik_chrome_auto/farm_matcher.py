@@ -54,6 +54,16 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
     FarmTemplateId.TEAM_SELECTION_PANEL_ANCHOR: TemplateSpec("team_selection_panel_anchor.png"),
     FarmTemplateId.TEAM_ADJUST_FORMATION_BUTTON: TemplateSpec("team_adjust_formation_button.png"),
     FarmTemplateId.TEAM_ACTION_BUTTON_ENABLED: TemplateSpec("team_action_button_enabled.png"),
+    # The publisher mark remains visible once the browser's World Map canvas
+    # has finished loading. It is only used with the post-click timing guard
+    # in ProfileWorker; alone it never authorises input.
+    FarmTemplateId.BROWSER_CANVAS_READY_ANCHOR: TemplateSpec(
+        "browser_canvas_ready_anchor.png",
+        threshold=0.80,
+        region="right",
+        reference_width=835,
+        reference_height=432,
+    ),
 }
 
 
@@ -126,5 +136,6 @@ class BrowserCanvasMatcher:
         if name == "lower_left": return 0, height // 2, width // 2, height - height // 2
         if name == "lower": return 0, height // 2, width, height - height // 2
         if name == "top_left": return 0, 0, width // 4, height // 5
+        if name == "right": return width * 3 // 4, 0, width - (width * 3 // 4), height // 2
         if name == "center": return width // 4, height // 5, width // 2, height - (height * 2 // 5)
         return 0, 0, width, height
