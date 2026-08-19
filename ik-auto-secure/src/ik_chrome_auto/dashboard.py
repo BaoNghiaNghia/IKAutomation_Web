@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QCloseEvent, QGuiApplication
+from PySide6.QtGui import QAction, QCloseEvent, QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication, QDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
 from qfluentwidgets import CardWidget, CheckBox, ComboBox, FluentIcon as FIF, LineEdit, PasswordLineEdit, PrimaryPushButton, PrimaryToolButton, PushButton, StrongBodyLabel, SubtitleLabel, ToolButton
 
@@ -91,6 +91,7 @@ class Dashboard(QWidget):
 
     def _build(self) -> None:
         self.setWindowTitle("IK Auto — Browser Control")
+        self.setWindowIcon(QIcon(str(Path(__file__).with_name("assets") / "ik_auto.ico")))
         screen = QGuiApplication.primaryScreen().availableGeometry()
         self.setGeometry(screen.right() - screen.width() // 2 + 1, screen.bottom() - screen.height() // 2 + 1, screen.width() // 2, screen.height() // 2)
         self.setMinimumSize(780, 520)
@@ -332,4 +333,4 @@ class AccountManagerDialog(QDialog):
 
 
 def run_dashboard(config_path:Path)->None:
-    capture_launch_terminal_window(); app=QApplication.instance() or QApplication([]); app.setApplicationName("IK Auto"); dashboard=Dashboard(config_path); dashboard.show(); QTimer.singleShot(500,minimize_launch_console); app.exec()
+    capture_launch_terminal_window(); app=QApplication.instance() or QApplication([]); app.setApplicationName("IK Auto"); app.setWindowIcon(QIcon(str(Path(__file__).with_name("assets") / "ik_auto.ico"))); dashboard=Dashboard(config_path); dashboard.show(); QTimer.singleShot(500,minimize_launch_console); app.exec()

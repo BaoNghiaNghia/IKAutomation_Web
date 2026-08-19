@@ -6,3 +6,6 @@ data/profiles/
 data/snapshots/
 data/screenshots/
 data/logs/
+build/
+release/
+*.spec

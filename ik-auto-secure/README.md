@@ -38,5 +38,12 @@ Run tests from an activated virtual environment:
 python -m pytest -q
 ```
 
+## Build ứng dụng Windows
+
+Sau khi chạy `run.cmd` một lần, double-click [`build.cmd`](build.cmd). Script sẽ
+kiểm thử, tạo ứng dụng không có cửa sổ Terminal tại `release\IK Auto\IK Auto.exe`
+và tạo shortcut **IK Auto** có icon trên Desktop. Icon xuất hiện ở file `.exe`,
+shortcut, tiêu đề cửa sổ và taskbar.
+
 This project is intended for authorised automation only. Review the target
 service's terms and use separate profiles for separate accounts.
