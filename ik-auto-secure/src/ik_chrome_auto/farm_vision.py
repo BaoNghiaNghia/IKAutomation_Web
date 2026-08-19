@@ -33,6 +33,7 @@ class FarmTemplateId(StrEnum):
     TEAM_ACTION_BUTTON_ENABLED = "team_action_button_enabled"
     CITY_TO_WORLD_MAP_BUTTON = "city_to_world_map_button"
     BROWSER_CANVAS_READY_ANCHOR = "browser_canvas_ready_anchor"
+    BROWSER_RESOURCE_SEARCH_BUTTON = "browser_resource_search_button"
 
 
 class DetectedGameState(StrEnum):

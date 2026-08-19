@@ -128,6 +128,7 @@ class ProfileWorker:
         self._farm_city_clicks = 0
         self._farm_world_map_click_at = 0.0
         self._farm_ready_teams: tuple[int, ...] = ()
+        self._farm_search_clicks = 0
 
     def submit(self, command: WorkerCommand) -> None:
         self._ensure_thread()
@@ -225,6 +226,7 @@ class ProfileWorker:
                     self._farm_city_clicks = 0
                     self._farm_world_map_click_at = 0.0
                     self._farm_ready_teams = ()
+                    self._farm_search_clicks = 0
                     self._log_farm("started", {})
                     self._publish(WorkerState.RUNNING, "Auto Farm: đang preflight game canvas")
                     continue
@@ -444,6 +446,7 @@ class ProfileWorker:
             city = detected.evidence_for(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
             world = detected.evidence_for(FarmTemplateId.WORLD_MAP_ANCHOR)
             browser_canvas = detected.evidence_for(FarmTemplateId.BROWSER_CANVAS_READY_ANCHOR)
+            search_button = detected.evidence_for(FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON)
             ready_teams = detected.ready_teams
             # The World Map transition hides the team HUD. Retain a roster
             # detected in the stable City frame and use it only for this farm
@@ -458,6 +461,7 @@ class ProfileWorker:
                     "city": self._evidence_payload(city),
                     "world_map": self._evidence_payload(world),
                     "browser_canvas": self._evidence_payload(browser_canvas),
+                    "resource_search_button": self._evidence_payload(search_button),
                     "ready_teams": ready_teams,
                 },
             )
@@ -486,7 +490,8 @@ class ProfileWorker:
                     FarmGameState.WORLD_MAP,
                     ready_teams=self._farm_ready_teams,
                 )
-                self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
+                delay = 0.8 if decision.step == FarmStep.OPEN_SEARCH else self._farm.policy.retry_delay_seconds
+                self._farm_next_at = time.monotonic() + delay
                 self._log_farm(
                     "world_map_verified",
                     {
@@ -502,6 +507,38 @@ class ProfileWorker:
                 ready_teams=ready_teams,
                 target_verified=city.actionable,
             )
+            if (
+                self._farm.step == FarmStep.OPEN_SEARCH
+                and state in {FarmGameState.CITY, FarmGameState.WORLD_MAP}
+                and search_button.actionable
+            ):
+                if self._farm_search_clicks >= 2:
+                    screenshot = self._save_farm_debug_capture("resource-search-unverified")
+                    self._log_farm(
+                        "error",
+                        {"reason": "resource_search_unverified", "screenshot": str(screenshot) if screenshot else None},
+                    )
+                    self._farm = None
+                    self._publish(
+                        WorkerState.ERROR,
+                        "Auto Farm dừng: panel tìm tài nguyên chưa được xác minh sau 2 lần thử",
+                        f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                    )
+                    return
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
+                fresh_button = fresh.evidence_for(FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON)
+                if not fresh_button.actionable:
+                    screenshot = self._save_farm_debug_capture("resource-search-button-lost")
+                    self._farm_next_at = time.monotonic() + 0.8
+                    self._log_farm("resource_search_button_lost", {"screenshot": str(screenshot) if screenshot else None})
+                    self._publish(WorkerState.RUNNING, "Auto Farm: nút tìm tài nguyên thay đổi, đang nhận diện lại")
+                    return
+                self.session.tap_farm_template(fresh_button.bounds, fresh_size)  # type: ignore[arg-type]
+                self._farm_search_clicks += 1
+                self._farm_next_at = time.monotonic() + 1.5
+                self._log_farm("tap_resource_search", {"bounds": fresh_button.bounds})
+                self._publish(WorkerState.RUNNING, "Auto Farm: đã mở tìm tài nguyên, đang xác minh panel")
+                return
             if decision.step == FarmStep.ENTER_WORLD_MAP and city.actionable:
                 if self._farm_city_clicks >= 2:
                     screenshot = self._save_farm_debug_capture("world-map-unverified")
