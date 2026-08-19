@@ -112,6 +112,9 @@ class WorkerSnapshot:
     state: WorkerState = WorkerState.STOPPED
     message: str = "Đã dừng"
     detail: str = ""
+    # Latest World Map roster read: (team number, ready|busy). It is display
+    # metadata only and never authorises an automation input by itself.
+    farm_roster: tuple[tuple[int, str], ...] = ()
 
 
 @dataclass(slots=True)

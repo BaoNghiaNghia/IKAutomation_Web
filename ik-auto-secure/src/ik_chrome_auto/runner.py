@@ -170,7 +170,13 @@ class ProfileWorker:
             self.thread.start()
 
     def _publish(self, state: WorkerState, message: str, detail: str = "") -> None:
-        snapshot = WorkerSnapshot(self.profile.id, state, message, detail)
+        snapshot = WorkerSnapshot(
+            self.profile.id,
+            state,
+            message,
+            detail,
+            tuple((row.team, row.state.value) for row in self._farm_roster),
+        )
         self.on_update(snapshot)
         self.event_log.write(
             "worker_status",

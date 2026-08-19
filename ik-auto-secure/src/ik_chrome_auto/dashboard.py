@@ -115,6 +115,7 @@ class Dashboard(QWidget):
             QScrollBar::handle:horizontal { min-width: 24px; border-radius: 3px; background: #b8c7d9; }
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
             QTextEdit { background: #f5f8fc; border: 1px solid #dce6f3; border-radius: 9px; color: #52657d; }
+            QToolTip { background: #ffffff; color: #172b4d; border: 1px solid #d6e2f0; border-radius: 10px; padding: 8px; font-family: Inter, Segoe UI; font-size: 12px; }
         """)
         root = QVBoxLayout(self); root.setContentsMargins(14, 12, 14, 14); root.setSpacing(10)
         head = QHBoxLayout(); title = SubtitleLabel("IK Auto"); title.setStyleSheet("font-size:22px;font-weight:700;"); head.addWidget(title); head.addWidget(QLabel("Browser control")); head.addStretch(); secure = QLabel("●  Local & secure"); secure.setStyleSheet("background:#d9f7e8;color:#087443;border-radius:12px;padding:5px 10px;font-weight:600;"); head.addWidget(secure); root.addLayout(head)
@@ -160,7 +161,7 @@ class Dashboard(QWidget):
         for profile in self.config.profiles:
             self.master.addItem(self._masked_profile_username(profile), profile.id)
         for profile in self.config.profiles:
-            card=self._card(); layout=QVBoxLayout(card); top=QHBoxLayout(); top.addWidget(StrongBodyLabel(profile.name)); top.addWidget(self._muted(f"{profile.id} · {profile.mode.value}")); top.addStretch(); badge=QLabel("Đã dừng"); badge.setStyleSheet("background:#f1f5f9;color:#475569;border-radius:10px;padding:3px 8px;"); top.addWidget(badge); layout.addLayout(top); status=self._muted("Đã dừng"); resource=self._muted("—"); details=QHBoxLayout(); details.addWidget(status,1); details.addWidget(resource); layout.addLayout(details); buttons=QHBoxLayout(); buttons.setSpacing(5); open_btn=self._compact_profile_button(PrimaryPushButton("Mở")); open_btn.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.OPEN)); buttons.addWidget(open_btn); farm=self._compact_profile_button(PushButton("Farm")); farm.clicked.connect(lambda _=False,pid=profile.id:self._toggle_farm(pid)); buttons.addWidget(farm); auto=self._compact_profile_button(PushButton("Auto 2048")); auto.clicked.connect(lambda _=False,pid=profile.id:self._toggle_auto(pid)); buttons.addWidget(auto); shot=self._compact_profile_button(PushButton("Ảnh")); shot.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.SCREENSHOT)); buttons.addWidget(shot); inspect=self._compact_profile_button(PushButton("Đo")); inspect.clicked.connect(lambda _=False,pid=profile.id:self._toggle_inspector(pid)); buttons.addWidget(inspect); buttons.addStretch(); delete=self._icon_button(FIF.DELETE,"Xóa profile"); delete.setFixedSize(29,29); delete.clicked.connect(lambda _=False,pid=profile.id:self._remove_profile(pid)); buttons.addWidget(delete); layout.addLayout(buttons); index=len(self.rows); self.table_layout.addWidget(card, index // 2, index % 2); self.rows[profile.id]=ProfileRow(status,resource,badge,inspect,auto,farm,card)
+            card=self._card(); self._set_roster_tooltip(card, ()); layout=QVBoxLayout(card); top=QHBoxLayout(); top.addWidget(StrongBodyLabel(profile.name)); top.addWidget(self._muted(f"{profile.id} · {profile.mode.value}")); top.addStretch(); badge=QLabel("Đã dừng"); badge.setStyleSheet("background:#f1f5f9;color:#475569;border-radius:10px;padding:3px 8px;"); top.addWidget(badge); layout.addLayout(top); status=self._muted("Đã dừng"); resource=self._muted("—"); details=QHBoxLayout(); details.addWidget(status,1); details.addWidget(resource); layout.addLayout(details); buttons=QHBoxLayout(); buttons.setSpacing(5); open_btn=self._compact_profile_button(PrimaryPushButton("Mở")); open_btn.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.OPEN)); buttons.addWidget(open_btn); farm=self._compact_profile_button(PushButton("Farm")); farm.clicked.connect(lambda _=False,pid=profile.id:self._toggle_farm(pid)); buttons.addWidget(farm); auto=self._compact_profile_button(PushButton("Auto 2048")); auto.clicked.connect(lambda _=False,pid=profile.id:self._toggle_auto(pid)); buttons.addWidget(auto); shot=self._compact_profile_button(PushButton("Ảnh")); shot.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.SCREENSHOT)); buttons.addWidget(shot); inspect=self._compact_profile_button(PushButton("Đo")); inspect.clicked.connect(lambda _=False,pid=profile.id:self._toggle_inspector(pid)); buttons.addWidget(inspect); buttons.addStretch(); delete=self._icon_button(FIF.DELETE,"Xóa profile"); delete.setFixedSize(29,29); delete.clicked.connect(lambda _=False,pid=profile.id:self._remove_profile(pid)); buttons.addWidget(delete); layout.addLayout(buttons); index=len(self.rows); self.table_layout.addWidget(card, index // 2, index % 2); self.rows[profile.id]=ProfileRow(status,resource,badge,inspect,auto,farm,card)
         self.table_layout.setRowStretch((len(self.rows) + 1) // 2, 1)
 
     @staticmethod
@@ -336,6 +337,7 @@ class Dashboard(QWidget):
                 if row:
                     row.status.setText(snap.message); text,bg,fg=self._state(snap.state); row.badge.setText(text); row.badge.setStyleSheet(f"background:{bg};color:{fg};border-radius:10px;padding:3px 8px;"); self._set_profile_card_state(row,snap.state)
                     if snap.state==WorkerState.STOPPED or "2048" in snap.message: self.auto_profiles.discard(snap.profile_id); row.auto.setText("Auto 2048")
+                    self._set_roster_tooltip(row.card, snap.farm_roster)
                     if snap.state in {WorkerState.STOPPED, WorkerState.ERROR} or "Đã dừng Auto Farm" in snap.message: self.farm_profiles.discard(snap.profile_id); row.farm.setText("Farm")
                 self._append_log(f"[{snap.profile_id}] {snap.message}")
         except queue.Empty: pass
@@ -367,6 +369,26 @@ class Dashboard(QWidget):
         if hasattr(self.log,"setPlainText"): self.log.setPlainText(value)
         else:
             self.log.configure(state="normal"); self.log.delete("1.0","end"); self.log.insert("end",value+"\n"); self.log.see("end"); self.log.configure(state="disabled")
+
+    @staticmethod
+    def _set_roster_tooltip(card: CardWidget, roster: tuple[tuple[int, str], ...]) -> None:
+        if not roster:
+            tooltip = "<b>Trạng thái đội</b><br><span style='color:#62758e'>Chưa có dữ liệu quét roster.</span>"
+        else:
+            rows = []
+            for team, state in roster:
+                ready = state == "ready"
+                label = "Sẵn sàng" if ready else "Đang bận"
+                background = "#dcfce7" if ready else "#fef3c7"
+                color = "#15803d" if ready else "#a16207"
+                rows.append(
+                    f"<tr><td><span style='background:#eaf1fb;color:#2e5f9e;padding:3px 7px;border-radius:8px'>Đội {team}</span></td>"
+                    f"<td>&nbsp;<span style='background:{background};color:{color};padding:3px 7px;border-radius:8px'>{label}</span></td></tr>"
+                )
+            tooltip = "<b>Trạng thái đội</b><br><table cellspacing='5'>" + "".join(rows) + "</table>"
+        card.setToolTip(tooltip)
+        for label in card.findChildren(QLabel):
+            label.setToolTip(tooltip)
     def _warning(self,title:str,message:str)->None: QMessageBox.warning(self,title,message)
     def _error(self,title:str,message:str)->None: QMessageBox.critical(self,title,message)
     def closeEvent(self,event:QCloseEvent)->None:
