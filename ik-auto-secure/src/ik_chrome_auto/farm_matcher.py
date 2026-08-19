@@ -103,11 +103,16 @@ class BrowserCanvasMatcher:
         search = image[top : top + height, left : left + width]
         if scaled.shape[1] > search.shape[1] or scaled.shape[0] > search.shape[0]:
             return ()
-        scores = cv2.matchTemplate(search, scaled, cv2.TM_CCOEFF_NORMED)
+        # Text is anti-aliased slightly differently between a 836×433 desktop
+        # capture and a 835×432 CDP canvas. Match luminance, not the changing
+        # city-skin colours behind the label.
+        search_gray = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
+        template_gray = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
+        scores = cv2.matchTemplate(search_gray, template_gray, cv2.TM_CCOEFF_NORMED)
         matches: list[int] = []
         while True:
             _, confidence, _, location = cv2.minMaxLoc(scores)
-            if confidence < 0.78:
+            if confidence < 0.48:
                 break
             row_y = top + int(location[1])
             if all(abs(row_y - existing) >= max(8, scaled_height) for existing in matches):
