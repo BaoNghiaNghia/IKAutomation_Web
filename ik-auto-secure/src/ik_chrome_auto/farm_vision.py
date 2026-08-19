@@ -39,6 +39,12 @@ class FarmTemplateId(StrEnum):
     BROWSER_IRON_RESOURCE_BUTTON = "browser_iron_resource_button"
     BROWSER_SEARCH_BUTTON_ENABLED = "browser_search_button_enabled"
     BROWSER_GATHER_BUTTON_ENABLED = "browser_gather_button_enabled"
+    BROWSER_TEAM_SELECTION_PANEL = "browser_team_selection_panel"
+    BROWSER_TEAM_ACTION_BUTTON = "browser_team_action_button"
+    BROWSER_TEAM_2_BADGE = "browser_team_2_badge"
+    BROWSER_TEAM_3_BADGE = "browser_team_3_badge"
+    BROWSER_TEAM_4_BADGE = "browser_team_4_badge"
+    BROWSER_TEAM_SELECTED_BORDER = "browser_team_selected_border"
 
 
 class DetectedGameState(StrEnum):
@@ -105,9 +111,15 @@ class BrowserGameStateDetector:
             found[FarmTemplateId.RESOURCE_POPUP_INFO_ANCHOR]
             or found[FarmTemplateId.RESOURCE_POPUP_IRON_TITLE]
         )
-        team_confirmed = found[FarmTemplateId.TEAM_SELECTION_PANEL_ANCHOR] and (
-            found[FarmTemplateId.TEAM_ADJUST_FORMATION_BUTTON]
-            or found[FarmTemplateId.TEAM_ACTION_BUTTON_ENABLED]
+        team_confirmed = (
+            found[FarmTemplateId.TEAM_SELECTION_PANEL_ANCHOR]
+            and (
+                found[FarmTemplateId.TEAM_ADJUST_FORMATION_BUTTON]
+                or found[FarmTemplateId.TEAM_ACTION_BUTTON_ENABLED]
+            )
+        ) or (
+            found[FarmTemplateId.BROWSER_TEAM_SELECTION_PANEL]
+            and found[FarmTemplateId.BROWSER_TEAM_ACTION_BUTTON]
         )
         storage_confirmed = found[FarmTemplateId.STORAGE_LIMIT_DIALOG_ANCHOR] and found[FarmTemplateId.STORAGE_LIMIT_CANCEL_BUTTON]
         expiry_confirmed = found[FarmTemplateId.RESOURCE_EXPIRY_DIALOG_ANCHOR] and found[FarmTemplateId.STORAGE_LIMIT_CANCEL_BUTTON]

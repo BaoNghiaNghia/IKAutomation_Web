@@ -41,3 +41,11 @@ def test_dialog_priority_matches_adb_detector() -> None:
 def test_popup_requires_multiple_signals() -> None:
     assert detect(FarmTemplateId.GATHER_BUTTON_ENABLED).state == DetectedGameState.UNKNOWN
     assert detect(FarmTemplateId.RESOURCE_POPUP_INFO_ANCHOR, FarmTemplateId.GATHER_BUTTON_ENABLED).state == DetectedGameState.RESOURCE_POPUP
+
+
+def test_browser_team_selection_requires_panel_and_action() -> None:
+    assert detect(FarmTemplateId.BROWSER_TEAM_SELECTION_PANEL).state == DetectedGameState.UNKNOWN
+    assert detect(
+        FarmTemplateId.BROWSER_TEAM_SELECTION_PANEL,
+        FarmTemplateId.BROWSER_TEAM_ACTION_BUTTON,
+    ).state == DetectedGameState.TEAM_SELECTION

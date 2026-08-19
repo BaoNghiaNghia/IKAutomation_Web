@@ -16,7 +16,8 @@ def test_happy_path_completes_exactly_one_verified_dispatch() -> None:
     assert farm.decide(FarmGameState.RESOURCE_SEARCH, target_verified=True).step == FarmStep.FIND_RESOURCE
     assert farm.decide(FarmGameState.RESOURCE_POPUP, target_verified=True).step == FarmStep.OPEN_TEAM_SELECTION
     assert farm.decide(FarmGameState.TEAM_SELECTION, target_verified=True).step == FarmStep.SELECT_TEAM
-    assert farm.decide(FarmGameState.TEAM_SELECTION, target_verified=True).step == FarmStep.DISPATCH
+    assert farm.decide(FarmGameState.TEAM_SELECTION, target_verified=True).step == FarmStep.SELECT_TEAM
+    assert farm.decide(FarmGameState.TEAM_SELECTION, team_selected=True).step == FarmStep.DISPATCH
     assert farm.decide(FarmGameState.TEAM_SELECTION, dispatch_verified=True).step == FarmStep.WAITING
 
 
@@ -38,3 +39,17 @@ def test_find_resource_keeps_the_planned_resource_and_level() -> None:
 
     assert decision.step == FarmStep.FIND_RESOURCE
     assert (decision.resource, decision.level, decision.team) == ("iron", 7, 2)
+
+
+def test_team_selection_cannot_advance_to_dispatch_without_selection_evidence() -> None:
+    farm = FarmWorkflow()
+    farm.decide(FarmGameState.CITY)
+    farm.decide(FarmGameState.WORLD_MAP, ready_teams=(2,))
+    farm.decide(FarmGameState.RESOURCE_SEARCH)
+    farm.decide(FarmGameState.RESOURCE_POPUP)
+    farm.decide(FarmGameState.TEAM_SELECTION)
+
+    decision = farm.decide(FarmGameState.TEAM_SELECTION)
+
+    assert decision.step == FarmStep.SELECT_TEAM
+    assert decision.input_allowed is False

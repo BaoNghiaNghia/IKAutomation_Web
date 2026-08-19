@@ -134,6 +134,7 @@ class ProfileWorker:
         self._farm_find_resource_clicks = 0
         self._farm_gather_clicks = 0
         self._farm_capture_blocked_count = 0
+        self._farm_team_selection_clicks = 0
 
     def submit(self, command: WorkerCommand) -> None:
         self._ensure_thread()
@@ -237,6 +238,7 @@ class ProfileWorker:
                     self._farm_find_resource_clicks = 0
                     self._farm_gather_clicks = 0
                     self._farm_capture_blocked_count = 0
+                    self._farm_team_selection_clicks = 0
                     self._log_farm("started", {})
                     self._publish(WorkerState.RUNNING, "Auto Farm: đang preflight game canvas")
                     continue
@@ -462,6 +464,17 @@ class ProfileWorker:
             iron_resource = detected.evidence_for(FarmTemplateId.BROWSER_IRON_RESOURCE_BUTTON)
             find_resource = detected.evidence_for(FarmTemplateId.BROWSER_SEARCH_BUTTON_ENABLED)
             gather_button = detected.evidence_for(FarmTemplateId.BROWSER_GATHER_BUTTON_ENABLED)
+            team_panel = detected.evidence_for(FarmTemplateId.BROWSER_TEAM_SELECTION_PANEL)
+            team_action = detected.evidence_for(FarmTemplateId.BROWSER_TEAM_ACTION_BUTTON)
+            team_badges = {
+                2: detected.evidence_for(FarmTemplateId.BROWSER_TEAM_2_BADGE),
+                3: detected.evidence_for(FarmTemplateId.BROWSER_TEAM_3_BADGE),
+                4: detected.evidence_for(FarmTemplateId.BROWSER_TEAM_4_BADGE),
+            }
+            selected_border = detected.evidence_for(FarmTemplateId.BROWSER_TEAM_SELECTED_BORDER)
+            expected_team = self._farm.team
+            expected_badge = team_badges.get(expected_team) if expected_team is not None else None
+            expected_team_selected = self._is_expected_team_selected(expected_badge, selected_border)
             ready_teams = detected.ready_teams
             # The World Map transition hides the team HUD. Retain a roster
             # detected in the stable City frame and use it only for this farm
@@ -481,6 +494,14 @@ class ProfileWorker:
                     "iron_resource": self._evidence_payload(iron_resource),
                     "find_resource": self._evidence_payload(find_resource),
                     "gather_button": self._evidence_payload(gather_button),
+                    "team_panel": self._evidence_payload(team_panel),
+                    "team_action": self._evidence_payload(team_action),
+                    "team_badges": {
+                        str(team): self._evidence_payload(badge)
+                        for team, badge in team_badges.items()
+                    },
+                    "selected_border": self._evidence_payload(selected_border),
+                    "expected_team_selected": expected_team_selected,
                     "ready_teams": ready_teams,
                 },
             )
@@ -525,6 +546,7 @@ class ProfileWorker:
                 state,
                 ready_teams=ready_teams,
                 target_verified=city.actionable,
+                team_selected=expected_team_selected,
             )
             if (
                 self._farm.step == FarmStep.OPEN_SEARCH
@@ -618,6 +640,78 @@ class ProfileWorker:
                     {"bounds": fresh_gather.bounds, "resource": decision.resource, "level": decision.level},
                 )
                 self._publish(WorkerState.RUNNING, "Auto Farm: đã bấm Thu thập, đang xác minh chọn đội")
+                return
+            if decision.step == FarmStep.SELECT_TEAM and state == FarmGameState.TEAM_SELECTION:
+                target_badge = team_badges.get(decision.team)
+                if not target_badge or not target_badge.actionable:
+                    screenshot = self._save_farm_debug_capture("expected-team-not-visible")
+                    self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
+                    self._log_farm(
+                        "expected_team_not_visible",
+                        {"team": decision.team, "screenshot": str(screenshot) if screenshot else None},
+                    )
+                    self._publish(
+                        WorkerState.RUNNING,
+                        f"Auto Farm: không thấy badge đội {decision.team} trên panel chọn đội; đang chờ",
+                    )
+                    return
+                if self._farm_team_selection_clicks >= 2:
+                    screenshot = self._save_farm_debug_capture("team-selection-unverified")
+                    self._log_farm(
+                        "error",
+                        {
+                            "reason": "team_selection_unverified",
+                            "team": decision.team,
+                            "screenshot": str(screenshot) if screenshot else None,
+                        },
+                    )
+                    self._farm = None
+                    self._publish(
+                        WorkerState.ERROR,
+                        f"Auto Farm dừng: không xác minh được đội {decision.team} sau 2 lần chọn",
+                        f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                    )
+                    return
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
+                fresh_panel = fresh.evidence_for(FarmTemplateId.BROWSER_TEAM_SELECTION_PANEL)
+                fresh_action = fresh.evidence_for(FarmTemplateId.BROWSER_TEAM_ACTION_BUTTON)
+                badge_template = {
+                    2: FarmTemplateId.BROWSER_TEAM_2_BADGE,
+                    3: FarmTemplateId.BROWSER_TEAM_3_BADGE,
+                    4: FarmTemplateId.BROWSER_TEAM_4_BADGE,
+                }.get(decision.team)
+                fresh_badge = fresh.evidence_for(badge_template) if badge_template else None
+                if not (
+                    fresh_panel.actionable
+                    and fresh_action.actionable
+                    and fresh_badge is not None
+                    and fresh_badge.actionable
+                ):
+                    self._farm_next_at = time.monotonic() + 0.8
+                    self._publish(WorkerState.RUNNING, "Auto Farm: panel chọn đội thay đổi, đang nhận diện lại")
+                    return
+                row_bounds = self._team_row_from_badge(fresh_badge.bounds, fresh_size)  # type: ignore[arg-type]
+                self.session.tap_farm_template(row_bounds, fresh_size)
+                self._farm_team_selection_clicks += 1
+                self._farm_next_at = time.monotonic() + 1.2
+                self._log_farm(
+                    "tap_expected_team",
+                    {"team": decision.team, "badge_bounds": fresh_badge.bounds, "row_bounds": row_bounds},
+                )
+                self._publish(WorkerState.RUNNING, f"Auto Farm: đã chọn đội {decision.team}, đang xác minh viền chọn")
+                return
+            if decision.step == FarmStep.DISPATCH and state == FarmGameState.TEAM_SELECTION:
+                screenshot = self._save_farm_debug_capture("team-selected-awaiting-dispatch")
+                self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
+                self._log_farm(
+                    "team_selected_awaiting_dispatch",
+                    {"team": decision.team, "screenshot": str(screenshot) if screenshot else None},
+                )
+                self._publish(
+                    WorkerState.RUNNING,
+                    f"Auto Farm: đội {decision.team} đã được xác minh; chờ template điều quân và march verification",
+                    f"Ảnh để port bước tiếp theo: {screenshot}" if screenshot else "",
+                )
                 return
             if decision.step == FarmStep.FIND_RESOURCE and state == FarmGameState.RESOURCE_SEARCH:
                 if decision.resource == "iron" and self._farm_resource_selected_at <= 0 and iron_resource.actionable:
@@ -825,6 +919,40 @@ class ProfileWorker:
             "confidence": round(float(getattr(evidence, "confidence", 0.0)), 4),
             "bounds": getattr(evidence, "bounds", None),
         }
+
+    @staticmethod
+    def _is_expected_team_selected(expected_badge: object, selected_border: object) -> bool:
+        badge_bounds = getattr(expected_badge, "bounds", None)
+        border_bounds = getattr(selected_border, "bounds", None)
+        if not (
+            getattr(expected_badge, "actionable", False)
+            and getattr(selected_border, "actionable", False)
+        ):
+            return False
+        return abs(int(border_bounds[1]) - int(badge_bounds[1])) <= max(
+            12,
+            int(badge_bounds[3]) * 2,
+        )
+
+    @staticmethod
+    def _team_row_from_badge(
+        badge_bounds: tuple[int, int, int, int], image_size: tuple[int, int]
+    ) -> tuple[int, int, int, int]:
+        """Resolve a safe row target from the freshly matched numbered badge.
+
+        This mirrors the ADB selector: the badge identifies the expected team,
+        then the tap lands in its enclosing row rather than on a fixed screen
+        coordinate or dynamic hero artwork.
+        """
+        left, top, width, height = badge_bounds
+        image_width, image_height = image_size
+        row_left = max(0, left - max(4, width // 3))
+        row_top = max(0, top - max(6, height // 3))
+        row_width = min(image_width - row_left, max(width * 6, 48))
+        row_height = min(image_height - row_top, max(height * 4, 48))
+        if row_width <= 0 or row_height <= 0:
+            raise ValueError("Không xác định được vùng chọn đội an toàn")
+        return row_left, row_top, row_width, row_height
 
     def _save_farm_debug_capture(self, reason: str) -> Path | None:
         if self.session is None:

@@ -109,6 +109,47 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
         reference_width=835,
         reference_height=432,
     ),
+    FarmTemplateId.BROWSER_TEAM_SELECTION_PANEL: TemplateSpec(
+        "browser_team_selection_panel_anchor.png",
+        threshold=0.80,
+        reference_width=840,
+        reference_height=439,
+    ),
+    FarmTemplateId.BROWSER_TEAM_ACTION_BUTTON: TemplateSpec(
+        "browser_gather_button_enabled.png",
+        threshold=0.80,
+        region="lower",
+        reference_width=835,
+        reference_height=432,
+    ),
+    FarmTemplateId.BROWSER_TEAM_2_BADGE: TemplateSpec(
+        "browser_team_2_badge.png",
+        threshold=0.82,
+        region="left",
+        reference_width=840,
+        reference_height=439,
+    ),
+    FarmTemplateId.BROWSER_TEAM_3_BADGE: TemplateSpec(
+        "browser_team_3_badge.png",
+        threshold=0.82,
+        region="left",
+        reference_width=840,
+        reference_height=439,
+    ),
+    FarmTemplateId.BROWSER_TEAM_4_BADGE: TemplateSpec(
+        "browser_team_4_badge.png",
+        threshold=0.82,
+        region="left",
+        reference_width=840,
+        reference_height=439,
+    ),
+    FarmTemplateId.BROWSER_TEAM_SELECTED_BORDER: TemplateSpec(
+        "browser_team_selected_border_anchor.png",
+        threshold=0.78,
+        region="left",
+        reference_width=840,
+        reference_height=439,
+    ),
 }
 
 
@@ -218,6 +259,7 @@ class BrowserCanvasMatcher:
 
     @staticmethod
     def _region(name: str, width: int, height: int) -> tuple[int, int, int, int]:
+        if name == "left": return 0, 0, width // 4, height
         if name == "lower_left": return 0, height // 2, width // 2, height - height // 2
         if name == "lower": return 0, height // 2, width, height - height // 2
         if name == "top_left": return 0, 0, width // 4, height // 5

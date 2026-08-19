@@ -73,6 +73,7 @@ class FarmWorkflow:
         *,
         ready_teams: tuple[int, ...] = (),
         target_verified: bool = False,
+        team_selected: bool = False,
         dispatch_verified: bool = False,
     ) -> FarmDecision:
         if state == FarmGameState.UNKNOWN:
@@ -124,6 +125,14 @@ class FarmWorkflow:
             self.step = FarmStep.SELECT_TEAM
             return FarmDecision(self.step, f"Chọn đội {self.team}", resource, level, self.team, target_verified)
         if self.step == FarmStep.SELECT_TEAM:
+            if state != FarmGameState.TEAM_SELECTION or not team_selected:
+                return FarmDecision(
+                    self.step,
+                    f"Chờ xác minh đội {self.team} đã được chọn",
+                    resource,
+                    level,
+                    self.team,
+                )
             self.step = FarmStep.DISPATCH
             return FarmDecision(self.step, "Điều quân", resource, level, self.team, target_verified)
         if self.step == FarmStep.DISPATCH:
