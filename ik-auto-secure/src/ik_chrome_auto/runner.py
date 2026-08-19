@@ -139,6 +139,7 @@ class ProfileWorker:
         # resemble another badge after the row's artwork changes, so retain
         # the freshly resolved row as the authoritative post-tap target.
         self._farm_expected_team_row: tuple[int, int, int, int] | None = None
+        self._farm_dispatch_click_at = 0.0
 
     def submit(self, command: WorkerCommand) -> None:
         self._ensure_thread()
@@ -244,6 +245,7 @@ class ProfileWorker:
                     self._farm_capture_blocked_count = 0
                     self._farm_team_selection_clicks = 0
                     self._farm_expected_team_row = None
+                    self._farm_dispatch_click_at = 0.0
                     self._log_farm("started", {})
                     self._publish(WorkerState.RUNNING, "Auto Farm: đang preflight game canvas")
                     continue
@@ -511,9 +513,50 @@ class ProfileWorker:
                     },
                     "selected_border": self._evidence_payload(selected_border),
                     "expected_team_selected": expected_team_selected,
+                    "dispatch_clicked": self._farm_dispatch_click_at > 0,
                     "ready_teams": ready_teams,
                 },
             )
+            # Once the team action was clicked, a normal World Map view is an
+            # expected post-condition, not an unknown game state.  Require
+            # both the persistent canvas anchor and disappearance of the team
+            # panel/action before finishing this one-shot dispatch.
+            if self._farm_dispatch_click_at > 0:
+                elapsed_after_dispatch = time.monotonic() - self._farm_dispatch_click_at
+                dispatched = (
+                    elapsed_after_dispatch >= 1.2
+                    and browser_canvas.found
+                    and not team_panel.found
+                    and not team_action.found
+                )
+                if dispatched:
+                    decision = self._farm.decide(
+                        FarmGameState.TEAM_SELECTION,
+                        dispatch_verified=True,
+                    )
+                    self._log_farm(
+                        "dispatch_verified",
+                        {"team": self._farm.team, "elapsed_seconds": round(elapsed_after_dispatch, 2)},
+                    )
+                    self._publish(WorkerState.RUNNING, f"Auto Farm: {decision.message}")
+                    self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
+                    return
+                if elapsed_after_dispatch <= 8.0:
+                    self._farm_next_at = time.monotonic() + 0.8
+                    self._publish(WorkerState.RUNNING, "Auto Farm: đã bấm Thu thập, đang xác minh đoàn quân xuất phát")
+                    return
+                screenshot = self._save_farm_debug_capture("dispatch-unverified")
+                self._log_farm(
+                    "error",
+                    {"reason": "dispatch_unverified", "team": self._farm.team, "screenshot": str(screenshot) if screenshot else None},
+                )
+                self._farm = None
+                self._publish(
+                    WorkerState.ERROR,
+                    "Auto Farm dừng: không xác minh được đoàn quân xuất phát sau khi bấm Thu thập",
+                    f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                )
+                return
             # The website fades the normal HUD while World Map is loading.
             # Wait through that transition, then accept the completed canvas
             # only after its persistent browser anchor is visible.  This avoids
@@ -711,17 +754,24 @@ class ProfileWorker:
                 self._publish(WorkerState.RUNNING, f"Auto Farm: đã chọn đội {decision.team}, đang xác minh viền chọn")
                 return
             if decision.step == FarmStep.DISPATCH and state == FarmGameState.TEAM_SELECTION:
-                screenshot = self._save_farm_debug_capture("team-selected-awaiting-dispatch")
-                self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
+                fresh_panel = fresh.evidence_for(FarmTemplateId.BROWSER_TEAM_SELECTION_PANEL)
+                fresh_action = fresh.evidence_for(FarmTemplateId.BROWSER_TEAM_ACTION_BUTTON)
+                if not fresh_panel.actionable or not fresh_action.actionable:
+                    self._farm_next_at = time.monotonic() + 0.8
+                    self._publish(WorkerState.RUNNING, "Auto Farm: panel điều quân thay đổi, đang nhận diện lại")
+                    return
+                self.session.tap_farm_template(fresh_action.bounds, fresh_size)  # type: ignore[arg-type]
+                self._farm_dispatch_click_at = time.monotonic()
                 self._log_farm(
-                    "team_selected_awaiting_dispatch",
-                    {"team": decision.team, "screenshot": str(screenshot) if screenshot else None},
+                    "tap_dispatch",
+                    {"team": decision.team, "bounds": fresh_action.bounds},
                 )
                 self._publish(
                     WorkerState.RUNNING,
-                    f"Auto Farm: đội {decision.team} đã được xác minh; chờ template điều quân và march verification",
-                    f"Ảnh để port bước tiếp theo: {screenshot}" if screenshot else "",
+                    f"Auto Farm: đã bấm Thu thập với đội {decision.team}, đang xác minh đoàn quân xuất phát",
                 )
+                self._farm_next_at = time.monotonic() + 1.5
                 return
             if decision.step == FarmStep.FIND_RESOURCE and state == FarmGameState.RESOURCE_SEARCH:
                 if decision.resource == "iron" and self._farm_resource_selected_at <= 0 and iron_resource.actionable:
