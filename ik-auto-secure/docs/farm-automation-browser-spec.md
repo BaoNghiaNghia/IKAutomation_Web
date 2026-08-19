@@ -128,3 +128,12 @@ Mỗi template có positive lẫn negative screenshot và post-condition. Không
 tọa độ cố định: browser chỉ click tâm bounds của template vừa rematch trên
 frame mới. Thiếu một template thì cycle dừng ở `preflight`/`waiting`, không
 gửi click phỏng đoán.
+
+## 9. Port từ bản ADB
+
+Phần `farm_vision.py` port trực tiếp các quy tắc `GameStateDetector` của nhánh
+`feat/basic-game-state-detector`: dùng evidence đa tín hiệu, ưu tiên dialog
+chặn thao tác (`ResourceExpiry` → `StorageLimit`) trước Team/Panel/Map và chỉ
+xác nhận City khi nút chuyển World Map hiện diện mà không có overlay có ưu tiên
+cao hơn. Khác biệt duy nhất là nguồn frame và input: browser lấy canvas qua
+Playwright/CDP và gửi CDP touch, không dùng ADB hay thao tác chuột hệ điều hành.
