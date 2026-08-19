@@ -39,6 +39,7 @@ class TemplateSpec:
     reference_width: int = _REFERENCE_WIDTH
     reference_height: int = _REFERENCE_HEIGHT
     alternatives: tuple[str, ...] = ()
+    uniform_width_scale: bool = False
 
 
 SPECS: dict[FarmTemplateId, TemplateSpec] = {
@@ -101,6 +102,18 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
         region="lower_left",
         reference_width=835,
         reference_height=432,
+    ),
+    FarmTemplateId.BROWSER_FOOD_RESOURCE_BUTTON: TemplateSpec(
+        "browser_resource_food.png", threshold=0.80, region="lower",
+        reference_width=881, reference_height=239, uniform_width_scale=True,
+    ),
+    FarmTemplateId.BROWSER_WOOD_RESOURCE_BUTTON: TemplateSpec(
+        "browser_resource_wood.png", threshold=0.80, region="lower",
+        reference_width=881, reference_height=239, uniform_width_scale=True,
+    ),
+    FarmTemplateId.BROWSER_STONE_RESOURCE_BUTTON: TemplateSpec(
+        "browser_resource_stone.png", threshold=0.80, region="lower",
+        reference_width=881, reference_height=239, uniform_width_scale=True,
     ),
     FarmTemplateId.BROWSER_IRON_RESOURCE_BUTTON: TemplateSpec(
         "browser_resource_iron_unselected.png",
@@ -271,8 +284,10 @@ class BrowserCanvasMatcher:
 
         template = self._load(filename)
         image_height, image_width = image.shape[:2]
-        scaled_width = max(1, round(template.shape[1] * image_width / spec.reference_width))
-        scaled_height = max(1, round(template.shape[0] * image_height / spec.reference_height))
+        scale_x = image_width / spec.reference_width
+        scale_y = scale_x if spec.uniform_width_scale else image_height / spec.reference_height
+        scaled_width = max(1, round(template.shape[1] * scale_x))
+        scaled_height = max(1, round(template.shape[0] * scale_y))
         if scaled_width > image_width or scaled_height > image_height:
             return TemplateEvidence(template_id, False)
         scaled = cv2.resize(template, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)

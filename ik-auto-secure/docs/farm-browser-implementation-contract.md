@@ -24,6 +24,14 @@ level của resource hiện tại trước khi chuyển resource kế tiếp.
 - Scheduler chỉ chọn đội `ready` đầu tiên theo policy. Không được suy ra team
   từ số lượng nhãn sẵn sàng.
 
+## Kế hoạch tài nguyên
+
+- Đầu mỗi cycle, xáo trộn một lần thứ tự bốn tài nguyên: `food`, `wood`,
+  `stone`, `iron`; ghi thứ tự đó vào log của cycle.
+- Với mỗi tài nguyên, thử hết các cấp trong policy trước khi chuyển sang tài
+  nguyên kế tiếp trong chính thứ tự đã xáo trộn. Không random lại giữa các lần
+  retry/fallback.
+
 ## Quy tắc input và vision
 
 - Không input ở trạng thái `Unknown`.

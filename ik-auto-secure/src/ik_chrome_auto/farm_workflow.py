@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from random import SystemRandom
 
 
 class FarmGameState(StrEnum):
@@ -62,8 +63,12 @@ class FarmWorkflow:
     immediately before and verify a post-condition immediately after input.
     """
 
-    def __init__(self, policy: FarmPolicy | None = None) -> None:
+    def __init__(self, policy: FarmPolicy | None = None, *, resource_order: tuple[str, ...] | None = None) -> None:
         self.policy = policy or FarmPolicy()
+        # One shuffled plan is fixed for the whole cycle. This matches the ADB
+        # fallback contract: exhaust levels for one resource before moving to
+        # the next resource, rather than rerolling after every failed search.
+        self.resource_order = resource_order or tuple(SystemRandom().sample(self.policy.resources, len(self.policy.resources)))
         self.step = FarmStep.PREFLIGHT
         self.resource_index = 0
         self.level_index = 0
@@ -152,11 +157,11 @@ class FarmWorkflow:
             return True
         self.level_index = 0
         self.resource_index += 1
-        if self.resource_index < len(self.policy.resources):
+        if self.resource_index < len(self.resource_order):
             self.step = FarmStep.OPEN_SEARCH
             return True
         self.step = FarmStep.WAITING
         return False
 
     def _target(self) -> tuple[str, int]:
-        return self.policy.resources[self.resource_index], self.policy.levels[self.level_index]
+        return self.resource_order[self.resource_index], self.policy.levels[self.level_index]

@@ -22,7 +22,7 @@ def test_happy_path_completes_exactly_one_verified_dispatch() -> None:
 
 
 def test_search_fallback_tries_levels_before_resource() -> None:
-    farm = FarmWorkflow()
+    farm = FarmWorkflow(resource_order=("iron", "stone", "wood", "food"))
     assert farm.advance_search_plan() is True
     assert farm._target() == ("iron", 6)
     assert farm.advance_search_plan() is True
@@ -30,7 +30,7 @@ def test_search_fallback_tries_levels_before_resource() -> None:
 
 
 def test_find_resource_keeps_the_planned_resource_and_level() -> None:
-    farm = FarmWorkflow()
+    farm = FarmWorkflow(resource_order=("iron", "stone", "wood", "food"))
     farm.decide(FarmGameState.CITY)
     farm.decide(FarmGameState.WORLD_MAP, ready_teams=(2,))
     farm.decide(FarmGameState.RESOURCE_SEARCH)
@@ -39,6 +39,18 @@ def test_find_resource_keeps_the_planned_resource_and_level() -> None:
 
     assert decision.step == FarmStep.FIND_RESOURCE
     assert (decision.resource, decision.level, decision.team) == ("iron", 7, 2)
+
+
+def test_resource_plan_is_randomized_once_but_exhausts_levels_before_next_resource() -> None:
+    farm = FarmWorkflow(resource_order=("wood", "food", "stone", "iron"))
+
+    assert farm._target() == ("wood", 7)
+    assert farm.advance_search_plan() is True
+    assert farm._target() == ("wood", 6)
+    assert farm.advance_search_plan() is True
+    assert farm._target() == ("wood", 5)
+    assert farm.advance_search_plan() is True
+    assert farm._target() == ("food", 7)
 
 
 def test_busy_team_is_not_selected_when_roster_has_later_ready_team() -> None:
