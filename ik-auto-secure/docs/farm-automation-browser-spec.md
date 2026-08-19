@@ -114,3 +114,17 @@ không reload/tap mù từ checkpoint.
 5. Port bounded workflow: World Map → roster → search → popup → team →
    verified dispatch.
 6. Dashboard đa profile, telemetry, load/soak test và runbook browser recovery.
+
+## 8. Template pack bắt buộc trước khi bật input production
+
+Ảnh City là mốc khởi động preflight, không đủ để suy luận các nút tiếp theo.
+Để workflow được phép gửi input trên browser, template pack cần có ảnh thực tế
+cùng locale/resolution cho: `city_world_map`, `world_map_ready_roster`,
+`resource_search_panel`, mỗi resource/level trong search, `resource_popup`,
+`team_selection`, `team_selected`, `dispatch_button`, `march_started`,
+`storage_limit_dialog` và `resource_expiry_dialog`.
+
+Mỗi template có positive lẫn negative screenshot và post-condition. Không dùng
+tọa độ cố định: browser chỉ click tâm bounds của template vừa rematch trên
+frame mới. Thiếu một template thì cycle dừng ở `preflight`/`waiting`, không
+gửi click phỏng đoán.
