@@ -452,6 +452,16 @@ class ProfileWorker:
                 self._publish(WorkerState.RUNNING, "Auto Farm: World Map đã xác minh; chờ port roster đội sẵn sàng")
                 return
             self._farm_next_at = time.monotonic() + 1.0
+            if state == FarmGameState.UNKNOWN:
+                # Keep the worker safe, but expose the two decisive scores so
+                # a canvas/theme mismatch can be diagnosed without guessing.
+                world = detected.evidence_for(FarmTemplateId.WORLD_MAP_ANCHOR).confidence
+                city_score = city.confidence
+                self._publish(
+                    WorkerState.RUNNING,
+                    f"Auto Farm: {decision.message} (City={city_score:.2f}; World Map={world:.2f})",
+                )
+                return
             self._publish(WorkerState.RUNNING, f"Auto Farm: {decision.message}")
         except Exception as error:
             self._farm = None

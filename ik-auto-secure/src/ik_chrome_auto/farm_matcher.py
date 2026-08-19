@@ -6,7 +6,12 @@ from pathlib import Path
 
 from ik_chrome_auto.farm_vision import BrowserGameStateDetector, DETECTION_TEMPLATES, FarmTemplateId, GameDetectionResult, TemplateEvidence
 
+# The source pack was captured at 1280x720.  A browser canvas is frequently
+# stretched independently on each axis by its host page, so scaling from only
+# its width makes templates noticeably too tall (or too short) and prevents a
+# valid match.  Keep both dimensions as the template's reference frame.
 _REFERENCE_WIDTH = 1280
+_REFERENCE_HEIGHT = 720
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +45,7 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
 
 
 class BrowserCanvasMatcher:
-    """Matches the ADB template pack after scaling it to the canvas width."""
+    """Matches the ADB template pack after scaling it to the browser canvas."""
 
     def __init__(self, template_root: Path | None = None) -> None:
         self.template_root = template_root or Path(__file__).with_name("assets") / "farm_templates"
@@ -65,7 +70,7 @@ class BrowserCanvasMatcher:
         template = self._load(template_id)
         image_height, image_width = image.shape[:2]
         scaled_width = max(1, round(template.shape[1] * image_width / _REFERENCE_WIDTH))
-        scaled_height = max(1, round(template.shape[0] * image_width / _REFERENCE_WIDTH))
+        scaled_height = max(1, round(template.shape[0] * image_height / _REFERENCE_HEIGHT))
         if scaled_width > image_width or scaled_height > image_height:
             return TemplateEvidence(template_id, False)
         scaled = cv2.resize(template, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
