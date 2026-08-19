@@ -24,7 +24,7 @@ from ik_chrome_auto.models import (
     WorkerState,
 )
 from ik_chrome_auto.reader import redact
-from ik_chrome_auto.storage import write_retained_png
+from ik_chrome_auto.storage import upscale_png_for_diagnostics, write_retained_png
 from ik_chrome_auto.windows import (
     calculate_tiled_positions,
     get_visible_window_rect,
@@ -769,7 +769,7 @@ class ProfileWorker:
             return None
         folder = self.config.data_dir / "screenshots" / self.profile.id / "farm-debug"
         path = folder / f"{reason}-{time.strftime('%Y%m%d-%H%M%S')}.png"
-        return write_retained_png(path, png, keep=10)
+        return write_retained_png(path, upscale_png_for_diagnostics(png), keep=10)
 
     def _close_session(self) -> None:
         self._auto_2048 = None

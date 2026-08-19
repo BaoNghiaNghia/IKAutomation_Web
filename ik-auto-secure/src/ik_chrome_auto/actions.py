@@ -6,7 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ik_chrome_auto.browser import ChromeProfileSession
-from ik_chrome_auto.storage import prune_profile_images
+from ik_chrome_auto.storage import prune_profile_images, upscale_png_for_diagnostics, write_retained_png
 
 StatusCallback = Callable[[str], None]
 
@@ -160,6 +160,10 @@ class AutomationFunctions:
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         path = folder / f"{timestamp}-{safe_name}.png"
         self.status(f"Chụp ảnh: {path.name}")
-        self.session.page.screenshot(path=str(path), full_page=full_page)
-        prune_profile_images(folder, keep=2)
+        if full_page:
+            self.session.page.screenshot(path=str(path), full_page=True)
+            prune_profile_images(folder, keep=2)
+        else:
+            png, _surface = self.session.capture_game_surface_png()
+            write_retained_png(path, upscale_png_for_diagnostics(png), keep=2)
         return path

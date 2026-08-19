@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from ik_chrome_auto.storage import write_retained_json, write_retained_png
+from ik_chrome_auto.game2048 import decode_png
+from ik_chrome_auto.storage import upscale_png_for_diagnostics, write_retained_json, write_retained_png
+from ik_chrome_auto.windows import encode_rgb_png
 
 
 def test_profile_screenshot_folder_keeps_only_two_newest_images(tmp_path: Path) -> None:
@@ -39,3 +41,12 @@ def test_snapshot_folder_keeps_only_configured_number_of_json_files(tmp_path: Pa
         "snapshot-3.json",
         "snapshot-4.json",
     }
+
+
+def test_diagnostic_upscale_doubles_dimensions_without_altering_pixel_values() -> None:
+    source = encode_rgb_png(2, 1, bytes((10, 20, 30, 40, 50, 60)))
+
+    image = decode_png(upscale_png_for_diagnostics(source, scale=2))
+
+    assert (image.width, image.height) == (4, 2)
+    assert image.pixels == bytes((10, 20, 30, 10, 20, 30, 40, 50, 60, 40, 50, 60) * 2)
