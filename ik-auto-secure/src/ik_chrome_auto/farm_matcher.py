@@ -1,7 +1,7 @@
 """OpenCV template matching over a captured browser game canvas."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ik_chrome_auto.farm_vision import BrowserGameStateDetector, DETECTION_TEMPLATES, FarmTemplateId, GameDetectionResult, TemplateEvidence
@@ -12,6 +12,9 @@ from ik_chrome_auto.farm_vision import BrowserGameStateDetector, DETECTION_TEMPL
 # valid match.  Keep both dimensions as the template's reference frame.
 _REFERENCE_WIDTH = 1280
 _REFERENCE_HEIGHT = 720
+_BROWSER_REFERENCE_WIDTH = 836
+_BROWSER_REFERENCE_HEIGHT = 433
+_READY_TEAM_LABEL = "ready_team_label.png"
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +85,42 @@ class BrowserCanvasMatcher:
         if image is None:
             raise ValueError("Canvas screenshot không phải PNG hợp lệ")
         evidence = {template_id: self._match(image, template_id) for template_id in DETECTION_TEMPLATES}
-        return BrowserGameStateDetector().detect(evidence)
+        result = BrowserGameStateDetector().detect(evidence)
+        return replace(result, ready_teams=self._ready_teams(image))
+
+    def _ready_teams(self, image: object) -> tuple[int, ...]:
+        """Return available team slots from repeated `Sẵn sàng` canvas labels."""
+        import cv2
+
+        template = self._load(_READY_TEAM_LABEL)
+        image_height, image_width = image.shape[:2]
+        scaled_width = max(1, round(template.shape[1] * image_width / _BROWSER_REFERENCE_WIDTH))
+        scaled_height = max(1, round(template.shape[0] * image_height / _BROWSER_REFERENCE_HEIGHT))
+        scaled = cv2.resize(template, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
+        # The team list is a visual panel, so restrict matching to it.  The
+        # exact rows are found from image matches and may move vertically.
+        left, top, width, height = 0, image_height // 3, image_width // 6, image_height * 5 // 12
+        search = image[top : top + height, left : left + width]
+        if scaled.shape[1] > search.shape[1] or scaled.shape[0] > search.shape[0]:
+            return ()
+        scores = cv2.matchTemplate(search, scaled, cv2.TM_CCOEFF_NORMED)
+        matches: list[int] = []
+        while True:
+            _, confidence, _, location = cv2.minMaxLoc(scores)
+            if confidence < 0.78:
+                break
+            row_y = top + int(location[1])
+            if all(abs(row_y - existing) >= max(8, scaled_height) for existing in matches):
+                matches.append(row_y)
+            cv2.rectangle(
+                scores,
+                (max(0, location[0] - scaled_width), max(0, location[1] - scaled_height)),
+                (min(scores.shape[1], location[0] + scaled_width), min(scores.shape[0], location[1] + scaled_height)),
+                -1,
+                thickness=-1,
+            )
+        # The ADB-derived policy is intentionally limited to teams 2–5.
+        return tuple(range(2, min(5, len(matches) + 1) + 1))
 
     def _match(self, image: object, template_id: FarmTemplateId) -> TemplateEvidence:
         spec = SPECS.get(template_id)

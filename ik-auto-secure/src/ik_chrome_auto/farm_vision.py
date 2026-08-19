@@ -65,6 +65,7 @@ class GameDetectionResult:
     evidence: tuple[TemplateEvidence, ...]
     successful: bool = True
     error: str | None = None
+    ready_teams: tuple[int, ...] = ()
 
     def evidence_for(self, template_id: FarmTemplateId) -> TemplateEvidence:
         return next((item for item in self.evidence if item.template_id == template_id), TemplateEvidence(template_id, False))

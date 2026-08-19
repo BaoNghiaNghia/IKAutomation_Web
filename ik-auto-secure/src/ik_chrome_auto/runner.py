@@ -442,6 +442,7 @@ class ProfileWorker:
             city = detected.evidence_for(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
             world = detected.evidence_for(FarmTemplateId.WORLD_MAP_ANCHOR)
             browser_canvas = detected.evidence_for(FarmTemplateId.BROWSER_CANVAS_READY_ANCHOR)
+            ready_teams = detected.ready_teams
             self._log_farm(
                 "detection",
                 {
@@ -450,6 +451,7 @@ class ProfileWorker:
                     "city": self._evidence_payload(city),
                     "world_map": self._evidence_payload(world),
                     "browser_canvas": self._evidence_payload(browser_canvas),
+                    "ready_teams": ready_teams,
                 },
             )
             # The website fades the normal HUD while World Map is loading.
@@ -473,12 +475,16 @@ class ProfileWorker:
                 and not city.found
             ):
                 self._farm_world_map_click_at = 0.0
-                decision = self._farm.decide(FarmGameState.WORLD_MAP)
+                decision = self._farm.decide(FarmGameState.WORLD_MAP, ready_teams=ready_teams)
                 self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
                 self._log_farm("world_map_verified", {"method": "browser_canvas_anchor", "elapsed_seconds": round(elapsed_after_click, 2)})
                 self._publish(WorkerState.RUNNING, f"Auto Farm: World Map đã xác minh; {decision.message}")
                 return
-            decision = self._farm.decide(state, target_verified=city.actionable)
+            decision = self._farm.decide(
+                state,
+                ready_teams=ready_teams,
+                target_verified=city.actionable,
+            )
             if decision.step == FarmStep.ENTER_WORLD_MAP and city.actionable:
                 if self._farm_city_clicks >= 2:
                     self._farm = None
