@@ -59,3 +59,27 @@ def test_matcher_honours_browser_template_reference_dimensions(tmp_path, monkeyp
     assert evidence.found
     assert evidence.bounds is not None
     assert evidence.bounds[:2] == (90, 150)
+
+
+def test_matcher_uses_the_best_city_skin_variant(tmp_path, monkeypatch) -> None:
+    import ik_chrome_auto.farm_matcher as matcher_module
+
+    green = np.zeros((20, 30, 3), dtype=np.uint8)
+    cv2.rectangle(green, (2, 2), (27, 17), (0, 220, 0), 2)
+    cv2.line(green, (0, 19), (29, 0), (0, 120, 0), 2)
+    snow = np.zeros((20, 30, 3), dtype=np.uint8)
+    cv2.rectangle(snow, (2, 2), (27, 17), (220, 180, 120), 2)
+    cv2.line(snow, (0, 0), (29, 19), (255, 255, 255), 2)
+    cv2.imwrite(str(tmp_path / "green.png"), green)
+    cv2.imwrite(str(tmp_path / "snow.png"), snow)
+    monkeypatch.setitem(
+        matcher_module.SPECS,
+        FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON,
+        matcher_module.TemplateSpec("green.png", threshold=0.78, region="lower_left", reference_width=400, reference_height=200, alternatives=("snow.png",)),
+    )
+    canvas = np.zeros((200, 400, 3), dtype=np.uint8)
+    canvas[150:170, 90:120] = snow
+    evidence = BrowserCanvasMatcher(tmp_path)._match(canvas, FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
+    assert evidence.found
+    assert evidence.bounds is not None
+    assert evidence.bounds[:2] == (90, 150)

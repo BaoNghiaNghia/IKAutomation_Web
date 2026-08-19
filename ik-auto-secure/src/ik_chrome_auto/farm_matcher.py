@@ -21,19 +21,21 @@ class TemplateSpec:
     region: str = "all"
     reference_width: int = _REFERENCE_WIDTH
     reference_height: int = _REFERENCE_HEIGHT
+    alternatives: tuple[str, ...] = ()
 
 
 SPECS: dict[FarmTemplateId, TemplateSpec] = {
     FarmTemplateId.WORLD_MAP_ANCHOR: TemplateSpec("world_map_anchor.png", region="lower_left"),
-    # The portal's current canvas uses a different City → World Map control
-    # from the LDPlayer build.  This browser-specific visual template was
-    # captured from the supported 835x432 game canvas, not a screen coordinate.
+    # The portal renders the same City → World Map control with different
+    # artwork in its green and snowy city skins. Both browser canvas templates
+    # are matched, then the strongest result is used (never a fixed click).
     FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON: TemplateSpec(
-        "browser_city_to_world_map_button.png",
+        "browser_city_to_world_map_green.png",
         threshold=0.78,
         region="lower_left",
         reference_width=835,
         reference_height=432,
+        alternatives=("browser_city_to_world_map_button.png",),
     ),
     FarmTemplateId.CONTINENT_MAP_TITLE: TemplateSpec("continent_map_title.png"),
     FarmTemplateId.CONTINENT_MAP_HOME_TERRITORY_ANCHOR: TemplateSpec("continent_map_home_territory_anchor.png", region="center"),
@@ -60,7 +62,7 @@ class BrowserCanvasMatcher:
 
     def __init__(self, template_root: Path | None = None) -> None:
         self.template_root = template_root or Path(__file__).with_name("assets") / "farm_templates"
-        self._templates: dict[FarmTemplateId, object] = {}
+        self._templates: dict[str, object] = {}
 
     def detect(self, screenshot_png: bytes) -> GameDetectionResult:
         import cv2
@@ -73,12 +75,25 @@ class BrowserCanvasMatcher:
         return BrowserGameStateDetector().detect(evidence)
 
     def _match(self, image: object, template_id: FarmTemplateId) -> TemplateEvidence:
-        import cv2
-
         spec = SPECS.get(template_id)
         if spec is None:
             return TemplateEvidence(template_id, False)
-        template = self._load(template_id)
+        candidates = tuple(
+            self._match_template(image, template_id, spec, filename)
+            for filename in (spec.filename, *spec.alternatives)
+        )
+        return max(candidates, key=lambda evidence: evidence.confidence)
+
+    def _match_template(
+        self,
+        image: object,
+        template_id: FarmTemplateId,
+        spec: TemplateSpec,
+        filename: str,
+    ) -> TemplateEvidence:
+        import cv2
+
+        template = self._load(filename)
         image_height, image_width = image.shape[:2]
         scaled_width = max(1, round(template.shape[1] * image_width / spec.reference_width))
         scaled_height = max(1, round(template.shape[0] * image_height / spec.reference_height))
@@ -95,16 +110,16 @@ class BrowserCanvasMatcher:
             return TemplateEvidence(template_id, False, float(confidence))
         return TemplateEvidence(template_id, True, float(confidence), (x + int(location[0]), y + int(location[1]), scaled_width, scaled_height))
 
-    def _load(self, template_id: FarmTemplateId) -> object:
+    def _load(self, filename: str) -> object:
         import cv2
 
-        if template_id not in self._templates:
-            path = self.template_root / SPECS[template_id].filename
+        if filename not in self._templates:
+            path = self.template_root / filename
             template = cv2.imread(str(path), cv2.IMREAD_COLOR)
             if template is None:
                 raise FileNotFoundError(f"Thiếu farm template: {path}")
-            self._templates[template_id] = template
-        return self._templates[template_id]
+            self._templates[filename] = template
+        return self._templates[filename]
 
     @staticmethod
     def _region(name: str, width: int, height: int) -> tuple[int, int, int, int]:
