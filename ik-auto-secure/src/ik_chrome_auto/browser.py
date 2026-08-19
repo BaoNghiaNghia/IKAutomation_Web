@@ -532,10 +532,11 @@ class ChromeProfileSession:
     ) -> tuple[bytes, dict[str, float]]:
         """Capture the largest game canvas and return its viewport box.
 
-        Farm vision uses CDP capture even for headed Chrome. This avoids a
-        false "covered window" failure when the dashboard is foregrounded.
-        Auto 2048 keeps the desktop capture default because its WebGL surface
-        can otherwise briefly display a stale compositor frame.
+        Headed Chrome uses the pixels already composed by Windows. Calling
+        ``canvas.toDataURL`` or ``Page.captureScreenshot`` repeatedly on a
+        WebGL game forces a GPU readback and visibly stalls the game window.
+        Browser capture remains available for headless sessions, where there
+        is no visible desktop surface to read.
         """
         page = self.page
         self._ensure_page_runtime(page)
@@ -612,7 +613,14 @@ class ChromeProfileSession:
         """Classify the current game canvas with the ported ADB template pack."""
         from ik_chrome_auto.farm_matcher import BrowserCanvasMatcher
 
-        png, surface = self.capture_game_surface_png(prefer_browser_capture=True)
+        # Do not force a CDP screenshot for every farm tick in a headed
+        # profile.  WebGL readback synchronises Chrome's compositor and makes
+        # the game visibly jerk.  The visible Windows capture path is both
+        # stable for the player and sufficient for template matching.  A
+        # headless profile necessarily keeps the browser capture path.
+        png, surface = self.capture_game_surface_png(
+            prefer_browser_capture=self.config.browser.headless
+        )
         # The worker can retain this exact input image on a failed preflight.
         # It is intentionally kept only in memory until a diagnostic is needed.
         self._last_farm_capture_png = png
@@ -622,7 +630,7 @@ class ChromeProfileSession:
         return result, surface, self._png_dimensions(png)
 
     def last_farm_capture_png(self) -> bytes | None:
-        """Return the most recent CDP canvas capture for local diagnostics."""
+        """Return the most recent farm canvas capture for local diagnostics."""
         return self._last_farm_capture_png
 
     @staticmethod

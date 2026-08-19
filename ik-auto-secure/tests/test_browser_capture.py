@@ -160,6 +160,36 @@ def test_farm_capture_uses_cdp_when_headed(monkeypatch: Any) -> None:
     assert canvas.screenshot_calls == 0
 
 
+def test_farm_state_uses_visible_capture_when_headed() -> None:
+    session, _canvas, _context, _page = make_session()
+    session.config.browser.headless = False
+    capture_preferences: list[bool] = []
+    session.capture_game_surface_png = lambda *, prefer_browser_capture: (
+        capture_preferences.append(prefer_browser_capture) or (ASSET_PNG, BOX.copy())
+    )
+    session._farm_matcher = SimpleNamespace(detect=lambda _png: "detected")
+
+    detected, surface, image_size = session.detect_farm_state()
+
+    assert detected == "detected"
+    assert capture_preferences == [False]
+    assert surface == BOX
+    assert image_size == (333, 322)
+
+
+def test_farm_state_keeps_browser_capture_when_headless() -> None:
+    session, _canvas, _context, _page = make_session()
+    capture_preferences: list[bool] = []
+    session.capture_game_surface_png = lambda *, prefer_browser_capture: (
+        capture_preferences.append(prefer_browser_capture) or (ASSET_PNG, BOX.copy())
+    )
+    session._farm_matcher = SimpleNamespace(detect=lambda _png: "detected")
+
+    session.detect_farm_state()
+
+    assert capture_preferences == [True]
+
+
 def test_capture_and_swipe_reuse_one_page_cdp_session() -> None:
     session, canvas, context, _page = make_session()
     session._direct_canvas_capture_supported = False
