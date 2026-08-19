@@ -6,6 +6,8 @@ and 2048 helper while making data collection explicit and bounded.
 
 The browser-farming architecture and migration plan are documented in
 [`docs/farm-automation-browser-spec.md`](docs/farm-automation-browser-spec.md).
+The non-negotiable browser-farm workflow and safety invariants are recorded in
+[`docs/farm-browser-implementation-contract.md`](docs/farm-browser-implementation-contract.md).
 Credential-storage requirements are documented in
 [`docs/account-credential-security.md`](docs/account-credential-security.md).
 
