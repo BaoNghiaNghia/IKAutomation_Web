@@ -135,6 +135,10 @@ class ProfileWorker:
         self._farm_gather_clicks = 0
         self._farm_capture_blocked_count = 0
         self._farm_team_selection_clicks = 0
+        # The numbered badge is only used to derive the row to tap.  It can
+        # resemble another badge after the row's artwork changes, so retain
+        # the freshly resolved row as the authoritative post-tap target.
+        self._farm_expected_team_row: tuple[int, int, int, int] | None = None
 
     def submit(self, command: WorkerCommand) -> None:
         self._ensure_thread()
@@ -239,6 +243,7 @@ class ProfileWorker:
                     self._farm_gather_clicks = 0
                     self._farm_capture_blocked_count = 0
                     self._farm_team_selection_clicks = 0
+                    self._farm_expected_team_row = None
                     self._log_farm("started", {})
                     self._publish(WorkerState.RUNNING, "Auto Farm: đang preflight game canvas")
                     continue
@@ -474,7 +479,11 @@ class ProfileWorker:
             selected_border = detected.evidence_for(FarmTemplateId.BROWSER_TEAM_SELECTED_BORDER)
             expected_team = self._farm.team
             expected_badge = team_badges.get(expected_team) if expected_team is not None else None
-            expected_team_selected = self._is_expected_team_selected(expected_badge, selected_border)
+            expected_team_selected = self._is_expected_team_selected(
+                expected_badge,
+                selected_border,
+                self._farm_expected_team_row,
+            )
             ready_teams = detected.ready_teams
             # The World Map transition hides the team HUD. Retain a roster
             # detected in the stable City frame and use it only for this farm
@@ -692,6 +701,7 @@ class ProfileWorker:
                     return
                 row_bounds = self._team_row_from_badge(fresh_badge.bounds, fresh_size)  # type: ignore[arg-type]
                 self.session.tap_farm_template(row_bounds, fresh_size)
+                self._farm_expected_team_row = row_bounds
                 self._farm_team_selection_clicks += 1
                 self._farm_next_at = time.monotonic() + 1.2
                 self._log_farm(
@@ -921,13 +931,23 @@ class ProfileWorker:
         }
 
     @staticmethod
-    def _is_expected_team_selected(expected_badge: object, selected_border: object) -> bool:
-        badge_bounds = getattr(expected_badge, "bounds", None)
+    def _is_expected_team_selected(
+        expected_badge: object,
+        selected_border: object,
+        expected_row_bounds: tuple[int, int, int, int] | None,
+    ) -> bool:
         border_bounds = getattr(selected_border, "bounds", None)
-        if not (
-            getattr(expected_badge, "actionable", False)
-            and getattr(selected_border, "actionable", False)
-        ):
+        if not getattr(selected_border, "actionable", False) or border_bounds is None:
+            return False
+        # Prefer the row recorded from the fresh pre-click match.  The visual
+        # number on a team badge may be confused with a similarly shaped hero
+        # icon after selection, while the selected-row border is stable.
+        if expected_row_bounds is not None:
+            _left, row_top, _width, row_height = expected_row_bounds
+            border_center = int(border_bounds[1]) + max(1, int(border_bounds[3])) // 2
+            return row_top <= border_center <= row_top + row_height
+        badge_bounds = getattr(expected_badge, "bounds", None)
+        if not getattr(expected_badge, "actionable", False) or badge_bounds is None:
             return False
         return abs(int(border_bounds[1]) - int(badge_bounds[1])) <= max(
             12,
