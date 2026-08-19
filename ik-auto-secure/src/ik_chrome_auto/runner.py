@@ -129,6 +129,7 @@ class ProfileWorker:
         self._farm_world_map_click_at = 0.0
         self._farm_ready_teams: tuple[int, ...] = ()
         self._farm_search_clicks = 0
+        self._farm_resource_tab_clicked_at = 0.0
 
     def submit(self, command: WorkerCommand) -> None:
         self._ensure_thread()
@@ -227,6 +228,7 @@ class ProfileWorker:
                     self._farm_world_map_click_at = 0.0
                     self._farm_ready_teams = ()
                     self._farm_search_clicks = 0
+                    self._farm_resource_tab_clicked_at = 0.0
                     self._log_farm("started", {})
                     self._publish(WorkerState.RUNNING, "Auto Farm: đang preflight game canvas")
                     continue
@@ -447,6 +449,7 @@ class ProfileWorker:
             world = detected.evidence_for(FarmTemplateId.WORLD_MAP_ANCHOR)
             browser_canvas = detected.evidence_for(FarmTemplateId.BROWSER_CANVAS_READY_ANCHOR)
             search_button = detected.evidence_for(FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON)
+            resource_tab = detected.evidence_for(FarmTemplateId.BROWSER_RESOURCE_TAB_BUTTON)
             ready_teams = detected.ready_teams
             # The World Map transition hides the team HUD. Retain a roster
             # detected in the stable City frame and use it only for this farm
@@ -462,6 +465,7 @@ class ProfileWorker:
                     "world_map": self._evidence_payload(world),
                     "browser_canvas": self._evidence_payload(browser_canvas),
                     "resource_search_button": self._evidence_payload(search_button),
+                    "resource_tab": self._evidence_payload(resource_tab),
                     "ready_teams": ready_teams,
                 },
             )
@@ -568,6 +572,41 @@ class ProfileWorker:
                 self._publish(WorkerState.RUNNING, "Auto Farm: đã mở World Map, đang xác minh")
                 return
             if decision.step == FarmStep.FIND_RESOURCE and state == FarmGameState.RESOURCE_SEARCH:
+                if self._farm_resource_tab_clicked_at <= 0 and resource_tab.actionable:
+                    fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
+                    fresh_tab = fresh.evidence_for(FarmTemplateId.BROWSER_RESOURCE_TAB_BUTTON)
+                    if fresh_tab.actionable:
+                        self.session.tap_farm_template(fresh_tab.bounds, fresh_size)  # type: ignore[arg-type]
+                        self._farm_resource_tab_clicked_at = time.monotonic()
+                        self._farm_next_at = self._farm_resource_tab_clicked_at + 1.2
+                        self._log_farm("tap_resource_tab", {"bounds": fresh_tab.bounds})
+                        self._publish(WorkerState.RUNNING, "Auto Farm: đã chọn tab Tài nguyên, đang xác minh")
+                        return
+                if self._farm_resource_tab_clicked_at > 0:
+                    elapsed = time.monotonic() - self._farm_resource_tab_clicked_at
+                    if not resource_tab.found:
+                        screenshot = self._save_farm_debug_capture("resource-tab-selected")
+                        self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
+                        self._log_farm("resource_tab_verified", {"screenshot": str(screenshot) if screenshot else None})
+                        self._publish(
+                            WorkerState.RUNNING,
+                            f"Auto Farm: tab Tài nguyên đã xác minh; chờ template chọn {decision.resource} cấp {decision.level}",
+                            f"Ảnh để port bước tiếp theo: {screenshot}" if screenshot else "",
+                        )
+                        return
+                    if elapsed >= 5.0:
+                        screenshot = self._save_farm_debug_capture("resource-tab-unverified")
+                        self._log_farm("error", {"reason": "resource_tab_unverified", "screenshot": str(screenshot) if screenshot else None})
+                        self._farm = None
+                        self._publish(
+                            WorkerState.ERROR,
+                            "Auto Farm dừng: tab Tài nguyên chưa được xác minh",
+                            f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                        )
+                        return
+                    self._farm_next_at = time.monotonic() + 0.8
+                    self._publish(WorkerState.RUNNING, "Auto Farm: đang chờ tab Tài nguyên cập nhật")
+                    return
                 screenshot = self._save_farm_debug_capture("resource-plan-pending")
                 self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
                 self._log_farm(

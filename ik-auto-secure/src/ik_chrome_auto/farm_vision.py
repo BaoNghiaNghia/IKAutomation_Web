@@ -35,6 +35,7 @@ class FarmTemplateId(StrEnum):
     BROWSER_CANVAS_READY_ANCHOR = "browser_canvas_ready_anchor"
     BROWSER_RESOURCE_SEARCH_BUTTON = "browser_resource_search_button"
     BROWSER_RESOURCE_SEARCH_PANEL = "browser_resource_search_panel"
+    BROWSER_RESOURCE_TAB_BUTTON = "browser_resource_tab_button"
 
 
 class DetectedGameState(StrEnum):

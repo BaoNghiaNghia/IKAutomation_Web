@@ -81,6 +81,13 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
         reference_width=835,
         reference_height=432,
     ),
+    FarmTemplateId.BROWSER_RESOURCE_TAB_BUTTON: TemplateSpec(
+        "browser_resource_tab_unselected.png",
+        threshold=0.78,
+        region="lower_left",
+        reference_width=835,
+        reference_height=432,
+    ),
 }
 
 
