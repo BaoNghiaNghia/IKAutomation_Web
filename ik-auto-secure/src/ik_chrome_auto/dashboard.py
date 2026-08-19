@@ -149,10 +149,31 @@ class Dashboard(QWidget):
         while self.table_layout.count():
             item=self.table_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
-        self.rows.clear(); ids=[p.id for p in self.config.profiles]; self.master.clear(); self.master.addItems(ids)
+        self.rows.clear(); self.master.clear()
+        for profile in self.config.profiles:
+            self.master.addItem(self._masked_profile_username(profile), profile.id)
         for profile in self.config.profiles:
             card=self._card(); layout=QVBoxLayout(card); top=QHBoxLayout(); top.addWidget(StrongBodyLabel(profile.name)); top.addWidget(self._muted(f"{profile.id} · {profile.mode.value}")); top.addStretch(); badge=QLabel("Đã dừng"); badge.setStyleSheet("background:#f1f5f9;color:#475569;border-radius:10px;padding:3px 8px;"); top.addWidget(badge); layout.addLayout(top); status=self._muted("Đã dừng"); resource=self._muted("—"); details=QHBoxLayout(); details.addWidget(status,1); details.addWidget(resource); layout.addLayout(details); buttons=QHBoxLayout(); open_btn=PrimaryPushButton("Mở"); open_btn.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.OPEN)); buttons.addWidget(open_btn); farm=PushButton("Farm"); farm.clicked.connect(lambda _=False,pid=profile.id:self._toggle_farm(pid)); buttons.addWidget(farm); auto=PushButton("Auto 2048"); auto.clicked.connect(lambda _=False,pid=profile.id:self._toggle_auto(pid)); buttons.addWidget(auto); shot=PushButton("Ảnh"); shot.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.SCREENSHOT)); buttons.addWidget(shot); inspect=PushButton("Đo"); inspect.clicked.connect(lambda _=False,pid=profile.id:self._toggle_inspector(pid)); buttons.addWidget(inspect); buttons.addStretch(); delete=self._icon_button(FIF.DELETE,"Xóa profile"); delete.clicked.connect(lambda _=False,pid=profile.id:self._remove_profile(pid)); buttons.addWidget(delete); layout.addLayout(buttons); index=len(self.rows); self.table_layout.addWidget(card, index // 2, index % 2); self.rows[profile.id]=ProfileRow(status,resource,badge,inspect,auto,farm,card)
         self.table_layout.setRowStretch((len(self.rows) + 1) // 2, 1)
+
+    @staticmethod
+    def _mask_username(username: str) -> str:
+        value = username.strip()
+        if not value:
+            return "Chưa có username"
+        visible = value[:6]
+        return visible + "*" * max(3, len(value) - len(visible))
+
+    def _masked_profile_username(self, profile: ProfileConfig) -> str:
+        try:
+            from ik_chrome_auto.credential_store import WindowsCredentialStore
+
+            credential = WindowsCredentialStore().load(profile.id)
+            if credential is not None:
+                return self._mask_username(credential.username)
+        except Exception:
+            pass
+        return self._mask_username(profile.name)
 
     def _apply_windows_per_row(self, _value: str | None=None) -> int:
         value=int(self.windows_per_row.currentText()); self.config.browser.windows_per_row=value; save_config(self.config); return value
@@ -209,7 +230,7 @@ class Dashboard(QWidget):
             row.card.setStyleSheet("")
     def _toggle_sync(self) -> None:
         if self.runner.sync_enabled: self.runner.disable_sync(); self.sync.setText("Bật sync chuột"); self.sync_status.setText("Sync đang tắt"); return
-        master=self.master.currentText(); opened=[p.id for p in self.config.profiles if self.runner.has_open_session(p.id)]
+        master=str(self.master.currentData() or ""); opened=[p.id for p in self.config.profiles if self.runner.has_open_session(p.id)]
         if master not in opened or len(opened)<2: self._warning("Chưa đủ profile","Hãy mở master và ít nhất một follower trước khi bật sync."); return
         self.runner.enable_sync(master); self.sync.setText("Tắt sync chuột"); self.sync_status.setText(f"MASTER: {master} → {len(opened)-1} follower")
     def _save_speed(self) -> None:
