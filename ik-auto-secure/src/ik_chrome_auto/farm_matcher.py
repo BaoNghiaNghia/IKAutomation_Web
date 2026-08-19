@@ -102,6 +102,13 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
         reference_width=835,
         reference_height=432,
     ),
+    FarmTemplateId.BROWSER_GATHER_BUTTON_ENABLED: TemplateSpec(
+        "browser_gather_button_enabled.png",
+        threshold=0.80,
+        region="lower",
+        reference_width=835,
+        reference_height=432,
+    ),
 }
 
 

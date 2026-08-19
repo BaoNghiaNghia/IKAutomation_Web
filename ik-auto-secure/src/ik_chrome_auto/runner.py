@@ -132,6 +132,8 @@ class ProfileWorker:
         self._farm_resource_tab_clicked_at = 0.0
         self._farm_resource_selected_at = 0.0
         self._farm_find_resource_clicks = 0
+        self._farm_gather_clicks = 0
+        self._farm_capture_blocked_count = 0
 
     def submit(self, command: WorkerCommand) -> None:
         self._ensure_thread()
@@ -233,6 +235,8 @@ class ProfileWorker:
                     self._farm_resource_tab_clicked_at = 0.0
                     self._farm_resource_selected_at = 0.0
                     self._farm_find_resource_clicks = 0
+                    self._farm_gather_clicks = 0
+                    self._farm_capture_blocked_count = 0
                     self._log_farm("started", {})
                     self._publish(WorkerState.RUNNING, "Auto Farm: đang preflight game canvas")
                     continue
@@ -440,6 +444,7 @@ class ProfileWorker:
             return
         try:
             detected, _surface, image_size = self.session.detect_farm_state()
+            self._farm_capture_blocked_count = 0
             state = {
                 DetectedGameState.CITY: FarmGameState.CITY,
                 DetectedGameState.WORLD_MAP: FarmGameState.WORLD_MAP,
@@ -456,6 +461,7 @@ class ProfileWorker:
             resource_tab = detected.evidence_for(FarmTemplateId.BROWSER_RESOURCE_TAB_BUTTON)
             iron_resource = detected.evidence_for(FarmTemplateId.BROWSER_IRON_RESOURCE_BUTTON)
             find_resource = detected.evidence_for(FarmTemplateId.BROWSER_SEARCH_BUTTON_ENABLED)
+            gather_button = detected.evidence_for(FarmTemplateId.BROWSER_GATHER_BUTTON_ENABLED)
             ready_teams = detected.ready_teams
             # The World Map transition hides the team HUD. Retain a roster
             # detected in the stable City frame and use it only for this farm
@@ -474,6 +480,7 @@ class ProfileWorker:
                     "resource_tab": self._evidence_payload(resource_tab),
                     "iron_resource": self._evidence_payload(iron_resource),
                     "find_resource": self._evidence_payload(find_resource),
+                    "gather_button": self._evidence_payload(gather_button),
                     "ready_teams": ready_teams,
                 },
             )
@@ -578,6 +585,39 @@ class ProfileWorker:
                 self._log_farm("tap_city_to_world_map", {"bounds": fresh_city.bounds})
                 self._farm_next_at = time.monotonic() + 1.2
                 self._publish(WorkerState.RUNNING, "Auto Farm: đã mở World Map, đang xác minh")
+                return
+            if (
+                decision.step == FarmStep.OPEN_TEAM_SELECTION
+                and state == FarmGameState.RESOURCE_POPUP
+                and gather_button.actionable
+            ):
+                if self._farm_gather_clicks >= 2:
+                    screenshot = self._save_farm_debug_capture("gather-unverified")
+                    self._log_farm(
+                        "error",
+                        {"reason": "gather_unverified", "screenshot": str(screenshot) if screenshot else None},
+                    )
+                    self._farm = None
+                    self._publish(
+                        WorkerState.ERROR,
+                        "Auto Farm dừng: không xác minh được panel chọn đội sau 2 lần Thu thập",
+                        f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                    )
+                    return
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
+                fresh_gather = fresh.evidence_for(FarmTemplateId.BROWSER_GATHER_BUTTON_ENABLED)
+                if not fresh_gather.actionable:
+                    self._farm_next_at = time.monotonic() + 0.8
+                    self._publish(WorkerState.RUNNING, "Auto Farm: nút Thu thập thay đổi, đang nhận diện lại")
+                    return
+                self.session.tap_farm_template(fresh_gather.bounds, fresh_size)  # type: ignore[arg-type]
+                self._farm_gather_clicks += 1
+                self._farm_next_at = time.monotonic() + 1.5
+                self._log_farm(
+                    "tap_gather",
+                    {"bounds": fresh_gather.bounds, "resource": decision.resource, "level": decision.level},
+                )
+                self._publish(WorkerState.RUNNING, "Auto Farm: đã bấm Thu thập, đang xác minh chọn đội")
                 return
             if decision.step == FarmStep.FIND_RESOURCE and state == FarmGameState.RESOURCE_SEARCH:
                 if decision.resource == "iron" and self._farm_resource_selected_at <= 0 and iron_resource.actionable:
@@ -741,6 +781,31 @@ class ProfileWorker:
                 )
                 return
             self._publish(WorkerState.RUNNING, f"Auto Farm: {decision.message}")
+        except RuntimeError as error:
+            if "Cửa sổ game đang bị thu nhỏ hoặc bị cửa sổ khác che" in str(error):
+                self._farm_capture_blocked_count += 1
+                screenshot = self._save_farm_debug_capture("capture-blocked")
+                self._log_farm(
+                    "capture_blocked",
+                    {
+                        "attempt": self._farm_capture_blocked_count,
+                        "screenshot": str(screenshot) if screenshot else None,
+                    },
+                )
+                if self._farm_capture_blocked_count < 10:
+                    self._farm_next_at = time.monotonic() + 1.0
+                    self._publish(
+                        WorkerState.RUNNING,
+                        "Auto Farm: cửa sổ game tạm thời bị che, đang chờ capture lại",
+                    )
+                    return
+            screenshot = self._save_farm_debug_capture("error")
+            self._log_farm(
+                "error",
+                {"type": type(error).__name__, "message": str(error), "screenshot": str(screenshot) if screenshot else None},
+            )
+            self._farm = None
+            self._publish(WorkerState.ERROR, f"Auto Farm đã dừng an toàn: {error}")
         except Exception as error:
             screenshot = self._save_farm_debug_capture("error")
             self._log_farm(

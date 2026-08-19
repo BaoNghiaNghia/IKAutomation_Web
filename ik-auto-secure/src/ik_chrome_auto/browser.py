@@ -677,7 +677,7 @@ class ChromeProfileSession:
         if not is_region_visible_for_window(hwnd, region):
             raise RuntimeError(
                 "Cửa sổ game đang bị thu nhỏ hoặc bị cửa sổ khác che; "
-                "hãy bấm Sắp xếp cửa sổ trước khi chạy Auto 2048"
+                "hãy bấm Sắp xếp cửa sổ trước khi chạy Auto Farm hoặc Auto 2048"
             )
         png = capture_screen_region_png(region)
         if not _png_has_visible_content(png):
