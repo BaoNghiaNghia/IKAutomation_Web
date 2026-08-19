@@ -131,6 +131,7 @@ class ProfileWorker:
         self._farm_search_clicks = 0
         self._farm_resource_tab_clicked_at = 0.0
         self._farm_resource_selected_at = 0.0
+        self._farm_find_resource_clicks = 0
 
     def submit(self, command: WorkerCommand) -> None:
         self._ensure_thread()
@@ -231,6 +232,7 @@ class ProfileWorker:
                     self._farm_search_clicks = 0
                     self._farm_resource_tab_clicked_at = 0.0
                     self._farm_resource_selected_at = 0.0
+                    self._farm_find_resource_clicks = 0
                     self._log_farm("started", {})
                     self._publish(WorkerState.RUNNING, "Auto Farm: đang preflight game canvas")
                     continue
@@ -453,6 +455,7 @@ class ProfileWorker:
             search_button = detected.evidence_for(FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON)
             resource_tab = detected.evidence_for(FarmTemplateId.BROWSER_RESOURCE_TAB_BUTTON)
             iron_resource = detected.evidence_for(FarmTemplateId.BROWSER_IRON_RESOURCE_BUTTON)
+            find_resource = detected.evidence_for(FarmTemplateId.BROWSER_SEARCH_BUTTON_ENABLED)
             ready_teams = detected.ready_teams
             # The World Map transition hides the team HUD. Retain a roster
             # detected in the stable City frame and use it only for this farm
@@ -470,6 +473,7 @@ class ProfileWorker:
                     "resource_search_button": self._evidence_payload(search_button),
                     "resource_tab": self._evidence_payload(resource_tab),
                     "iron_resource": self._evidence_payload(iron_resource),
+                    "find_resource": self._evidence_payload(find_resource),
                     "ready_teams": ready_teams,
                 },
             )
@@ -589,6 +593,46 @@ class ProfileWorker:
                 if decision.resource == "iron" and self._farm_resource_selected_at > 0:
                     elapsed = time.monotonic() - self._farm_resource_selected_at
                     if not iron_resource.found:
+                        if find_resource.actionable:
+                            if self._farm_find_resource_clicks >= 2:
+                                screenshot = self._save_farm_debug_capture("find-resource-unverified")
+                                self._log_farm(
+                                    "error",
+                                    {"reason": "find_resource_unverified", "screenshot": str(screenshot) if screenshot else None},
+                                )
+                                self._farm = None
+                                self._publish(
+                                    WorkerState.ERROR,
+                                    "Auto Farm dừng: không xác minh được tài nguyên sau khi tìm 2 lần",
+                                    f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                                )
+                                return
+                            # Rematch immediately before the one input. The
+                            # yellow button is a browser-specific template,
+                            # captured at the current canvas reference size.
+                            fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
+                            fresh_find_resource = fresh.evidence_for(
+                                FarmTemplateId.BROWSER_SEARCH_BUTTON_ENABLED
+                            )
+                            if fresh_find_resource.actionable:
+                                self.session.tap_farm_template(
+                                    fresh_find_resource.bounds, fresh_size
+                                )  # type: ignore[arg-type]
+                                self._farm_find_resource_clicks += 1
+                                self._farm_next_at = time.monotonic() + 1.5
+                                self._log_farm(
+                                    "tap_find_resource",
+                                    {
+                                        "bounds": fresh_find_resource.bounds,
+                                        "resource": decision.resource,
+                                        "level": decision.level,
+                                    },
+                                )
+                                self._publish(
+                                    WorkerState.RUNNING,
+                                    f"Auto Farm: đang tìm {decision.resource} cấp {decision.level}, đang xác minh mục tiêu",
+                                )
+                                return
                         screenshot = self._save_farm_debug_capture("iron-selected")
                         self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
                         self._log_farm("iron_resource_verified", {"level": decision.level, "screenshot": str(screenshot) if screenshot else None})

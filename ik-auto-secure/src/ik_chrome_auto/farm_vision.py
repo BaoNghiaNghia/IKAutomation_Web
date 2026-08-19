@@ -37,6 +37,7 @@ class FarmTemplateId(StrEnum):
     BROWSER_RESOURCE_SEARCH_PANEL = "browser_resource_search_panel"
     BROWSER_RESOURCE_TAB_BUTTON = "browser_resource_tab_button"
     BROWSER_IRON_RESOURCE_BUTTON = "browser_iron_resource_button"
+    BROWSER_SEARCH_BUTTON_ENABLED = "browser_search_button_enabled"
 
 
 class DetectedGameState(StrEnum):
