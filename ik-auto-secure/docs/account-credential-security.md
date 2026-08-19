@@ -78,6 +78,26 @@ chỉ trả có/không, không hiển thị username hoặc password.
 - Nếu worker chạy trên máy khác, người vận hành nhập lại secret trên máy đó;
   không đồng bộ blob DPAPI hay Vault entry qua network.
 
+## Xác thực thao tác nhạy cảm: Google Authenticator
+
+Dashboard dùng TOTP tương thích **Google Authenticator** làm lớp xác thực
+chính trước khi xem, sửa hoặc xóa tài khoản. Windows Hello được giữ lại trong
+source như một phương án có thể bật lại, nhưng không được gọi trong luồng hiện
+tại.
+
+1. Lần đầu, dashboard hiển thị QR `otpauth://`; người dùng quét bằng Google
+   Authenticator và xác nhận bằng mã sáu chữ số.
+2. TOTP secret và danh sách hash của mười recovery code được lưu thành Generic
+   Credentials của đúng Windows user. `config.json`, log và source không chứa
+   secret hoặc recovery code.
+3. Các thao tác nhạy cảm sau đó cần mã TOTP, chấp nhận chênh lệch tối đa một
+   chu kỳ 30 giây để tránh lỗi đồng hồ.
+4. Nếu mất điện thoại, dùng một recovery code. Code được tiêu thụ ngay, rồi
+   dashboard bắt buộc quét QR mới và tạo bộ recovery code mới.
+5. Mất cả authenticator lẫn recovery codes nghĩa là không có đường khôi phục
+   bí mật an toàn. Cần xóa trạng thái bảo mật cục bộ dưới Windows user đó và
+   thiết lập lại; game credentials không được xuất hay gửi qua mạng.
+
 ## Quy tắc DPAPI fallback
 
 Chỉ dùng DPAPI nếu Credential Manager API không đáp ứng use case. Blob phải có

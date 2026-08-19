@@ -5,12 +5,13 @@ import json
 import os
 import queue
 import time
+from io import BytesIO
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QCloseEvent, QGuiApplication, QIcon
+from PySide6.QtGui import QAction, QCloseEvent, QGuiApplication, QIcon, QPixmap
 from PySide6.QtWidgets import QApplication, QDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
 from qfluentwidgets import CardWidget, CheckBox, ComboBox, FluentIcon as FIF, LineEdit, PasswordLineEdit, PrimaryPushButton, PrimaryToolButton, PushButton, StrongBodyLabel, SubtitleLabel, ToolButton
 
@@ -18,7 +19,11 @@ from ik_chrome_auto.config import ensure_data_dirs, load_config, save_config, un
 from ik_chrome_auto.interaction import format_coordinate
 from ik_chrome_auto.models import Auto2048Speed, CommandKind, ProfileConfig, ProfileMode, WorkerSnapshot, WorkerState
 from ik_chrome_auto.runner import AUTO_2048_TIMINGS, MultiProfileRunner
-from ik_chrome_auto.windows_auth import WindowsAuthenticationError, require_windows_hello
+from ik_chrome_auto.two_factor import TwoFactorEnrollment, TwoFactorService
+
+# Windows Hello implementation remains available in windows_auth.py, but is
+# intentionally disabled while Google Authenticator is the primary verifier.
+WINDOWS_HELLO_ENABLED = False
 
 SPEED_LABELS = {key: f"{value.label} ({value.move_delay_seconds:.2f}s)" for key, value in AUTO_2048_TIMINGS.items()}
 _launch_terminal_window = 0
@@ -216,7 +221,7 @@ class Dashboard(QWidget):
         if self.inspecting_profile_id: self.runner.set_inspector(self.inspecting_profile_id,False); self.rows[self.inspecting_profile_id].inspect.setText("Đo")
         self.inspecting_profile_id=pid; self.runner.set_inspector(pid,True); self.rows[pid].inspect.setText("Tắt đo"); self.coordinate.setText(f"[{pid}] Click vào game để lấy tọa độ…")
     def _manage_accounts(self) -> None:
-        if not self._authorize_windows("xem hoặc chỉnh sửa tài khoản game"): return
+        if not self._authorize_two_factor("xem hoặc chỉnh sửa tài khoản game"): return
         dialog=AccountManagerDialog(self, self.config.profiles)
         if dialog.exec()!=QDialog.DialogCode.Accepted: return
         entries=dialog.accounts(); existing={p.id for p in self.config.profiles}; original={p.id:p for p in self.config.profiles if p.mode==ProfileMode.MANAGED}; unmanaged=[p for p in self.config.profiles if p.mode!=ProfileMode.MANAGED]; kept_ids={entry[0] for entry in entries if entry[0]}; removed_ids=set(original)-kept_ids
@@ -238,7 +243,7 @@ class Dashboard(QWidget):
             self.runner.sync_profiles(); self._draw_rows(); self._append_log(f"Đã lưu {len(updated)} tài khoản" + (f", thêm {added}" if added else ""))
         except Exception as error: self._error("Không lưu được tài khoản",str(error))
     def _remove_profile(self,pid:str) -> None:
-        if not self._authorize_windows("xóa tài khoản game"): return
+        if not self._authorize_two_factor("xóa tài khoản game"): return
         profile=self.config.profile(pid)
         if QMessageBox.question(self,"Bỏ profile",f"Bỏ '{profile.name}' khỏi dashboard?\n\nCredential mã hóa cũng sẽ bị xóa.")!=QMessageBox.StandardButton.Yes: return
         worker=self.runner.workers.get(pid)
@@ -248,11 +253,38 @@ class Dashboard(QWidget):
             WindowsCredentialStore().delete(pid)
         except Exception as error: self._append_log(str(error))
         self.config.profiles=[p for p in self.config.profiles if p.id!=pid]; save_config(self.config); self.runner.sync_profiles(); self._draw_rows()
-    def _authorize_windows(self, action:str) -> bool:
+    def _authorize_two_factor(self, action: str) -> bool:
+        """Google Authenticator is the only active gate for sensitive actions."""
         try:
-            self.showNormal(); self.raise_(); self.activateWindow(); QApplication.processEvents()
-            return require_windows_hello(action=action)
-        except WindowsAuthenticationError as error:
+            service = TwoFactorService()
+            if not service.is_configured():
+                enrollment = TwoFactorSetupDialog.setup(self)
+                if enrollment is None:
+                    return False
+                if not service.confirm_enrollment(enrollment[0], enrollment[1]):
+                    self._warning("Mã chưa đúng", "Mã Google Authenticator không hợp lệ. Hãy thử lại.")
+                    return False
+                RecoveryCodesDialog(self, enrollment[0].recovery_codes).exec()
+                self._append_log("Đã bật Google Authenticator cho các thao tác nhạy cảm")
+                return True
+            dialog = TwoFactorVerifyDialog(self, action)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return False
+            if dialog.using_recovery:
+                if not service.consume_recovery_code(dialog.code.text()):
+                    self._warning("Mã khôi phục không đúng", "Mã này không hợp lệ hoặc đã được sử dụng.")
+                    return False
+                enrollment = TwoFactorSetupDialog.setup(self, recovery=True)
+                if enrollment is None or not service.confirm_enrollment(enrollment[0], enrollment[1]):
+                    self._warning("Chưa hoàn tất", "Hãy thiết lập lại Google Authenticator trước khi tiếp tục.")
+                    return False
+                RecoveryCodesDialog(self, enrollment[0].recovery_codes).exec()
+                return True
+            if not service.verify_current_code(dialog.code.text()):
+                self._warning("Mã chưa đúng", "Mã Google Authenticator không hợp lệ hoặc đã hết hạn.")
+                return False
+            return True
+        except Exception as error:
             self._warning("Không xác thực được", str(error)); return False
     def _copy_xy(self) -> None:
         if not self.last_coordinate:return
@@ -301,6 +333,88 @@ class Dashboard(QWidget):
     def _error(self,title:str,message:str)->None: QMessageBox.critical(self,title,message)
     def closeEvent(self,event:QCloseEvent)->None:
         self.timer.stop(); self.runner.shutdown(); event.accept()
+
+
+class TwoFactorSetupDialog(QDialog):
+    """Enrollment screen for Google Authenticator-compatible TOTP apps."""
+    def __init__(self, parent: QWidget, recovery: bool = False) -> None:
+        super().__init__(parent)
+        self.enrollment = TwoFactorService().begin_enrollment()
+        self.setWindowTitle("Thiết lập Google Authenticator")
+        self.setModal(True)
+        self.resize(430, 590)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(26, 24, 26, 24)
+        layout.setSpacing(12)
+        layout.addWidget(SubtitleLabel("Thiết lập lại bảo mật" if recovery else "Bảo vệ bằng Google Authenticator"))
+        message = "Mã khôi phục đã được dùng. Quét QR mới để thay thế thiết bị cũ." if recovery else "Quét QR bằng Google Authenticator, rồi nhập mã 6 số để xác nhận."
+        layout.addWidget(self._description(message))
+        qr = QLabel()
+        qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        qr.setPixmap(self._qr_pixmap(self.enrollment.provisioning_uri))
+        layout.addWidget(qr)
+        layout.addWidget(self._description("Không quét được QR? Nhập secret này thủ công:"))
+        secret = LineEdit(); secret.setText(self.enrollment.secret); secret.setReadOnly(True)
+        layout.addWidget(secret)
+        self.code = LineEdit(); self.code.setPlaceholderText("Mã 6 số từ Authenticator"); self.code.setMaxLength(6)
+        layout.addWidget(self.code)
+        actions = QHBoxLayout(); actions.addStretch(); cancel = PushButton("Hủy"); cancel.clicked.connect(self.reject); confirm = PrimaryPushButton("Xác nhận"); confirm.clicked.connect(self._validate); actions.addWidget(cancel); actions.addWidget(confirm); layout.addLayout(actions)
+
+    @staticmethod
+    def _description(text: str) -> QLabel:
+        label = QLabel(text); label.setWordWrap(True); label.setStyleSheet("color:#62758e;background:transparent;"); return label
+
+    @staticmethod
+    def _qr_pixmap(uri: str) -> QPixmap:
+        import qrcode
+        image = qrcode.make(uri)
+        data = BytesIO(); image.save(data, format="PNG")
+        pixmap = QPixmap(); pixmap.loadFromData(data.getvalue(), "PNG")
+        return pixmap.scaled(220, 220, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+    def _validate(self) -> None:
+        if TwoFactorService.verify_code(self.enrollment.secret, self.code.text()):
+            self.accept()
+        else:
+            QMessageBox.warning(self, "Mã chưa đúng", "Mã 6 số không hợp lệ. Hãy kiểm tra thời gian trên điện thoại rồi thử lại.")
+
+    @classmethod
+    def setup(cls, parent: QWidget, recovery: bool = False) -> tuple[TwoFactorEnrollment, str] | None:
+        dialog = cls(parent, recovery)
+        return (dialog.enrollment, dialog.code.text()) if dialog.exec() == QDialog.DialogCode.Accepted else None
+
+
+class TwoFactorVerifyDialog(QDialog):
+    def __init__(self, parent: QWidget, action: str) -> None:
+        super().__init__(parent)
+        self.using_recovery = False
+        self.setWindowTitle("Xác thực bảo mật")
+        self.setModal(True)
+        self.setFixedWidth(390)
+        layout = QVBoxLayout(self); layout.setContentsMargins(26, 24, 26, 24); layout.setSpacing(12)
+        layout.addWidget(SubtitleLabel("Xác nhận danh tính"))
+        note = QLabel(f"Nhập mã từ Google Authenticator để {action}."); note.setWordWrap(True); note.setStyleSheet("color:#62758e;background:transparent;"); layout.addWidget(note)
+        self.code = LineEdit(); self.code.setPlaceholderText("Mã 6 số"); self.code.setMaxLength(16); layout.addWidget(self.code)
+        self.recovery = PushButton("Không có mã? Dùng recovery code"); self.recovery.clicked.connect(self._use_recovery); layout.addWidget(self.recovery)
+        actions = QHBoxLayout(); actions.addStretch(); cancel=PushButton("Hủy"); cancel.clicked.connect(self.reject); confirm=PrimaryPushButton("Xác nhận"); confirm.clicked.connect(self.accept); actions.addWidget(cancel); actions.addWidget(confirm); layout.addLayout(actions)
+
+    def _use_recovery(self) -> None:
+        self.using_recovery = True
+        self.code.clear(); self.code.setMaxLength(14); self.code.setPlaceholderText("Ví dụ: ABCD-EFGH-JKLM")
+        self.recovery.setVisible(False)
+
+
+class RecoveryCodesDialog(QDialog):
+    def __init__(self, parent: QWidget, codes: tuple[str, ...]) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Lưu mã khôi phục")
+        self.setModal(True)
+        self.resize(430, 420)
+        layout=QVBoxLayout(self); layout.setContentsMargins(26,24,26,24); layout.setSpacing(12)
+        layout.addWidget(SubtitleLabel("Lưu mã khôi phục ngay"))
+        note=QLabel("Mỗi mã chỉ dùng một lần khi mất Google Authenticator. Các mã này sẽ không hiển thị lại."); note.setWordWrap(True); note.setStyleSheet("color:#b45309;background:transparent;"); layout.addWidget(note)
+        values=QTextEdit(); values.setReadOnly(True); values.setPlainText("\n".join(codes)); values.setFixedHeight(220); layout.addWidget(values)
+        actions=QHBoxLayout(); copy=PushButton("Sao chép"); copy.clicked.connect(lambda: QApplication.clipboard().setText("\n".join(codes))); actions.addWidget(copy); actions.addStretch(); close=PrimaryPushButton("Đã lưu an toàn"); close.clicked.connect(self.accept); actions.addWidget(close); layout.addLayout(actions)
 
 
 class AccountManagerDialog(QDialog):
