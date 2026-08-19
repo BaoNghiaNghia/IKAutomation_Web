@@ -88,6 +88,13 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
         reference_width=835,
         reference_height=432,
     ),
+    FarmTemplateId.BROWSER_IRON_RESOURCE_BUTTON: TemplateSpec(
+        "browser_resource_iron_unselected.png",
+        threshold=0.78,
+        region="lower",
+        reference_width=835,
+        reference_height=432,
+    ),
 }
 
 

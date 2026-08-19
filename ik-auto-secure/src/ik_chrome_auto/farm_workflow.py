@@ -109,7 +109,13 @@ class FarmWorkflow:
             return FarmDecision(self.step, f"Tìm {resource} cấp {level}", resource, level, self.team, target_verified)
         if self.step == FarmStep.FIND_RESOURCE:
             if state != FarmGameState.RESOURCE_POPUP:
-                return FarmDecision(self.step, "Không thấy tài nguyên; chuyển phương án tìm kiếm")
+                return FarmDecision(
+                    self.step,
+                    "Chờ tài nguyên xuất hiện; giữ nguyên phương án tìm kiếm",
+                    resource,
+                    level,
+                    self.team,
+                )
             self.step = FarmStep.OPEN_TEAM_SELECTION
             return FarmDecision(self.step, "Mở chọn đội", resource, level, self.team, target_verified)
         if self.step == FarmStep.OPEN_TEAM_SELECTION:

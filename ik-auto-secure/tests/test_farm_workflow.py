@@ -26,3 +26,15 @@ def test_search_fallback_tries_levels_before_resource() -> None:
     assert farm._target() == ("iron", 6)
     assert farm.advance_search_plan() is True
     assert farm._target() == ("iron", 5)
+
+
+def test_find_resource_keeps_the_planned_resource_and_level() -> None:
+    farm = FarmWorkflow()
+    farm.decide(FarmGameState.CITY)
+    farm.decide(FarmGameState.WORLD_MAP, ready_teams=(2,))
+    farm.decide(FarmGameState.RESOURCE_SEARCH)
+
+    decision = farm.decide(FarmGameState.RESOURCE_SEARCH)
+
+    assert decision.step == FarmStep.FIND_RESOURCE
+    assert (decision.resource, decision.level, decision.team) == ("iron", 7, 2)

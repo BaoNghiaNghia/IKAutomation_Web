@@ -14,6 +14,7 @@ def test_city_requires_map_button_and_no_higher_priority_overlay() -> None:
     assert detect(FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON).state == DetectedGameState.UNKNOWN
     assert detect(FarmTemplateId.BROWSER_RESOURCE_SEARCH_PANEL).state == DetectedGameState.RESOURCE_SEARCH_PANEL
     assert detect(FarmTemplateId.BROWSER_RESOURCE_TAB_BUTTON).state == DetectedGameState.UNKNOWN
+    assert detect(FarmTemplateId.BROWSER_IRON_RESOURCE_BUTTON).state == DetectedGameState.UNKNOWN
 
 
 def test_detection_result_keeps_ready_team_slots() -> None:
