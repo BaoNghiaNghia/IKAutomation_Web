@@ -121,6 +121,7 @@ class ChromeProfileSession:
         self._runtime_page: Page | None = None
         self._page_cdp_session: Any | None = None
         self._direct_canvas_capture_supported: bool | None = None
+        self._farm_matcher: Any | None = None
 
     @property
     def context(self) -> BrowserContext:
@@ -593,6 +594,36 @@ class ChromeProfileSession:
                     )
                 )
         return png, box
+
+    def detect_farm_state(self) -> tuple[Any, dict[str, float], tuple[int, int]]:
+        """Classify the current game canvas with the ported ADB template pack."""
+        from ik_chrome_auto.farm_matcher import BrowserCanvasMatcher
+
+        png, surface = self.capture_game_surface_png()
+        if self._farm_matcher is None:
+            self._farm_matcher = BrowserCanvasMatcher()
+        result = self._farm_matcher.detect(png)
+        return result, surface, self._png_dimensions(png)
+
+    @staticmethod
+    def _png_dimensions(png: bytes) -> tuple[int, int]:
+        image = decode_png(png)
+        return image.width, image.height
+
+    def tap_farm_template(self, bounds: tuple[int, int, int, int], image_size: tuple[int, int]) -> None:
+        """Send one CDP touch at freshly matched screenshot-relative bounds."""
+        left, top, width, height = bounds
+        image_width, image_height = image_size
+        if width <= 0 or height <= 0 or image_width <= 0 or image_height <= 0:
+            raise ValueError("Farm template bounds không hợp lệ")
+        frame = self.find_frame()
+        _canvas, surface = self._largest_canvas(frame)
+        x = float(surface["x"]) + float(surface["width"]) * (left + width / 2) / image_width
+        y = float(surface["y"]) + float(surface["height"]) * (top + height / 2) / image_height
+        point = {"x": x, "y": y, "radiusX": 2, "radiusY": 2, "force": 1, "id": 1}
+        cdp = self._get_page_cdp_session(self.page)
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [point]})
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
 
     def _capture_visible_canvas_png(
         self,

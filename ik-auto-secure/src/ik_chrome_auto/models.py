@@ -41,6 +41,8 @@ class CommandKind(StrEnum):
     SET_TOPMOST = "set_topmost"
     START_2048 = "start_2048"
     STOP_2048 = "stop_2048"
+    START_FARM = "start_farm"
+    STOP_FARM = "stop_farm"
     SET_2048_SPEED = "set_2048_speed"
     STOP = "stop"
     SHUTDOWN = "shutdown"

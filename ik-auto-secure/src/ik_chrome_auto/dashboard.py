@@ -66,6 +66,7 @@ class ProfileRow:
     badge: QLabel
     inspect: PushButton
     auto: PushButton
+    farm: PushButton
     card: CardWidget
 
 
@@ -82,6 +83,7 @@ class Dashboard(QWidget):
         self.last_coordinate: tuple[str, dict[str, object]] | None = None
         self.inspecting_profile_id: str | None = None
         self.auto_profiles: set[str] = set()
+        self.farm_profiles: set[str] = set()
         self._auto_arrange_targets: set[str] | None = None
         self._auto_arrange_states: dict[str, WorkerState] = {}
         self._auto_arrange_deadline = 0.0
@@ -148,7 +150,7 @@ class Dashboard(QWidget):
             if item.widget(): item.widget().deleteLater()
         self.rows.clear(); ids=[p.id for p in self.config.profiles]; self.master.clear(); self.master.addItems(ids)
         for profile in self.config.profiles:
-            card=self._card(); layout=QVBoxLayout(card); top=QHBoxLayout(); top.addWidget(StrongBodyLabel(profile.name)); top.addWidget(self._muted(f"{profile.id} · {profile.mode.value}")); top.addStretch(); badge=QLabel("Đã dừng"); badge.setStyleSheet("background:#f1f5f9;color:#475569;border-radius:10px;padding:3px 8px;"); top.addWidget(badge); layout.addLayout(top); status=self._muted("Đã dừng"); resource=self._muted("—"); details=QHBoxLayout(); details.addWidget(status,1); details.addWidget(resource); layout.addLayout(details); buttons=QHBoxLayout(); open_btn=PrimaryPushButton("Mở"); open_btn.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.OPEN)); buttons.addWidget(open_btn); auto=PushButton("Auto 2048"); auto.clicked.connect(lambda _=False,pid=profile.id:self._toggle_auto(pid)); buttons.addWidget(auto); shot=PushButton("Ảnh"); shot.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.SCREENSHOT)); buttons.addWidget(shot); inspect=PushButton("Đo"); inspect.clicked.connect(lambda _=False,pid=profile.id:self._toggle_inspector(pid)); buttons.addWidget(inspect); buttons.addStretch(); delete=self._icon_button(FIF.DELETE,"Xóa profile"); delete.clicked.connect(lambda _=False,pid=profile.id:self._remove_profile(pid)); buttons.addWidget(delete); layout.addLayout(buttons); index=len(self.rows); self.table_layout.addWidget(card, index // 2, index % 2); self.rows[profile.id]=ProfileRow(status,resource,badge,inspect,auto,card)
+            card=self._card(); layout=QVBoxLayout(card); top=QHBoxLayout(); top.addWidget(StrongBodyLabel(profile.name)); top.addWidget(self._muted(f"{profile.id} · {profile.mode.value}")); top.addStretch(); badge=QLabel("Đã dừng"); badge.setStyleSheet("background:#f1f5f9;color:#475569;border-radius:10px;padding:3px 8px;"); top.addWidget(badge); layout.addLayout(top); status=self._muted("Đã dừng"); resource=self._muted("—"); details=QHBoxLayout(); details.addWidget(status,1); details.addWidget(resource); layout.addLayout(details); buttons=QHBoxLayout(); open_btn=PrimaryPushButton("Mở"); open_btn.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.OPEN)); buttons.addWidget(open_btn); farm=PushButton("Farm"); farm.clicked.connect(lambda _=False,pid=profile.id:self._toggle_farm(pid)); buttons.addWidget(farm); auto=PushButton("Auto 2048"); auto.clicked.connect(lambda _=False,pid=profile.id:self._toggle_auto(pid)); buttons.addWidget(auto); shot=PushButton("Ảnh"); shot.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.SCREENSHOT)); buttons.addWidget(shot); inspect=PushButton("Đo"); inspect.clicked.connect(lambda _=False,pid=profile.id:self._toggle_inspector(pid)); buttons.addWidget(inspect); buttons.addStretch(); delete=self._icon_button(FIF.DELETE,"Xóa profile"); delete.clicked.connect(lambda _=False,pid=profile.id:self._remove_profile(pid)); buttons.addWidget(delete); layout.addLayout(buttons); index=len(self.rows); self.table_layout.addWidget(card, index // 2, index % 2); self.rows[profile.id]=ProfileRow(status,resource,badge,inspect,auto,farm,card)
         self.table_layout.setRowStretch((len(self.rows) + 1) // 2, 1)
 
     def _apply_windows_per_row(self, _value: str | None=None) -> int:
@@ -215,6 +217,12 @@ class Dashboard(QWidget):
         row=self.rows[pid]
         if pid in self.auto_profiles: self.auto_profiles.remove(pid); row.auto.setText("Auto 2048"); self.runner.submit(pid,CommandKind.STOP_2048)
         else: self.auto_profiles.add(pid); row.auto.setText("Dừng 2048"); self.runner.submit(pid,CommandKind.START_2048)
+    def _toggle_farm(self, pid: str) -> None:
+        row = self.rows[pid]
+        if pid in self.farm_profiles:
+            self.farm_profiles.remove(pid); row.farm.setText("Farm"); self.runner.submit(pid, CommandKind.STOP_FARM)
+        else:
+            self.farm_profiles.add(pid); row.farm.setText("Dừng Farm"); self.runner.submit(pid, CommandKind.START_FARM)
     def _toggle_inspector(self,pid:str) -> None:
         if self.inspecting_profile_id==pid: self.runner.set_inspector(pid,False); self.rows[pid].inspect.setText("Đo"); self.inspecting_profile_id=None; return
         if not self.runner.has_open_session(pid): self._warning("Profile chưa mở","Hãy bấm Mở profile trước khi bật đo tọa độ."); return
@@ -299,6 +307,7 @@ class Dashboard(QWidget):
                 if row:
                     row.status.setText(snap.message); text,bg,fg=self._state(snap.state); row.badge.setText(text); row.badge.setStyleSheet(f"background:{bg};color:{fg};border-radius:10px;padding:3px 8px;"); self._set_profile_card_state(row,snap.state)
                     if snap.state==WorkerState.STOPPED or "2048" in snap.message: self.auto_profiles.discard(snap.profile_id); row.auto.setText("Auto 2048")
+                    if snap.state in {WorkerState.STOPPED, WorkerState.ERROR} or "Đã dừng Auto Farm" in snap.message: self.farm_profiles.discard(snap.profile_id); row.farm.setText("Farm")
                 self._append_log(f"[{snap.profile_id}] {snap.message}")
         except queue.Empty: pass
         try:

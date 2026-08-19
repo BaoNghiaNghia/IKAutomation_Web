@@ -12,6 +12,8 @@ from ik_chrome_auto.actions import ActionCancelled, AutomationFunctions
 from ik_chrome_auto.browser import ChromeProfileSession
 from ik_chrome_auto.event_log import JsonLineLog
 from ik_chrome_auto.game2048 import Auto2048Player, board_text
+from ik_chrome_auto.farm_vision import DetectedGameState, FarmTemplateId
+from ik_chrome_auto.farm_workflow import FarmGameState, FarmStep, FarmWorkflow
 from ik_chrome_auto.models import (
     AppConfig,
     Auto2048Speed,
@@ -114,6 +116,9 @@ class ProfileWorker:
         self._auto_2048_next_at = 0.0
         self._auto_2048_errors = 0
         self._auto_2048_speed = auto_2048_speed
+        self._farm: FarmWorkflow | None = None
+        self._farm_next_at = 0.0
+        self._farm_city_clicks = 0
 
     def submit(self, command: WorkerCommand) -> None:
         self._ensure_thread()
@@ -170,6 +175,8 @@ class ProfileWorker:
                         self._handle_external_close()
                     elif self._auto_2048 is not None and time.monotonic() >= self._auto_2048_next_at:
                         self._run_2048_tick()
+                    elif self._farm is not None and time.monotonic() >= self._farm_next_at:
+                        self._run_farm_tick()
                 continue
             try:
                 if command.kind == CommandKind.SHUTDOWN:
@@ -199,6 +206,19 @@ class ProfileWorker:
                         WorkerState.READY if self.session is not None else WorkerState.STOPPED,
                         "Đã dừng Auto 2048",
                     )
+                    continue
+                if command.kind == CommandKind.START_FARM:
+                    if self.session is None:
+                        self._publish(WorkerState.STARTING, "Đang mở profile cho Auto Farm")
+                        self._ensure_session(navigate=True)
+                    self._farm = FarmWorkflow()
+                    self._farm_next_at = 0.0
+                    self._farm_city_clicks = 0
+                    self._publish(WorkerState.RUNNING, "Auto Farm: đang preflight game canvas")
+                    continue
+                if command.kind == CommandKind.STOP_FARM:
+                    self._farm = None
+                    self._publish(WorkerState.READY if self.session is not None else WorkerState.STOPPED, "Đã dừng Auto Farm")
                     continue
                 if command.kind == CommandKind.SET_2048_SPEED:
                     self._auto_2048_speed = Auto2048Speed(
@@ -358,49 +378,22 @@ class ProfileWorker:
             maximum = max(value for row in decision.scan.board for value in row)
             if maximum >= AUTO_2048_TARGET_LEVEL:
                 self._auto_2048 = None
-                self._publish(
-                    WorkerState.COMPLETED,
-                    f"Auto 2048 đã dừng khi đạt level {AUTO_2048_TARGET_LEVEL}",
-                    board_text(decision.scan.board),
-                )
+                self._publish(WorkerState.COMPLETED, f"Auto 2048 đã dừng khi đạt level {AUTO_2048_TARGET_LEVEL}", board_text(decision.scan.board))
                 return
             if decision.waiting:
-                self._auto_2048_next_at = (
-                    time.monotonic() + timing.pending_delay_seconds
-                )
+                self._auto_2048_next_at = time.monotonic() + timing.pending_delay_seconds
                 if self._auto_2048.stale_retries == 1:
-                    self._publish(
-                        WorkerState.RUNNING,
-                        "Auto 2048 đang chờ bàn cập nhật; không gửi lặp touch",
-                        board_text(decision.scan.board),
-                    )
+                    self._publish(WorkerState.RUNNING, "Auto 2048 đang chờ bàn cập nhật; không gửi lặp touch", board_text(decision.scan.board))
                 return
             if decision.direction is None:
                 self._auto_2048 = None
-                self._publish(
-                    WorkerState.COMPLETED,
-                    f"2048 kết thúc; ô cao nhất={maximum}",
-                    board_text(decision.scan.board),
-                )
+                self._publish(WorkerState.COMPLETED, f"2048 kết thúc; ô cao nhất={maximum}", board_text(decision.scan.board))
                 return
-            self.session.swipe_game_surface(
-                decision.direction,
-                decision.scan.grid.box,
-                (decision.scan.image_width, decision.scan.image_height),
-            )
+            self.session.swipe_game_surface(decision.direction, decision.scan.grid.box, (decision.scan.image_width, decision.scan.image_height))
             self._auto_2048_errors = 0
             self._auto_2048_next_at = time.monotonic() + timing.move_delay_seconds
             arrows = {"left": "←", "right": "→", "up": "↑", "down": "↓"}
-            self._publish(
-                WorkerState.RUNNING,
-                (
-                    f"Auto 2048 {arrows[decision.direction]} | max={maximum} "
-                    + f"| AI depth={decision.depth} "
-                    + f"| tin cậy={decision.scan.confidence:.0%} "
-                    + f"| tốc độ={timing.label}"
-                ),
-                board_text(decision.scan.board),
-            )
+            self._publish(WorkerState.RUNNING, f"Auto 2048 {arrows[decision.direction]} | max={maximum} | AI depth={decision.depth} | tin cậy={decision.scan.confidence:.0%} | tốc độ={timing.label}", board_text(decision.scan.board))
         except Exception as error:
             self._auto_2048_errors += 1
             self._auto_2048_next_at = time.monotonic() + 1.0
@@ -408,29 +401,65 @@ class ProfileWorker:
             if png is not None and self._auto_2048_errors in {1, 6}:
                 debug_dir = self.config.data_dir / "screenshots" / self.profile.id
                 debug_dir.mkdir(parents=True, exist_ok=True)
-                debug_path = debug_dir / (
-                    f"2048-debug-{time.strftime('%Y%m%d-%H%M%S')}.png"
-                )
+                debug_path = debug_dir / f"2048-debug-{time.strftime('%Y%m%d-%H%M%S')}.png"
                 write_retained_png(debug_path, png, keep=2)
             if self._auto_2048_errors >= 6:
                 self._auto_2048 = None
-                self._publish(
-                    WorkerState.ERROR,
-                    f"Auto 2048 đã dừng: {error}",
-                    (
-                        f"{type(error).__name__}: {error}"
-                        + (f" | ảnh debug: {debug_path}" if debug_path else "")
-                    ),
-                )
+                self._publish(WorkerState.ERROR, f"Auto 2048 đã dừng: {error}", f"{type(error).__name__}: {error}" + (f" | ảnh debug: {debug_path}" if debug_path else ""))
             elif self._auto_2048_errors == 1:
-                self._publish(
-                    WorkerState.RUNNING,
-                    f"Auto 2048 đang chờ nhận dạng ({self._auto_2048_errors}/6): {error}",
-                    f"Ảnh debug: {debug_path}" if debug_path else "",
-                )
+                self._publish(WorkerState.RUNNING, f"Auto 2048 đang chờ nhận dạng ({self._auto_2048_errors}/6): {error}", f"Ảnh debug: {debug_path}" if debug_path else "")
+
+    def _run_farm_tick(self) -> None:
+        """Perform only the first fully template-verified City → World Map step.
+
+        Further resource/team steps remain blocked until their browser-specific
+        roster and action verifiers are ported from ADB.
+        """
+        if self.session is None or self._farm is None:
+            return
+        try:
+            detected, _surface, image_size = self.session.detect_farm_state()
+            state = {
+                DetectedGameState.CITY: FarmGameState.CITY,
+                DetectedGameState.WORLD_MAP: FarmGameState.WORLD_MAP,
+                DetectedGameState.RESOURCE_SEARCH_PANEL: FarmGameState.RESOURCE_SEARCH,
+                DetectedGameState.RESOURCE_POPUP: FarmGameState.RESOURCE_POPUP,
+                DetectedGameState.TEAM_SELECTION: FarmGameState.TEAM_SELECTION,
+                DetectedGameState.STORAGE_LIMIT_DIALOG: FarmGameState.STORAGE_LIMIT,
+                DetectedGameState.RESOURCE_EXPIRY_DIALOG: FarmGameState.RESOURCE_EXPIRY,
+            }.get(detected.state, FarmGameState.UNKNOWN)
+            city = detected.evidence_for(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
+            decision = self._farm.decide(state, target_verified=city.actionable)
+            if decision.step == FarmStep.ENTER_WORLD_MAP and city.actionable:
+                if self._farm_city_clicks >= 2:
+                    self._farm = None
+                    self._publish(WorkerState.ERROR, "Auto Farm dừng: World Map chưa được xác minh sau 2 lần thử")
+                    return
+                # Capture and rematch immediately before the one CDP touch.
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
+                fresh_city = fresh.evidence_for(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
+                if fresh.state != DetectedGameState.CITY or not fresh_city.actionable:
+                    self._farm_next_at = time.monotonic() + 0.8
+                    self._publish(WorkerState.RUNNING, "Auto Farm: City thay đổi, bỏ click và nhận diện lại")
+                    return
+                self.session.tap_farm_template(fresh_city.bounds, fresh_size)  # type: ignore[arg-type]
+                self._farm_city_clicks += 1
+                self._farm_next_at = time.monotonic() + 1.2
+                self._publish(WorkerState.RUNNING, "Auto Farm: đã mở World Map, đang xác minh")
+                return
+            if decision.step == FarmStep.WAITING and state == FarmGameState.WORLD_MAP:
+                self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
+                self._publish(WorkerState.RUNNING, "Auto Farm: World Map đã xác minh; chờ port roster đội sẵn sàng")
+                return
+            self._farm_next_at = time.monotonic() + 1.0
+            self._publish(WorkerState.RUNNING, f"Auto Farm: {decision.message}")
+        except Exception as error:
+            self._farm = None
+            self._publish(WorkerState.ERROR, f"Auto Farm đã dừng an toàn: {error}")
 
     def _close_session(self) -> None:
         self._auto_2048 = None
+        self._farm = None
         if self.session is None:
             return
         try:
@@ -440,6 +469,7 @@ class ProfileWorker:
 
     def _handle_external_close(self) -> None:
         self._auto_2048 = None
+        self._farm = None
         if self.session is None:
             return
         try:
