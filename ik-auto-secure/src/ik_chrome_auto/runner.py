@@ -127,6 +127,7 @@ class ProfileWorker:
         self._farm_next_at = 0.0
         self._farm_city_clicks = 0
         self._farm_world_map_click_at = 0.0
+        self._farm_ready_teams: tuple[int, ...] = ()
 
     def submit(self, command: WorkerCommand) -> None:
         self._ensure_thread()
@@ -223,6 +224,7 @@ class ProfileWorker:
                     self._farm_next_at = 0.0
                     self._farm_city_clicks = 0
                     self._farm_world_map_click_at = 0.0
+                    self._farm_ready_teams = ()
                     self._log_farm("started", {})
                     self._publish(WorkerState.RUNNING, "Auto Farm: đang preflight game canvas")
                     continue
@@ -443,6 +445,11 @@ class ProfileWorker:
             world = detected.evidence_for(FarmTemplateId.WORLD_MAP_ANCHOR)
             browser_canvas = detected.evidence_for(FarmTemplateId.BROWSER_CANVAS_READY_ANCHOR)
             ready_teams = detected.ready_teams
+            # The World Map transition hides the team HUD. Retain a roster
+            # detected in the stable City frame and use it only for this farm
+            # run; it is reset whenever Farm is started again.
+            if ready_teams:
+                self._farm_ready_teams = ready_teams
             self._log_farm(
                 "detection",
                 {
@@ -475,9 +482,19 @@ class ProfileWorker:
                 and not city.found
             ):
                 self._farm_world_map_click_at = 0.0
-                decision = self._farm.decide(FarmGameState.WORLD_MAP, ready_teams=ready_teams)
+                decision = self._farm.decide(
+                    FarmGameState.WORLD_MAP,
+                    ready_teams=self._farm_ready_teams,
+                )
                 self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
-                self._log_farm("world_map_verified", {"method": "browser_canvas_anchor", "elapsed_seconds": round(elapsed_after_click, 2)})
+                self._log_farm(
+                    "world_map_verified",
+                    {
+                        "method": "browser_canvas_anchor",
+                        "elapsed_seconds": round(elapsed_after_click, 2),
+                        "ready_teams": self._farm_ready_teams,
+                    },
+                )
                 self._publish(WorkerState.RUNNING, f"Auto Farm: World Map đã xác minh; {decision.message}")
                 return
             decision = self._farm.decide(
@@ -487,8 +504,17 @@ class ProfileWorker:
             )
             if decision.step == FarmStep.ENTER_WORLD_MAP and city.actionable:
                 if self._farm_city_clicks >= 2:
+                    screenshot = self._save_farm_debug_capture("world-map-unverified")
+                    self._log_farm(
+                        "error",
+                        {"reason": "world_map_unverified", "screenshot": str(screenshot) if screenshot else None},
+                    )
                     self._farm = None
-                    self._publish(WorkerState.ERROR, "Auto Farm dừng: World Map chưa được xác minh sau 2 lần thử")
+                    self._publish(
+                        WorkerState.ERROR,
+                        "Auto Farm dừng: World Map chưa được xác minh sau 2 lần thử",
+                        f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                    )
                     return
                 # Capture and rematch immediately before the one CDP touch.
                 fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
@@ -505,8 +531,17 @@ class ProfileWorker:
                 self._publish(WorkerState.RUNNING, "Auto Farm: đã mở World Map, đang xác minh")
                 return
             if decision.step == FarmStep.WAITING and state == FarmGameState.WORLD_MAP:
+                screenshot = self._save_farm_debug_capture("blocked-no-ready-team")
+                self._log_farm(
+                    "blocked_no_ready_team",
+                    {"screenshot": str(screenshot) if screenshot else None},
+                )
                 self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
-                self._publish(WorkerState.RUNNING, "Auto Farm: World Map đã xác minh; chờ port roster đội sẵn sàng")
+                self._publish(
+                    WorkerState.RUNNING,
+                    "Auto Farm: World Map đã xác minh; không có đội sẵn sàng",
+                    f"Ảnh kiểm tra: {screenshot}" if screenshot else "",
+                )
                 return
             self._farm_next_at = time.monotonic() + 1.0
             if state == FarmGameState.UNKNOWN:
