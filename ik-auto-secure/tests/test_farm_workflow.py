@@ -78,6 +78,35 @@ def test_first_ready_team_from_initial_roster_is_locked_for_the_cycle() -> None:
     assert decision.step == FarmStep.OPEN_SEARCH
 
 
+def test_waiting_for_ready_team_resumes_from_fresh_world_map_roster() -> None:
+    farm = FarmWorkflow()
+    farm.decide(FarmGameState.CITY)
+
+    waiting = farm.decide(FarmGameState.WORLD_MAP, ready_teams=())
+    resumed = farm.decide(FarmGameState.WORLD_MAP, ready_teams=(3, 4))
+
+    assert waiting.step == FarmStep.WAITING
+    assert resumed.step == FarmStep.OPEN_SEARCH
+    assert resumed.team == 3
+    assert farm.team == 3
+
+
+def test_post_dispatch_wait_does_not_restart_from_stale_ready_roster() -> None:
+    farm = FarmWorkflow()
+    farm.decide(FarmGameState.CITY)
+    farm.decide(FarmGameState.WORLD_MAP, ready_teams=(2,))
+    farm.decide(FarmGameState.RESOURCE_SEARCH)
+    farm.decide(FarmGameState.RESOURCE_POPUP)
+    farm.decide(FarmGameState.TEAM_SELECTION)
+    farm.decide(FarmGameState.TEAM_SELECTION, team_selected=True)
+    farm.decide(FarmGameState.TEAM_SELECTION, dispatch_verified=True)
+
+    decision = farm.decide(FarmGameState.WORLD_MAP, ready_teams=(1, 3, 4))
+
+    assert decision.step == FarmStep.WAITING
+    assert farm.team == 2
+
+
 def test_team_selection_cannot_advance_to_dispatch_without_selection_evidence() -> None:
     farm = FarmWorkflow()
     farm.decide(FarmGameState.CITY)

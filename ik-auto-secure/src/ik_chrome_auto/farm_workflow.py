@@ -79,6 +79,10 @@ class FarmWorkflow:
         self.resource_index = 0
         self.level_index = 0
         self.team: int | None = None
+        # WAITING has several meanings. Only the no-ready-team wait may be
+        # resumed directly from a fresh World Map roster scan; post-dispatch
+        # and terminal search-plan waits must still start a new cycle.
+        self.waiting_for_ready_team = False
 
     def decide(
         self,
@@ -91,10 +95,20 @@ class FarmWorkflow:
     ) -> FarmDecision:
         if state == FarmGameState.UNKNOWN:
             self.step = FarmStep.PREFLIGHT
+            self.waiting_for_ready_team = False
             return FarmDecision(self.step, "Chưa nhận diện được game; không thao tác")
         if state in {FarmGameState.STORAGE_LIMIT, FarmGameState.RESOURCE_EXPIRY}:
             self.step = FarmStep.WAITING
+            self.waiting_for_ready_team = False
             return FarmDecision(self.step, "Kho đầy hoặc tài nguyên hết hạn; chờ lượt tiếp theo")
+        if self.step == FarmStep.WAITING and self.waiting_for_ready_team:
+            if state != FarmGameState.WORLD_MAP or not ready_teams:
+                return FarmDecision(self.step, "Không có đội sẵn sàng; chờ lượt tiếp theo")
+            # The runner scans the World Map again after the bounded 15-second
+            # delay. Resume the interrupted initial cycle as soon as that
+            # fresh scan contains at least one verified Ready row.
+            self.step = FarmStep.CHECK_TEAMS
+            self.waiting_for_ready_team = False
         if self.step == FarmStep.PREFLIGHT:
             if state == FarmGameState.CITY:
                 self.step = FarmStep.ENTER_WORLD_MAP
@@ -120,6 +134,7 @@ class FarmWorkflow:
             allowed = tuple(team for team in self.policy.allowed_teams if team in ready_teams)
             if not allowed:
                 self.step = FarmStep.WAITING
+                self.waiting_for_ready_team = True
                 return FarmDecision(self.step, "Không có đội sẵn sàng; chờ lượt tiếp theo")
             # Do not replace a team chosen from the cycle's initial World Map
             # scan just because an intermediate frame is reclassified. That
@@ -127,6 +142,7 @@ class FarmWorkflow:
             # team 2. A new cycle creates a new workflow and may choose again.
             if self.team is None:
                 self.team = allowed[0]
+            self.waiting_for_ready_team = False
             self.step = FarmStep.OPEN_SEARCH
             return FarmDecision(self.step, f"Đội {self.team} sẵn sàng; mở tìm tài nguyên", team=self.team, input_allowed=target_verified)
         resource, level = self._target()
@@ -166,6 +182,7 @@ class FarmWorkflow:
             if not dispatch_verified:
                 return FarmDecision(self.step, "Chờ xác minh đoàn quân đã xuất phát")
             self.step = FarmStep.WAITING
+            self.waiting_for_ready_team = False
             return FarmDecision(self.step, "Đã điều một đội; chờ cycle tiếp theo", resource, level, self.team)
         return FarmDecision(self.step, "Đang chờ lượt farm tiếp theo")
 
@@ -185,6 +202,7 @@ class FarmWorkflow:
             self.step = FarmStep.OPEN_SEARCH
             return True
         self.step = FarmStep.WAITING
+        self.waiting_for_ready_team = False
         return False
 
     def current_target(self) -> tuple[str, int]:

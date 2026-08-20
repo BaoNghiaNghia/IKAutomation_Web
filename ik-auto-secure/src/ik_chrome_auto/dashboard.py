@@ -95,6 +95,9 @@ class Dashboard(QWidget):
         self._auto_arrange_deadline = 0.0
         self.drag_visible = False
         self.scrollbars_visible = False
+        self._responsive_icon_buttons: list[ToolButton] = []
+        self._responsive_profile_buttons: list[PushButton] = []
+        self._overview_typography: list[tuple[QLabel, QLabel]] = []
         self._last_resources = self._last_trim = 0.0
         self._build()
         self._draw_rows()
@@ -109,33 +112,19 @@ class Dashboard(QWidget):
         if active_screen is None:
             raise RuntimeError("Không tìm thấy màn hình để hiển thị dashboard")
         self._apply_responsive_geometry(active_screen)
-        self.setStyleSheet("""
-            Dashboard { background: #eef4fb; color: #172b4d; font-family: Inter, Segoe UI; font-size: 10pt; }
-            CardWidget { background: #ffffff; border: 1px solid #dce6f3; border-radius: 14px; }
-            QLabel { background: transparent; color: #172b4d; }
-            QScrollArea, QScrollArea > QWidget > QWidget { border: none; background: transparent; }
-            QScrollBar:vertical { width: 6px; margin: 3px 1px; background: transparent; }
-            QScrollBar::handle:vertical { min-height: 24px; border-radius: 3px; background: #b8c7d9; }
-            QScrollBar::handle:vertical:hover { background: #8fa6c2; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-            QScrollBar:horizontal { height: 6px; margin: 1px 3px; background: transparent; }
-            QScrollBar::handle:horizontal { min-width: 24px; border-radius: 3px; background: #b8c7d9; }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
-            QTextEdit { background: #f5f8fc; border: 1px solid #dce6f3; border-radius: 9px; color: #52657d; }
-            QToolTip { background: #ffffff; color: #172b4d; border: 1px solid #d6e2f0; border-radius: 10px; padding: 8px; font-family: Inter, Segoe UI; font-size: 9pt; }
-        """)
         root = QVBoxLayout(self); root.setContentsMargins(*self._responsive_margins); root.setSpacing(self._responsive_spacing)
-        head = QHBoxLayout(); title = SubtitleLabel("IK Auto"); title.setStyleSheet("font-size:17pt;font-weight:700;"); head.addWidget(title); head.addWidget(QLabel("Browser control")); head.addStretch(); secure = QLabel("●  Local & secure"); secure.setStyleSheet("background:#d9f7e8;color:#087443;border-radius:12px;padding:5px 10px;font-weight:600;"); head.addWidget(secure); root.addLayout(head)
+        self._root_layout = root
+        head = QHBoxLayout(); title = SubtitleLabel("IK Auto"); self._dashboard_title = title; title.setStyleSheet(f"font-size:{self._responsive_title_font_pt}pt;font-weight:700;"); head.addWidget(title); head.addWidget(QLabel("Browser control")); head.addStretch(); secure = QLabel("●  Local & secure"); self._secure_badge = secure; secure.setStyleSheet("background:#d9f7e8;color:#087443;border-radius:12px;padding:5px 10px;font-weight:600;"); head.addWidget(secure); root.addLayout(head)
         body = QHBoxLayout(); root.addLayout(body, 1)
-        left = QWidget(); self._left_sidebar = left; left.setMinimumWidth(self._responsive_sidebar_min); left.setMaximumWidth(self._responsive_sidebar_max); ll = QVBoxLayout(left); ll.setContentsMargins(0,0,0,0); ll.setSpacing(8); body.addWidget(left)
+        left = QWidget(); self._left_sidebar = left; left.setMinimumWidth(self._responsive_sidebar_min); left.setMaximumWidth(self._responsive_sidebar_max); ll = QVBoxLayout(left); self._left_layout = ll; ll.setContentsMargins(0,0,0,0); ll.setSpacing(self._responsive_spacing); body.addWidget(left)
         overview = self._card(); overview.setMaximumHeight(108); ol = QGridLayout(overview); ol.setContentsMargins(12,10,12,10); ol.setHorizontalSpacing(12); ol.setVerticalSpacing(6)
         self.total, self.opened, self.ram, self.cpu = QLabel("0"), QLabel("0"), QLabel("0 MB"), QLabel("0.0%")
         for index, (label, value) in enumerate((("Tổng profile",self.total),("Đang mở",self.opened),("RAM Chrome",self.ram),("CPU Chrome",self.cpu))):
-            cell = QWidget(); cl = QVBoxLayout(cell); cl.setContentsMargins(0,0,0,0); cl.setSpacing(1); caption = self._muted(label); caption.setStyleSheet("color:#62758e;background:transparent;font-size:8.5pt;"); value.setStyleSheet("font-size:12pt;font-weight:700;"); cl.addWidget(caption); cl.addWidget(value); ol.addWidget(cell, index // 2, index % 2)
+            cell = QWidget(); cl = QVBoxLayout(cell); cl.setContentsMargins(0,0,0,0); cl.setSpacing(1); caption = self._muted(label); caption.setStyleSheet(f"color:#62758e;background:transparent;font-size:{self._responsive_caption_font_pt}pt;"); value.setStyleSheet(f"font-size:{self._responsive_value_font_pt}pt;font-weight:700;"); self._overview_typography.append((caption, value)); cl.addWidget(caption); cl.addWidget(value); ol.addWidget(cell, index // 2, index % 2)
         ll.addWidget(overview)
         accounts = self._card(); al = QVBoxLayout(accounts); al.addWidget(StrongBodyLabel("Tài khoản Chrome")); al.addWidget(self._muted("Mỗi tài khoản có một phiên browser riêng, lưu cục bộ."))
-        manage = PushButton("Quản lý tài khoản"); manage.setFixedHeight(34); manage.setStyleSheet("QPushButton { background:#ffffff; border:1px solid #8ad7d9; border-radius:8px; color:#087f8c; } QPushButton:hover { background:#effcfb; border-color:#0ea5a5; }"); manage.clicked.connect(self._manage_accounts)
-        self.farm_launcher = PrimaryPushButton("Khởi động Farm"); self.farm_launcher.setFixedHeight(34); self.farm_launcher.setStyleSheet("QPushButton { background:#2563eb; border:1px solid #2563eb; border-radius:8px; color:#ffffff; font-weight:600; } QPushButton:hover { background:#1d4ed8; border-color:#1d4ed8; } QPushButton:disabled { background:#93c5fd; border-color:#93c5fd; color:#eff6ff; }"); self.farm_launcher.clicked.connect(self._farm_launcher_action)
+        manage = PushButton("Quản lý tài khoản"); self._manage_button = manage; manage.setFixedHeight(self._responsive_control_height); manage.setStyleSheet("QPushButton { background:#ffffff; border:1px solid #8ad7d9; border-radius:8px; color:#087f8c; } QPushButton:hover { background:#effcfb; border-color:#0ea5a5; }"); manage.clicked.connect(self._manage_accounts)
+        self.farm_launcher = PrimaryPushButton("Khởi động Farm"); self.farm_launcher.setFixedHeight(self._responsive_control_height); self.farm_launcher.setStyleSheet("QPushButton { background:#2563eb; border:1px solid #2563eb; border-radius:8px; color:#ffffff; font-weight:600; } QPushButton:hover { background:#1d4ed8; border-color:#1d4ed8; } QPushButton:disabled { background:#93c5fd; border-color:#93c5fd; color:#eff6ff; }"); self.farm_launcher.clicked.connect(self._farm_launcher_action)
         primary_actions = QHBoxLayout(); primary_actions.setSpacing(7); primary_actions.addWidget(manage, 1); primary_actions.addWidget(self.farm_launcher, 1); al.addLayout(primary_actions); ll.addWidget(accounts)
         arrange_card = self._card(); acl = QVBoxLayout(arrange_card); acl.addWidget(StrongBodyLabel("Sắp xếp cửa sổ")); acl.addWidget(self._muted("Chọn số cửa sổ trên mỗi hàng rồi áp dụng cho Chrome đang mở.")); row = QHBoxLayout(); row.addWidget(QLabel("Số cửa sổ / hàng")); row.addStretch(); self.windows_per_row = ComboBox(); self.windows_per_row.addItems(["2","3","4","5","6"]); self.windows_per_row.setCurrentText(str(self.config.browser.windows_per_row)); self.windows_per_row.currentTextChanged.connect(self._apply_windows_per_row); row.addWidget(self.windows_per_row); acl.addLayout(row)
         arrange_actions = QHBoxLayout(); arrange_actions.setSpacing(7); apply = PrimaryPushButton("Sắp xếp"); apply.clicked.connect(self._arrange); arrange_actions.addWidget(apply, 1); self.drag = self._icon_button(FIF.MOVE, "Hiện nút kéo"); self.drag.clicked.connect(self._toggle_drag); arrange_actions.addWidget(self.drag); self.scrollbars = self._icon_button(FIF.SCROLL, "Hiện thanh cuộn"); self.scrollbars.clicked.connect(self._toggle_scrollbars); arrange_actions.addWidget(self.scrollbars); acl.addLayout(arrange_actions)
@@ -175,6 +164,7 @@ class Dashboard(QWidget):
         right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8); body.addWidget(right,1)
         progress = self._card(); pl = QVBoxLayout(progress); ph = QHBoxLayout(); ph.addWidget(StrongBodyLabel("Tiến trình profile")); ph.addStretch(); self.open_badge = QLabel("0 đang mở"); self.open_badge.setStyleSheet("background:#e2edff;color:#2767bd;border-radius:10px;padding:3px 8px;"); ph.addWidget(self.open_badge); pl.addLayout(ph); self.table_layout = QGridLayout(); self.table_layout.setSpacing(8); self.table_layout.setColumnStretch(0, 1); self.table_layout.setColumnStretch(1, 1); content=QWidget(); content.setLayout(self.table_layout); self.scroll=QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setWidget(content); pl.addWidget(self.scroll,1); rl.addWidget(progress,1)
         foot=QHBoxLayout(); coords=self._card(); cl=QVBoxLayout(coords); ch=QHBoxLayout(); ch.addWidget(StrongBodyLabel("Lấy tọa độ")); ch.addStretch(); bjson=PushButton("JSON"); bjson.clicked.connect(self._copy_json); bxy=PushButton("Copy x,y"); bxy.clicked.connect(self._copy_xy); ch.addWidget(bjson); ch.addWidget(bxy); cl.addLayout(ch); self.coordinate= self._muted("Chưa đo tọa độ"); cl.addWidget(self.coordinate); foot.addWidget(coords,2); logs=self._card(); logl=QVBoxLayout(logs); logl.addWidget(StrongBodyLabel("Nhật ký gần nhất")); self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setFixedHeight(86); logl.addWidget(self.log); foot.addWidget(logs,3); coords.hide(); logs.hide(); rl.addLayout(foot)
+        self._apply_responsive_style()
 
     @staticmethod
     def _responsive_metrics(screen_width: int, screen_height: int) -> tuple[int, int, int, int, bool]:
@@ -182,22 +172,50 @@ class Dashboard(QWidget):
         safe_width = max(480, screen_width - 16)
         safe_height = max(360, screen_height - 16)
         compact = screen_width < 1500 or screen_height < 900
-        ratio = 0.72 if compact else 0.50
-        width = min(safe_width, max(min(780, safe_width), round(screen_width * ratio)))
-        height = min(safe_height, max(min(520, safe_height), round(screen_height * ratio)))
-        sidebar_min = max(240, min(340, round(width * 0.31)))
-        sidebar_max = max(sidebar_min, min(390, round(width * 0.36)))
+        dense = Dashboard._is_dense_screen(screen_width, screen_height)
+        if dense:
+            width = min(safe_width, max(min(700, safe_width), round(screen_width * 0.78)))
+            height = min(safe_height, max(min(440, safe_height), round(screen_height * 0.80)))
+            sidebar_min = max(195, min(260, round(width * 0.30)))
+            sidebar_max = max(sidebar_min, min(285, round(width * 0.34)))
+        else:
+            ratio = 0.72 if compact else 0.50
+            width = min(safe_width, max(min(780, safe_width), round(screen_width * ratio)))
+            height = min(safe_height, max(min(520, safe_height), round(screen_height * ratio)))
+            sidebar_min = max(240, min(340, round(width * 0.31)))
+            sidebar_max = max(sidebar_min, min(390, round(width * 0.36)))
         return width, height, sidebar_min, sidebar_max, compact
+
+    @staticmethod
+    def _is_dense_screen(screen_width: int, screen_height: int) -> bool:
+        return screen_width < 1100 or screen_height < 650
+
+    @staticmethod
+    def _responsive_typography(screen_width: int, screen_height: int) -> tuple[float, float, float, float, float, int]:
+        if Dashboard._is_dense_screen(screen_width, screen_height):
+            return 8.75, 8.0, 14.0, 7.5, 10.5, 30
+        if screen_width < 1500 or screen_height < 900:
+            return 9.5, 8.5, 16.0, 8.0, 11.5, 32
+        return 10.0, 9.0, 17.0, 8.5, 12.0, 34
 
     def _apply_responsive_geometry(self, screen) -> None:
         available = screen.availableGeometry()
         width, height, sidebar_min, sidebar_max, compact = self._responsive_metrics(
             available.width(), available.height()
         )
+        (
+            self._responsive_font_pt,
+            self._responsive_tooltip_font_pt,
+            self._responsive_title_font_pt,
+            self._responsive_caption_font_pt,
+            self._responsive_value_font_pt,
+            self._responsive_control_height,
+        ) = self._responsive_typography(available.width(), available.height())
         self._responsive_sidebar_min = sidebar_min
         self._responsive_sidebar_max = sidebar_max
-        self._responsive_margins = (9, 8, 9, 9) if compact else (14, 12, 14, 14)
-        self._responsive_spacing = 8 if compact else 10
+        dense = self._is_dense_screen(available.width(), available.height())
+        self._responsive_margins = (6, 5, 6, 6) if dense else (9, 8, 9, 9) if compact else (14, 12, 14, 14)
+        self._responsive_spacing = 6 if dense else 8 if compact else 10
         # Clear the previous monitor's minimum before moving to a smaller one.
         self.setMinimumSize(0, 0)
         self.setMinimumSize(min(640, width), min(420, height))
@@ -210,6 +228,45 @@ class Dashboard(QWidget):
         if hasattr(self, "_left_sidebar"):
             self._left_sidebar.setMinimumWidth(sidebar_min)
             self._left_sidebar.setMaximumWidth(sidebar_max)
+            self._apply_responsive_style()
+
+    def _apply_responsive_style(self) -> None:
+        self.setStyleSheet(f"""
+            Dashboard {{ background: #eef4fb; color: #172b4d; font-family: Inter, Segoe UI; font-size: {self._responsive_font_pt}pt; }}
+            CardWidget {{ background: #ffffff; border: 1px solid #dce6f3; border-radius: 14px; }}
+            QLabel {{ background: transparent; color: #172b4d; }}
+            QScrollArea, QScrollArea > QWidget > QWidget {{ border: none; background: transparent; }}
+            QScrollBar:vertical {{ width: 6px; margin: 3px 1px; background: transparent; }}
+            QScrollBar::handle:vertical {{ min-height: 24px; border-radius: 3px; background: #b8c7d9; }}
+            QScrollBar::handle:vertical:hover {{ background: #8fa6c2; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+            QScrollBar:horizontal {{ height: 6px; margin: 1px 3px; background: transparent; }}
+            QScrollBar::handle:horizontal {{ min-width: 24px; border-radius: 3px; background: #b8c7d9; }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+            QTextEdit {{ background: #f5f8fc; border: 1px solid #dce6f3; border-radius: 9px; color: #52657d; }}
+            QToolTip {{ background: #ffffff; color: #172b4d; border: 1px solid #d6e2f0; border-radius: 10px; padding: 8px; font-family: Inter, Segoe UI; font-size: {self._responsive_tooltip_font_pt}pt; }}
+        """)
+        self._root_layout.setContentsMargins(*self._responsive_margins)
+        self._root_layout.setSpacing(self._responsive_spacing)
+        self._left_layout.setSpacing(self._responsive_spacing)
+        self._dashboard_title.setStyleSheet(f"font-size:{self._responsive_title_font_pt}pt;font-weight:700;")
+        dense = self._responsive_control_height == 30
+        badge_padding = "3px 8px" if dense else "5px 10px"
+        self._secure_badge.setStyleSheet(
+            f"background:#d9f7e8;color:#087443;border-radius:12px;padding:{badge_padding};font-weight:600;"
+        )
+        for caption, value in self._overview_typography:
+            caption.setStyleSheet(
+                f"color:#62758e;background:transparent;font-size:{self._responsive_caption_font_pt}pt;"
+            )
+            value.setStyleSheet(f"font-size:{self._responsive_value_font_pt}pt;font-weight:700;")
+        self._manage_button.setFixedHeight(self._responsive_control_height)
+        self.farm_launcher.setFixedHeight(self._responsive_control_height)
+        for button in self._responsive_icon_buttons:
+            button.setFixedSize(self._responsive_control_height, self._responsive_control_height)
+        profile_height = max(26, self._responsive_control_height - 3)
+        for button in self._responsive_profile_buttons:
+            button.setFixedHeight(profile_height)
 
     def _on_screen_changed(self, screen) -> None:
         if screen is not None:
@@ -217,19 +274,19 @@ class Dashboard(QWidget):
 
     @staticmethod
     def _card() -> CardWidget: return CardWidget()
-    @staticmethod
-    def _icon_button(icon: FIF, tooltip: str, primary: bool = False) -> ToolButton:
+    def _icon_button(self, icon: FIF, tooltip: str, primary: bool = False) -> ToolButton:
         button = PrimaryToolButton() if primary else ToolButton()
         button.setIcon(icon)
         button.setToolTip(tooltip)
-        button.setFixedSize(34, 34)
+        button.setFixedSize(self._responsive_control_height, self._responsive_control_height)
+        self._responsive_icon_buttons.append(button)
         return button
 
-    @staticmethod
-    def _compact_profile_button(button: PushButton) -> PushButton:
+    def _compact_profile_button(self, button: PushButton) -> PushButton:
         """Keep per-profile controls compact without shrinking global actions."""
-        button.setFixedHeight(29)
+        button.setFixedHeight(max(26, self._responsive_control_height - 3))
         button.setMinimumWidth(0)
+        self._responsive_profile_buttons.append(button)
         return button
     @staticmethod
     def _muted(text: str) -> QLabel:
