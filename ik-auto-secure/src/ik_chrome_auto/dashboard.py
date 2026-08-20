@@ -135,7 +135,8 @@ class Dashboard(QWidget):
         sync_header.addWidget(StrongBodyLabel("Đồng bộ chuột"))
         sync_header.addStretch()
         self.sync_status_icon = QLabel("●")
-        self.sync_status_icon.setFixedWidth(14)
+        self.sync_status_icon.setFixedWidth(22)
+        self.sync_status_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._set_sync_status_indicator(False)
         sync_header.addWidget(self.sync_status_icon)
         self.sync_section_toggle = self._icon_button(FIF.CHEVRON_RIGHT, "Mở rộng Đồng bộ chuột")
@@ -193,10 +194,10 @@ class Dashboard(QWidget):
     @staticmethod
     def _responsive_typography(screen_width: int, screen_height: int) -> tuple[float, float, float, float, float, int]:
         if Dashboard._is_dense_screen(screen_width, screen_height):
-            return 8.75, 8.0, 14.0, 7.5, 10.5, 30
+            return 7.25, 7.0, 12.0, 6.5, 9.25, 30
         if screen_width < 1500 or screen_height < 900:
-            return 9.5, 8.5, 16.0, 8.0, 11.5, 32
-        return 10.0, 9.0, 17.0, 8.5, 12.0, 34
+            return 8.0, 7.5, 14.0, 7.0, 10.25, 32
+        return 8.75, 8.0, 15.0, 7.5, 11.0, 34
 
     def _apply_responsive_geometry(self, screen) -> None:
         available = screen.availableGeometry()
@@ -412,7 +413,7 @@ class Dashboard(QWidget):
         color = "#16a34a" if enabled else "#94a3b8"
         state = "bật" if enabled else "tắt"
         self.sync_status_icon.setStyleSheet(
-            f"color:{color}; background:transparent; font-size:16px; font-weight:700;"
+            f"color:{color}; background:transparent; font-size:22px; font-weight:700;"
         )
         self.sync_status_icon.setToolTip(f"Đồng bộ chuột đang {state}")
     def _toggle_sync_section(self) -> None:

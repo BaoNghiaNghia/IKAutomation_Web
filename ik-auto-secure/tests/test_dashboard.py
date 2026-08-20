@@ -96,6 +96,7 @@ def test_mouse_sync_status_indicator_changes_colour_and_tooltip() -> None:
 
     dashboard._set_sync_status_indicator(False)
     assert "#94a3b8" in dashboard.sync_status_icon.style
+    assert "font-size:22px" in dashboard.sync_status_icon.style
     assert dashboard.sync_status_icon.tooltip == "Đồng bộ chuột đang tắt"
 
     dashboard._set_sync_status_indicator(True)
@@ -132,6 +133,6 @@ def test_dashboard_uses_smaller_typography_on_high_dpi_logical_screen() -> None:
     compact = Dashboard._responsive_typography(1366, 768)
     desktop = Dashboard._responsive_typography(1920, 1080)
 
-    assert dense == (8.75, 8.0, 14.0, 7.5, 10.5, 30)
+    assert dense == (7.25, 7.0, 12.0, 6.5, 9.25, 30)
     assert dense[0] < compact[0] < desktop[0]
     assert dense[-1] < compact[-1] < desktop[-1]
