@@ -93,3 +93,19 @@ def test_mouse_sync_status_indicator_changes_colour_and_tooltip() -> None:
     dashboard._set_sync_status_indicator(True)
     assert "#16a34a" in dashboard.sync_status_icon.style
     assert dashboard.sync_status_icon.tooltip == "Đồng bộ chuột đang bật"
+
+
+def test_dashboard_uses_more_space_on_compact_screens_and_half_on_desktop() -> None:
+    compact = Dashboard._responsive_metrics(1366, 768)
+    desktop = Dashboard._responsive_metrics(1920, 1080)
+
+    assert compact == (984, 553, 305, 354, True)
+    assert desktop == (960, 540, 298, 346, False)
+
+
+def test_dashboard_never_exceeds_small_logical_screen_geometry() -> None:
+    width, height, sidebar_min, sidebar_max, compact = Dashboard._responsive_metrics(640, 400)
+
+    assert (width, height) == (624, 384)
+    assert sidebar_min <= sidebar_max < width
+    assert compact is True

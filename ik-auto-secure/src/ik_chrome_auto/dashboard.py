@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QCloseEvent, QColor, QGuiApplication, QIcon, QPixmap
+from PySide6.QtGui import QAction, QCloseEvent, QColor, QCursor, QGuiApplication, QIcon, QPixmap
 from PySide6.QtWidgets import QApplication, QDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
 from qfluentwidgets import CardWidget, CheckBox, ComboBox, FluentIcon as FIF, LineEdit, PasswordLineEdit, PrimaryPushButton, PrimaryToolButton, PushButton, StrongBodyLabel, SubtitleLabel, ToolButton
 
@@ -105,11 +105,12 @@ class Dashboard(QWidget):
     def _build(self) -> None:
         self.setWindowTitle("IK Auto — Browser Control")
         self.setWindowIcon(QIcon(str(Path(__file__).with_name("assets") / "ik_auto.ico")))
-        screen = QGuiApplication.primaryScreen().availableGeometry()
-        self.setGeometry(screen.right() - screen.width() // 2 + 1, screen.bottom() - screen.height() // 2 + 1, screen.width() // 2, screen.height() // 2)
-        self.setMinimumSize(780, 520)
+        active_screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        if active_screen is None:
+            raise RuntimeError("Không tìm thấy màn hình để hiển thị dashboard")
+        self._apply_responsive_geometry(active_screen)
         self.setStyleSheet("""
-            Dashboard { background: #eef4fb; color: #172b4d; font-family: Inter, Segoe UI; font-size: 13px; }
+            Dashboard { background: #eef4fb; color: #172b4d; font-family: Inter, Segoe UI; font-size: 10pt; }
             CardWidget { background: #ffffff; border: 1px solid #dce6f3; border-radius: 14px; }
             QLabel { background: transparent; color: #172b4d; }
             QScrollArea, QScrollArea > QWidget > QWidget { border: none; background: transparent; }
@@ -121,16 +122,16 @@ class Dashboard(QWidget):
             QScrollBar::handle:horizontal { min-width: 24px; border-radius: 3px; background: #b8c7d9; }
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
             QTextEdit { background: #f5f8fc; border: 1px solid #dce6f3; border-radius: 9px; color: #52657d; }
-            QToolTip { background: #ffffff; color: #172b4d; border: 1px solid #d6e2f0; border-radius: 10px; padding: 8px; font-family: Inter, Segoe UI; font-size: 12px; }
+            QToolTip { background: #ffffff; color: #172b4d; border: 1px solid #d6e2f0; border-radius: 10px; padding: 8px; font-family: Inter, Segoe UI; font-size: 9pt; }
         """)
-        root = QVBoxLayout(self); root.setContentsMargins(14, 12, 14, 14); root.setSpacing(10)
-        head = QHBoxLayout(); title = SubtitleLabel("IK Auto"); title.setStyleSheet("font-size:22px;font-weight:700;"); head.addWidget(title); head.addWidget(QLabel("Browser control")); head.addStretch(); secure = QLabel("●  Local & secure"); secure.setStyleSheet("background:#d9f7e8;color:#087443;border-radius:12px;padding:5px 10px;font-weight:600;"); head.addWidget(secure); root.addLayout(head)
+        root = QVBoxLayout(self); root.setContentsMargins(*self._responsive_margins); root.setSpacing(self._responsive_spacing)
+        head = QHBoxLayout(); title = SubtitleLabel("IK Auto"); title.setStyleSheet("font-size:17pt;font-weight:700;"); head.addWidget(title); head.addWidget(QLabel("Browser control")); head.addStretch(); secure = QLabel("●  Local & secure"); secure.setStyleSheet("background:#d9f7e8;color:#087443;border-radius:12px;padding:5px 10px;font-weight:600;"); head.addWidget(secure); root.addLayout(head)
         body = QHBoxLayout(); root.addLayout(body, 1)
-        left = QWidget(); left.setMinimumWidth(340); left.setMaximumWidth(390); ll = QVBoxLayout(left); ll.setContentsMargins(0,0,0,0); ll.setSpacing(8); body.addWidget(left)
+        left = QWidget(); self._left_sidebar = left; left.setMinimumWidth(self._responsive_sidebar_min); left.setMaximumWidth(self._responsive_sidebar_max); ll = QVBoxLayout(left); ll.setContentsMargins(0,0,0,0); ll.setSpacing(8); body.addWidget(left)
         overview = self._card(); overview.setMaximumHeight(108); ol = QGridLayout(overview); ol.setContentsMargins(12,10,12,10); ol.setHorizontalSpacing(12); ol.setVerticalSpacing(6)
         self.total, self.opened, self.ram, self.cpu = QLabel("0"), QLabel("0"), QLabel("0 MB"), QLabel("0.0%")
         for index, (label, value) in enumerate((("Tổng profile",self.total),("Đang mở",self.opened),("RAM Chrome",self.ram),("CPU Chrome",self.cpu))):
-            cell = QWidget(); cl = QVBoxLayout(cell); cl.setContentsMargins(0,0,0,0); cl.setSpacing(1); caption = self._muted(label); caption.setStyleSheet("color:#62758e;background:transparent;font-size:11px;"); value.setStyleSheet("font-size:16px;font-weight:700;"); cl.addWidget(caption); cl.addWidget(value); ol.addWidget(cell, index // 2, index % 2)
+            cell = QWidget(); cl = QVBoxLayout(cell); cl.setContentsMargins(0,0,0,0); cl.setSpacing(1); caption = self._muted(label); caption.setStyleSheet("color:#62758e;background:transparent;font-size:8.5pt;"); value.setStyleSheet("font-size:12pt;font-weight:700;"); cl.addWidget(caption); cl.addWidget(value); ol.addWidget(cell, index // 2, index % 2)
         ll.addWidget(overview)
         accounts = self._card(); al = QVBoxLayout(accounts); al.addWidget(StrongBodyLabel("Tài khoản Chrome")); al.addWidget(self._muted("Mỗi tài khoản có một phiên browser riêng, lưu cục bộ."))
         manage = PushButton("Quản lý tài khoản"); manage.setFixedHeight(34); manage.setStyleSheet("QPushButton { background:#ffffff; border:1px solid #8ad7d9; border-radius:8px; color:#087f8c; } QPushButton:hover { background:#effcfb; border-color:#0ea5a5; }"); manage.clicked.connect(self._manage_accounts)
@@ -174,6 +175,45 @@ class Dashboard(QWidget):
         right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8); body.addWidget(right,1)
         progress = self._card(); pl = QVBoxLayout(progress); ph = QHBoxLayout(); ph.addWidget(StrongBodyLabel("Tiến trình profile")); ph.addStretch(); self.open_badge = QLabel("0 đang mở"); self.open_badge.setStyleSheet("background:#e2edff;color:#2767bd;border-radius:10px;padding:3px 8px;"); ph.addWidget(self.open_badge); pl.addLayout(ph); self.table_layout = QGridLayout(); self.table_layout.setSpacing(8); self.table_layout.setColumnStretch(0, 1); self.table_layout.setColumnStretch(1, 1); content=QWidget(); content.setLayout(self.table_layout); self.scroll=QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setWidget(content); pl.addWidget(self.scroll,1); rl.addWidget(progress,1)
         foot=QHBoxLayout(); coords=self._card(); cl=QVBoxLayout(coords); ch=QHBoxLayout(); ch.addWidget(StrongBodyLabel("Lấy tọa độ")); ch.addStretch(); bjson=PushButton("JSON"); bjson.clicked.connect(self._copy_json); bxy=PushButton("Copy x,y"); bxy.clicked.connect(self._copy_xy); ch.addWidget(bjson); ch.addWidget(bxy); cl.addLayout(ch); self.coordinate= self._muted("Chưa đo tọa độ"); cl.addWidget(self.coordinate); foot.addWidget(coords,2); logs=self._card(); logl=QVBoxLayout(logs); logl.addWidget(StrongBodyLabel("Nhật ký gần nhất")); self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setFixedHeight(86); logl.addWidget(self.log); foot.addWidget(logs,3); coords.hide(); logs.hide(); rl.addLayout(foot)
+
+    @staticmethod
+    def _responsive_metrics(screen_width: int, screen_height: int) -> tuple[int, int, int, int, bool]:
+        """Return a screen-safe window and sidebar size in Qt logical pixels."""
+        safe_width = max(480, screen_width - 16)
+        safe_height = max(360, screen_height - 16)
+        compact = screen_width < 1500 or screen_height < 900
+        ratio = 0.72 if compact else 0.50
+        width = min(safe_width, max(min(780, safe_width), round(screen_width * ratio)))
+        height = min(safe_height, max(min(520, safe_height), round(screen_height * ratio)))
+        sidebar_min = max(240, min(340, round(width * 0.31)))
+        sidebar_max = max(sidebar_min, min(390, round(width * 0.36)))
+        return width, height, sidebar_min, sidebar_max, compact
+
+    def _apply_responsive_geometry(self, screen) -> None:
+        available = screen.availableGeometry()
+        width, height, sidebar_min, sidebar_max, compact = self._responsive_metrics(
+            available.width(), available.height()
+        )
+        self._responsive_sidebar_min = sidebar_min
+        self._responsive_sidebar_max = sidebar_max
+        self._responsive_margins = (9, 8, 9, 9) if compact else (14, 12, 14, 14)
+        self._responsive_spacing = 8 if compact else 10
+        # Clear the previous monitor's minimum before moving to a smaller one.
+        self.setMinimumSize(0, 0)
+        self.setMinimumSize(min(640, width), min(420, height))
+        self.setGeometry(
+            available.right() - width + 1,
+            available.bottom() - height + 1,
+            width,
+            height,
+        )
+        if hasattr(self, "_left_sidebar"):
+            self._left_sidebar.setMinimumWidth(sidebar_min)
+            self._left_sidebar.setMaximumWidth(sidebar_max)
+
+    def _on_screen_changed(self, screen) -> None:
+        if screen is not None:
+            self._apply_responsive_geometry(screen)
 
     @staticmethod
     def _card() -> CardWidget: return CardWidget()
@@ -876,4 +916,18 @@ class AccountManagerDialog(QDialog):
 
 
 def run_dashboard(config_path:Path)->None:
-    capture_launch_terminal_window(); app=QApplication.instance() or QApplication([]); app.setApplicationName("IK Auto"); app.setWindowIcon(QIcon(str(Path(__file__).with_name("assets") / "ik_auto.ico"))); dashboard=Dashboard(config_path); dashboard.show(); QTimer.singleShot(500,minimize_launch_console); app.exec()
+    capture_launch_terminal_window()
+    app = QApplication.instance()
+    if app is None:
+        QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+        app = QApplication([])
+    app.setApplicationName("IK Auto")
+    app.setWindowIcon(QIcon(str(Path(__file__).with_name("assets") / "ik_auto.ico")))
+    dashboard = Dashboard(config_path)
+    dashboard.show()
+    if dashboard.windowHandle() is not None:
+        dashboard.windowHandle().screenChanged.connect(dashboard._on_screen_changed)
+    QTimer.singleShot(500, minimize_launch_console)
+    app.exec()
