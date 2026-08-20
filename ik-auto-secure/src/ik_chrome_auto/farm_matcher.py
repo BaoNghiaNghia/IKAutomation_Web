@@ -58,11 +58,20 @@ class TemplateSpec:
 
 SPECS: dict[FarmTemplateId, TemplateSpec] = {
     FarmTemplateId.WORLD_MAP_ANCHOR: TemplateSpec("world_map_anchor.png", region="lower_left"),
-    # The portal renders the same City → World Map control with different
-    # artwork in its green and snowy city skins. Match the icon's edge map,
-    # not its colour, and crop alternatives tightly around its silhouette so
-    # lighting and surrounding terrain cannot dominate the score.
+    # In City, the bottom-left parchment/compass control opens World Map.
     FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON: TemplateSpec(
+        "browser_map_to_city_tight.png",
+        threshold=0.78,
+        region="city_corner",
+        reference_width=835,
+        reference_height=432,
+        scale_variants=(0.92, 0.96, 1.0, 1.04, 1.08),
+        grayscale=True,
+    ),
+    # In World Map, the bottom-left castle control returns to City. Its
+    # palette changes with the account environment, so match the tightly
+    # cropped edge shape and keep both known colour variants.
+    FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON: TemplateSpec(
         "browser_city_icon_green_tight.png",
         threshold=0.60,
         region="city_corner",
@@ -73,15 +82,6 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
         ),
         scale_variants=(0.92, 0.96, 1.0, 1.04, 1.08),
         edge=True,
-    ),
-    FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON: TemplateSpec(
-        "browser_map_to_city_tight.png",
-        threshold=0.78,
-        region="city_corner",
-        reference_width=835,
-        reference_height=432,
-        scale_variants=(0.92, 0.96, 1.0, 1.04, 1.08),
-        grayscale=True,
     ),
     FarmTemplateId.CONTINENT_MAP_TITLE: TemplateSpec("continent_map_title.png"),
     FarmTemplateId.CONTINENT_MAP_HOME_TERRITORY_ANCHOR: TemplateSpec("continent_map_home_territory_anchor.png", region="center"),

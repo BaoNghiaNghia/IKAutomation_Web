@@ -11,6 +11,13 @@ def test_city_template_search_is_limited_to_bottom_left_corner() -> None:
 from ik_chrome_auto.farm_vision import FarmTemplateId
 
 
+def test_browser_map_toggle_templates_match_their_actual_direction() -> None:
+    from ik_chrome_auto.farm_matcher import SPECS
+
+    assert SPECS[FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON].filename == "browser_map_to_city_tight.png"
+    assert SPECS[FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON].filename == "browser_city_icon_green_tight.png"
+
+
 def test_matcher_scales_template_and_returns_canvas_relative_bounds(tmp_path) -> None:
     template = np.zeros((20, 30, 3), dtype=np.uint8)
     cv2.rectangle(template, (2, 2), (27, 17), (255, 255, 255), 2)

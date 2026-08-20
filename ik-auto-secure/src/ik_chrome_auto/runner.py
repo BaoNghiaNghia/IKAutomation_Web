@@ -820,8 +820,21 @@ class ProfileWorker:
             )
             if self._farm_return_city_click_at > 0:
                 elapsed_after_return = time.monotonic() - self._farm_return_city_click_at
-                if state == FarmGameState.CITY:
+                # The parchment/compass toggle is itself strong City evidence.
+                # Accept it after a return click even if a weak coordinate-HUD
+                # match momentarily misclassifies the new frame as World Map.
+                city_after_return = (
+                    state == FarmGameState.CITY
+                    or (city.actionable and not map_to_city.actionable)
+                )
+                if city_after_return:
                     self._farm_return_city_click_at = 0.0
+                    if state != FarmGameState.CITY:
+                        decision = self._farm.decide(
+                            FarmGameState.CITY,
+                            ready_teams=ready_teams,
+                            target_verified=True,
+                        )
                     self._log_farm("city_verified_for_cycle", {"elapsed_seconds": round(elapsed_after_return, 2)})
                 elif elapsed_after_return <= 8.0:
                     self._farm_next_at = time.monotonic() + 0.7
@@ -829,29 +842,27 @@ class ProfileWorker:
                     return
                 else:
                     fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
-                    fresh_city = fresh.evidence_for(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
                     fresh_map_to_city = fresh.evidence_for(FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON)
-                    retry_control = fresh_map_to_city if fresh_map_to_city.actionable else fresh_city
                     if (
                         fresh.state == DetectedGameState.WORLD_MAP
-                        and retry_control.actionable
+                        and fresh_map_to_city.actionable
                         and self._farm_return_city_clicks < 2
                     ):
                         # Retry once with touch; the first CDP mouse click can
                         # be swallowed while the canvas is finishing an
                         # animation. The fresh template bounds prevent a blind
                         # second tap.
-                        self.session.tap_farm_template(retry_control.bounds, fresh_size)  # type: ignore[arg-type]
+                        self.session.tap_farm_template(fresh_map_to_city.bounds, fresh_size)  # type: ignore[arg-type]
                         self._farm_return_city_clicks += 1
                         self._farm_return_city_click_at = time.monotonic()
                         self._farm_next_at = self._farm_return_city_click_at + 1.2
                         self._log_farm(
                             "retry_return_to_city",
                             {
-                                "bounds": retry_control.bounds,
+                                "bounds": fresh_map_to_city.bounds,
                                 "method": "touch",
                                 "attempt": self._farm_return_city_clicks,
-                                "control": "map_icon" if fresh_map_to_city.actionable else "city_icon",
+                                "control": "world_map_castle",
                             },
                         )
                         self._publish(WorkerState.RUNNING, "Auto Farm: đang thử quay về City lần 2")
@@ -870,31 +881,25 @@ class ProfileWorker:
                     return
             if decision.step == FarmStep.RETURN_TO_CITY and state == FarmGameState.WORLD_MAP:
                 fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
-                fresh_city = fresh.evidence_for(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
                 fresh_map_to_city = fresh.evidence_for(FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON)
-                return_control = fresh_map_to_city if fresh_map_to_city.actionable else fresh_city
-                if fresh.state != DetectedGameState.WORLD_MAP or not return_control.actionable:
+                if fresh.state != DetectedGameState.WORLD_MAP or not fresh_map_to_city.actionable:
                     self._farm_next_at = time.monotonic() + 0.8
                     self._publish(WorkerState.RUNNING, "Auto Farm: chờ nút City ổn định trước cycle mới")
                     return
-                # This circular HUD control ignores synthetic touch on some
-                # browser skins. It has just been freshly matched on World
-                # Map, so use the CDP mouse fallback for this state change.
-                if fresh_map_to_city.actionable:
-                    self.session.tap_farm_template(return_control.bounds, fresh_size)  # type: ignore[arg-type]
-                    method = "touch"
-                else:
-                    self.session.click_farm_template_mouse(return_control.bounds, fresh_size)  # type: ignore[arg-type]
-                    method = "mouse"
+                # Only the freshly matched castle control is allowed to
+                # return to City. Never substitute the opposite-direction
+                # parchment toggle when the state is ambiguous.
+                self.session.tap_farm_template(fresh_map_to_city.bounds, fresh_size)  # type: ignore[arg-type]
+                method = "touch"
                 self._farm_return_city_click_at = time.monotonic()
                 self._farm_return_city_clicks += 1
                 self._log_farm(
                     "tap_return_to_city",
                     {
-                        "bounds": return_control.bounds,
+                        "bounds": fresh_map_to_city.bounds,
                         "method": method,
                         "attempt": self._farm_return_city_clicks,
-                        "control": "map_icon" if fresh_map_to_city.actionable else "city_icon",
+                        "control": "world_map_castle",
                     },
                 )
                 self._farm_next_at = time.monotonic() + 1.2

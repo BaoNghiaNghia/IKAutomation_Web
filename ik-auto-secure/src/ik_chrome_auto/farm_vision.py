@@ -186,7 +186,6 @@ class BrowserGameStateDetector:
         world_map_strongly_confirmed = any(found[item] for item in (
             FarmTemplateId.WORLD_MAP_ANCHOR,
             FarmTemplateId.BROWSER_WORLD_MAP_BACK_BUTTON,
-            FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON,
             FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON,
         ))
         city_confirmed = (
