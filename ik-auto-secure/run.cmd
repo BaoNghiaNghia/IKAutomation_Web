@@ -23,10 +23,20 @@ if exist "%VENV_PYTHON%" (
 
 call :find_python
 if not defined BOOTSTRAP_PYTHON (
-  echo Python 3.11-3.13 was not found. Installing Python 3.13 with winget...
-  where winget >nul 2>nul || goto :missing_winget
-  winget install --id Python.Python.3.13 --exact --source winget --accept-package-agreements --accept-source-agreements || goto :failed
+  echo Python 3.11-3.13 was not found. Installing Python 3.13...
+  where winget >nul 2>nul
+  if !errorlevel! equ 0 (
+    echo Trying Windows Package Manager...
+    winget install --id Python.Python.3.13 --exact --source winget --accept-package-agreements --accept-source-agreements
+  ) else (
+    echo winget is not available. Using the official python.org installer instead...
+  )
   call :find_python
+  if not defined BOOTSTRAP_PYTHON (
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_DIR%scripts\install-python.ps1" -MinorVersion 3.13
+    if !errorlevel! neq 0 goto :python_install_failed
+    call :find_python
+  )
   if not defined BOOTSTRAP_PYTHON goto :python_install_not_found
 )
 echo Creating .venv for the first run...
@@ -62,9 +72,9 @@ echo The check or dashboard stopped with an error. Review the message above.
 pause
 exit /b 1
 
-:missing_winget
-echo winget is not available, so Python could not be installed automatically.
-echo Install Python 3.13 from https://www.python.org/downloads/ then run this file again.
+:python_install_failed
+echo Python could not be installed automatically from python.org.
+echo Check your internet connection or install Python 3.13 from https://www.python.org/downloads/windows/
 pause
 exit /b 1
 
@@ -86,5 +96,7 @@ if not defined BOOTSTRAP_PYTHON (
   python -c "import sys; raise SystemExit(0 if (3,11) ^<= sys.version_info[:2] ^< (3,14) else 1)" >nul 2>nul
   if !errorlevel! equ 0 set "BOOTSTRAP_PYTHON=python"
 )
-if not defined BOOTSTRAP_PYTHON if exist "%LocalAppData%\Programs\Python\Python313\python.exe" set "BOOTSTRAP_PYTHON="%LocalAppData%\Programs\Python\Python313\python.exe""
+for %%V in (313 312 311) do (
+  if not defined BOOTSTRAP_PYTHON if exist "%LocalAppData%\Programs\Python\Python%%V\python.exe" set "BOOTSTRAP_PYTHON="%LocalAppData%\Programs\Python\Python%%V\python.exe""
+)
 exit /b 0
