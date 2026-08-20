@@ -42,6 +42,18 @@ class FakeToggleButton:
         self.tooltip = tooltip
 
 
+class FakeStatusIcon:
+    def __init__(self) -> None:
+        self.style = ""
+        self.tooltip = ""
+
+    def setStyleSheet(self, style: str) -> None:
+        self.style = style
+
+    def setToolTip(self, tooltip: str) -> None:
+        self.tooltip = tooltip
+
+
 def test_dashboard_log_keeps_only_ten_latest_rows() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     dashboard._log_lines = deque(maxlen=10)
@@ -68,3 +80,16 @@ def test_mouse_sync_section_is_collapsed_by_default_and_can_toggle() -> None:
     assert dashboard.sync_section_expanded is False
     assert dashboard.sync_section.visible is False
     assert dashboard.sync_section_toggle.tooltip == "Mở rộng Đồng bộ chuột"
+
+
+def test_mouse_sync_status_indicator_changes_colour_and_tooltip() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.sync_status_icon = FakeStatusIcon()
+
+    dashboard._set_sync_status_indicator(False)
+    assert "#94a3b8" in dashboard.sync_status_icon.style
+    assert dashboard.sync_status_icon.tooltip == "Đồng bộ chuột đang tắt"
+
+    dashboard._set_sync_status_indicator(True)
+    assert "#16a34a" in dashboard.sync_status_icon.style
+    assert dashboard.sync_status_icon.tooltip == "Đồng bộ chuột đang bật"

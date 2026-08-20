@@ -136,12 +136,18 @@ class Dashboard(QWidget):
         manage = PushButton("Quản lý tài khoản"); manage.setFixedHeight(34); manage.setStyleSheet("QPushButton { background:#ffffff; border:1px solid #8ad7d9; border-radius:8px; color:#087f8c; } QPushButton:hover { background:#effcfb; border-color:#0ea5a5; }"); manage.clicked.connect(self._manage_accounts)
         self.farm_launcher = PrimaryPushButton("Khởi động Farm"); self.farm_launcher.setFixedHeight(34); self.farm_launcher.setStyleSheet("QPushButton { background:#2563eb; border:1px solid #2563eb; border-radius:8px; color:#ffffff; font-weight:600; } QPushButton:hover { background:#1d4ed8; border-color:#1d4ed8; } QPushButton:disabled { background:#93c5fd; border-color:#93c5fd; color:#eff6ff; }"); self.farm_launcher.clicked.connect(self._farm_launcher_action)
         primary_actions = QHBoxLayout(); primary_actions.setSpacing(7); primary_actions.addWidget(manage, 1); primary_actions.addWidget(self.farm_launcher, 1); al.addLayout(primary_actions); ll.addWidget(accounts)
-        arrange_card = self._card(); acl = QVBoxLayout(arrange_card); acl.addWidget(StrongBodyLabel("Sắp xếp cửa sổ")); acl.addWidget(self._muted("Chọn số cửa sổ trên mỗi hàng rồi áp dụng cho Chrome đang mở.")); row = QHBoxLayout(); row.addWidget(QLabel("Số cửa sổ / hàng")); row.addStretch(); self.windows_per_row = ComboBox(); self.windows_per_row.addItems(["2","3","4","5","6"]); self.windows_per_row.setCurrentText(str(self.config.browser.windows_per_row)); self.windows_per_row.currentTextChanged.connect(self._apply_windows_per_row); row.addWidget(self.windows_per_row); acl.addLayout(row); apply = PrimaryPushButton("Áp dụng & sắp xếp"); apply.clicked.connect(self._arrange); acl.addWidget(apply); tools = QHBoxLayout(); self.drag = PushButton("Hiện nút kéo"); self.drag.clicked.connect(self._toggle_drag); self.scrollbars = PushButton("Hiện thanh cuộn"); self.scrollbars.clicked.connect(self._toggle_scrollbars); self.pin = CheckBox("Luôn nổi trên các cửa sổ khác"); self.pin.stateChanged.connect(lambda _s: self.runner.set_all_topmost(self.pin.isChecked())); tools.addWidget(self.drag); tools.addWidget(self.scrollbars); acl.addLayout(tools); acl.addWidget(self.pin); ll.addWidget(arrange_card)
+        arrange_card = self._card(); acl = QVBoxLayout(arrange_card); acl.addWidget(StrongBodyLabel("Sắp xếp cửa sổ")); acl.addWidget(self._muted("Chọn số cửa sổ trên mỗi hàng rồi áp dụng cho Chrome đang mở.")); row = QHBoxLayout(); row.addWidget(QLabel("Số cửa sổ / hàng")); row.addStretch(); self.windows_per_row = ComboBox(); self.windows_per_row.addItems(["2","3","4","5","6"]); self.windows_per_row.setCurrentText(str(self.config.browser.windows_per_row)); self.windows_per_row.currentTextChanged.connect(self._apply_windows_per_row); row.addWidget(self.windows_per_row); acl.addLayout(row)
+        arrange_actions = QHBoxLayout(); arrange_actions.setSpacing(7); apply = PrimaryPushButton("Sắp xếp"); apply.clicked.connect(self._arrange); arrange_actions.addWidget(apply, 1); self.drag = self._icon_button(FIF.MOVE, "Hiện nút kéo"); self.drag.clicked.connect(self._toggle_drag); arrange_actions.addWidget(self.drag); self.scrollbars = self._icon_button(FIF.SCROLL, "Hiện thanh cuộn"); self.scrollbars.clicked.connect(self._toggle_scrollbars); arrange_actions.addWidget(self.scrollbars); acl.addLayout(arrange_actions)
+        self.pin = CheckBox("Luôn nổi trên các cửa sổ khác"); self.pin.stateChanged.connect(lambda _s: self.runner.set_all_topmost(self.pin.isChecked())); acl.addWidget(self.pin); ll.addWidget(arrange_card)
         automation = self._card()
         au = QVBoxLayout(automation)
         sync_header = QHBoxLayout()
         sync_header.addWidget(StrongBodyLabel("Đồng bộ chuột"))
         sync_header.addStretch()
+        self.sync_status_icon = QLabel("●")
+        self.sync_status_icon.setFixedWidth(14)
+        self._set_sync_status_indicator(False)
+        sync_header.addWidget(self.sync_status_icon)
         self.sync_section_toggle = self._icon_button(FIF.CHEVRON_RIGHT, "Mở rộng Đồng bộ chuột")
         self.sync_section_toggle.clicked.connect(self._toggle_sync_section)
         sync_header.addWidget(self.sync_section_toggle)
@@ -263,11 +269,11 @@ class Dashboard(QWidget):
         except Exception as error: self._error("Không sắp xếp được",str(error)); return
         self._append_log("Chưa có cửa sổ để sắp xếp" if not count else f"Đã sắp xếp {count} cửa sổ")
     def _toggle_drag(self) -> None:
-        self.drag_visible=not self.drag_visible; self.runner.set_all_drag_items_visible(self.drag_visible); self.drag.setText("Ẩn nút kéo" if self.drag_visible else "Hiện nút kéo")
+        self.drag_visible=not self.drag_visible; self.runner.set_all_drag_items_visible(self.drag_visible); self.drag.setToolTip("Ẩn nút kéo" if self.drag_visible else "Hiện nút kéo")
     def _toggle_scrollbars(self) -> None:
         self.scrollbars_visible = not self.scrollbars_visible
         count = self.runner.set_all_scrollbars_visible(self.scrollbars_visible)
-        self.scrollbars.setText("Ẩn thanh cuộn" if self.scrollbars_visible else "Hiện thanh cuộn")
+        self.scrollbars.setToolTip("Ẩn thanh cuộn" if self.scrollbars_visible else "Hiện thanh cuộn")
         self._append_log(
             ("Đã hiện" if self.scrollbars_visible else "Đã ẩn")
             + f" thanh cuộn trên {count} Chrome đang mở"
@@ -284,10 +290,25 @@ class Dashboard(QWidget):
         else:
             row.card.setStyleSheet("")
     def _toggle_sync(self) -> None:
-        if self.runner.sync_enabled: self.runner.disable_sync(); self.sync.setText("Bật sync chuột"); self.sync_status.setText("Sync đang tắt"); return
+        if self.runner.sync_enabled:
+            self.runner.disable_sync()
+            self.sync.setText("Bật sync chuột")
+            self.sync_status.setText("Sync đang tắt")
+            self._set_sync_status_indicator(False)
+            return
         master=str(self.master.currentData() or ""); opened=[p.id for p in self.config.profiles if self.runner.has_open_session(p.id)]
         if master not in opened or len(opened)<2: self._warning("Chưa đủ profile","Hãy mở master và ít nhất một follower trước khi bật sync."); return
-        self.runner.enable_sync(master); self.sync.setText("Tắt sync chuột"); self.sync_status.setText(f"MASTER: {master} → {len(opened)-1} follower")
+        self.runner.enable_sync(master)
+        self.sync.setText("Tắt sync chuột")
+        self.sync_status.setText(f"MASTER: {master} → {len(opened)-1} follower")
+        self._set_sync_status_indicator(True)
+    def _set_sync_status_indicator(self, enabled: bool) -> None:
+        color = "#16a34a" if enabled else "#94a3b8"
+        state = "bật" if enabled else "tắt"
+        self.sync_status_icon.setStyleSheet(
+            f"color:{color}; background:transparent; font-size:16px; font-weight:700;"
+        )
+        self.sync_status_icon.setToolTip(f"Đồng bộ chuột đang {state}")
     def _toggle_sync_section(self) -> None:
         self.sync_section_expanded = not self.sync_section_expanded
         self.sync_section.setVisible(self.sync_section_expanded)
