@@ -7,6 +7,7 @@ from pathlib import Path
 from ik_chrome_auto.farm_vision import (
     BrowserGameStateDetector,
     DETECTION_TEMPLATES,
+    DetectedGameState,
     FarmTemplateId,
     GameDetectionResult,
     TeamRosterRow,
@@ -30,6 +31,9 @@ _BUSY_TEAM_LABEL = "browser_busy_team_label.png"
 # is mapped to its actual row before any scheduler decision is made.
 _ROSTER_TOP_RATIO = 0.425
 _ROSTER_ROW_HEIGHT_RATIO = 0.071
+_ROSTER_BOTTOM_RATIO = 0.720
+_ROSTER_LABEL_LEFT_RATIO = 0.048
+_ROSTER_LABEL_RIGHT_RATIO = 0.145
 _MAX_TEAM_ROWS = 4
 
 
@@ -59,18 +63,25 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
     # not its colour, and crop alternatives tightly around its silhouette so
     # lighting and surrounding terrain cannot dominate the score.
     FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON: TemplateSpec(
-        "browser_city_to_world_map_green.png",
-        threshold=0.55,
-        region="lower_left",
+        "browser_city_icon_green_tight.png",
+        threshold=0.60,
+        region="city_corner",
         reference_width=835,
         reference_height=432,
         alternatives=(
-            "browser_city_to_world_map_button.png",
-            "browser_city_to_world_map_green_core.png",
-            "browser_city_to_world_map_red_core.png",
+            "browser_city_icon_red_tight.png",
         ),
         scale_variants=(0.92, 0.96, 1.0, 1.04, 1.08),
         edge=True,
+    ),
+    FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON: TemplateSpec(
+        "browser_map_to_city_tight.png",
+        threshold=0.78,
+        region="city_corner",
+        reference_width=835,
+        reference_height=432,
+        scale_variants=(0.92, 0.96, 1.0, 1.04, 1.08),
+        grayscale=True,
     ),
     FarmTemplateId.CONTINENT_MAP_TITLE: TemplateSpec("continent_map_title.png"),
     FarmTemplateId.CONTINENT_MAP_HOME_TERRITORY_ANCHOR: TemplateSpec("continent_map_home_territory_anchor.png", region="center"),
@@ -323,7 +334,13 @@ class BrowserCanvasMatcher:
             raise ValueError("Canvas screenshot không phải PNG hợp lệ")
         evidence = {template_id: self._match(image, template_id) for template_id in DETECTION_TEMPLATES}
         result = BrowserGameStateDetector().detect(evidence)
-        roster = self._team_roster(image)
+        # The compact team HUD is meaningful only on the verified World Map.
+        # Do not let similar text in City/popup UI leak into farm scheduling.
+        roster = (
+            self._team_roster(image)
+            if result.state == DetectedGameState.WORLD_MAP
+            else ()
+        )
         return replace(
             result,
             ready_teams=tuple(row.team for row in roster if row.state == TeamRowState.READY),
@@ -353,20 +370,23 @@ class BrowserCanvasMatcher:
 
         scaled_ready = tuple(scale(template) for template in ready_templates)
         scaled_busy = scale(busy_template)
+        # Restrict every status match to the small left-side roster panel.
+        # This intentionally excludes all gameplay, city HUD and popup text.
         roster_top = round(image_height * _ROSTER_TOP_RATIO)
+        roster_bottom = min(image_height, round(image_height * _ROSTER_BOTTOM_RATIO))
         row_height = max(1, round(image_height * _ROSTER_ROW_HEIGHT_RATIO))
         # Never infer a row from the count/order of all template matches. A
         # match in the city HUD or another row caused exactly that bug. Probe
         # the label slot in each of the four fixed rows independently: top to
         # bottom is game team 1 → 4 and only a local `Sẵn sàng` match is Ready.
-        label_left = round(image_width * 0.052)
-        label_right = min(image_width // 6, label_left + round(image_width * 0.095))
+        label_left = round(image_width * _ROSTER_LABEL_LEFT_RATIO)
+        label_right = min(round(image_width * _ROSTER_LABEL_RIGHT_RATIO), image_width)
         ready_grays = tuple(cv2.cvtColor(template, cv2.COLOR_BGR2GRAY) for template in scaled_ready)
         busy_gray = cv2.cvtColor(scaled_busy, cv2.COLOR_BGR2GRAY)
         states: dict[int, TeamRowState] = {}
         for team in range(1, _MAX_TEAM_ROWS + 1):
             row_top = roster_top + (team - 1) * row_height
-            row_bottom = min(image_height, row_top + row_height)
+            row_bottom = min(roster_bottom, row_top + row_height)
             search = image[row_top:row_bottom, label_left:label_right]
             if any(template.shape[1] > search.shape[1] or template.shape[0] > search.shape[0] for template in scaled_ready):
                 continue
@@ -487,6 +507,10 @@ class BrowserCanvasMatcher:
     @staticmethod
     def _region(name: str, width: int, height: int) -> tuple[int, int, int, int]:
         if name == "left": return 0, 0, width // 4, height
+        # The City control is anchored in this compact corner slot. Keeping
+        # its search area separate prevents similar castle/terrain artwork in
+        # the rest of the game canvas from becoming City evidence.
+        if name == "city_corner": return 0, height * 3 // 4, width // 6, height - (height * 3 // 4)
         if name == "lower_left": return 0, height // 2, width // 2, height - height // 2
         if name == "lower": return 0, height // 2, width, height - height // 2
         if name == "lower_right": return width // 2, height // 2, width - width // 2, height - height // 2

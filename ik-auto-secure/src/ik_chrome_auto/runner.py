@@ -70,7 +70,7 @@ class ProfileWorker:
         on_input: InputCallback,
         on_coordinate: CoordinateCallback,
         *,
-        drag_item_visible: bool = True,
+        drag_item_visible: bool = False,
         scrollbars_visible: bool = False,
         topmost: bool = False,
     ) -> None:
@@ -104,6 +104,7 @@ class ProfileWorker:
         self._farm_next_at = 0.0
         self._farm_city_clicks = 0
         self._farm_return_city_click_at = 0.0
+        self._farm_return_city_clicks = 0
         self._farm_world_map_click_at = 0.0
         self._farm_ready_teams: tuple[int, ...] = ()
         self._farm_roster: tuple[TeamRosterRow, ...] = ()
@@ -209,6 +210,7 @@ class ProfileWorker:
                     self._farm_next_at = 0.0
                     self._farm_city_clicks = 0
                     self._farm_return_city_click_at = 0.0
+                    self._farm_return_city_clicks = 0
                     self._farm_world_map_click_at = 0.0
                     self._farm_ready_teams = ()
                     self._farm_roster = ()
@@ -399,6 +401,7 @@ class ProfileWorker:
                 DetectedGameState.RESOURCE_EXPIRY_DIALOG: FarmGameState.RESOURCE_EXPIRY,
             }.get(detected.state, FarmGameState.UNKNOWN)
             city = detected.evidence_for(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
+            map_to_city = detected.evidence_for(FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON)
             world = detected.evidence_for(FarmTemplateId.WORLD_MAP_ANCHOR)
             browser_canvas = detected.evidence_for(FarmTemplateId.BROWSER_CANVAS_READY_ANCHOR)
             world_map_back = detected.evidence_for(FarmTemplateId.BROWSER_WORLD_MAP_BACK_BUTTON)
@@ -466,6 +469,7 @@ class ProfileWorker:
                     "state": detected.state.value,
                     "canvas": {"width": image_size[0], "height": image_size[1]},
                     "city": self._evidence_payload(city),
+                    "map_to_city": self._evidence_payload(map_to_city),
                     "world_map": self._evidence_payload(world),
                     "world_map_back": self._evidence_payload(world_map_back),
                     "world_map_coordinate_pin": self._evidence_payload(world_map_coordinate_pin),
@@ -696,6 +700,31 @@ class ProfileWorker:
                     f"Auto Farm: World Map đã xác minh qua nút tìm tài nguyên; {decision.message}",
                 )
                 return
+            if self._farm_world_map_click_at > 0 and state == FarmGameState.WORLD_MAP:
+                # A slow portal transition may become verifiable only after
+                # the normal observation window. Accept fresh, explicit World
+                # Map evidence before evaluating the timeout; otherwise a
+                # successfully opened map is incorrectly stopped at 8 seconds.
+                self._farm_world_map_click_at = 0.0
+                decision = self._farm.decide(
+                    FarmGameState.WORLD_MAP,
+                    ready_teams=self._farm_ready_teams or ready_teams,
+                )
+                delay = 0.35 if decision.step == FarmStep.OPEN_SEARCH else self._farm.policy.retry_delay_seconds
+                self._farm_next_at = time.monotonic() + delay
+                self._log_farm(
+                    "world_map_verified",
+                    {
+                        "method": "explicit_world_map_state",
+                        "elapsed_seconds": round(elapsed_after_click, 2),
+                        "ready_teams": self._farm_ready_teams or ready_teams,
+                    },
+                )
+                self._publish(
+                    WorkerState.RUNNING,
+                    f"Auto Farm: World Map đã xác minh; {decision.message}",
+                )
+                return
             if (
                 self._farm_world_map_click_at > 0
                 and state != FarmGameState.WORLD_MAP
@@ -799,6 +828,34 @@ class ProfileWorker:
                     self._publish(WorkerState.RUNNING, "Auto Farm: đã yêu cầu về City, đang xác minh")
                     return
                 else:
+                    fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
+                    fresh_city = fresh.evidence_for(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
+                    fresh_map_to_city = fresh.evidence_for(FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON)
+                    retry_control = fresh_map_to_city if fresh_map_to_city.actionable else fresh_city
+                    if (
+                        fresh.state == DetectedGameState.WORLD_MAP
+                        and retry_control.actionable
+                        and self._farm_return_city_clicks < 2
+                    ):
+                        # Retry once with touch; the first CDP mouse click can
+                        # be swallowed while the canvas is finishing an
+                        # animation. The fresh template bounds prevent a blind
+                        # second tap.
+                        self.session.tap_farm_template(retry_control.bounds, fresh_size)  # type: ignore[arg-type]
+                        self._farm_return_city_clicks += 1
+                        self._farm_return_city_click_at = time.monotonic()
+                        self._farm_next_at = self._farm_return_city_click_at + 1.2
+                        self._log_farm(
+                            "retry_return_to_city",
+                            {
+                                "bounds": retry_control.bounds,
+                                "method": "touch",
+                                "attempt": self._farm_return_city_clicks,
+                                "control": "map_icon" if fresh_map_to_city.actionable else "city_icon",
+                            },
+                        )
+                        self._publish(WorkerState.RUNNING, "Auto Farm: đang thử quay về City lần 2")
+                        return
                     screenshot = self._save_farm_debug_capture("city-unverified")
                     self._log_farm(
                         "error",
@@ -814,16 +871,32 @@ class ProfileWorker:
             if decision.step == FarmStep.RETURN_TO_CITY and state == FarmGameState.WORLD_MAP:
                 fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                 fresh_city = fresh.evidence_for(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
-                if fresh.state != DetectedGameState.WORLD_MAP or not fresh_city.actionable:
+                fresh_map_to_city = fresh.evidence_for(FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON)
+                return_control = fresh_map_to_city if fresh_map_to_city.actionable else fresh_city
+                if fresh.state != DetectedGameState.WORLD_MAP or not return_control.actionable:
                     self._farm_next_at = time.monotonic() + 0.8
                     self._publish(WorkerState.RUNNING, "Auto Farm: chờ nút City ổn định trước cycle mới")
                     return
                 # This circular HUD control ignores synthetic touch on some
                 # browser skins. It has just been freshly matched on World
                 # Map, so use the CDP mouse fallback for this state change.
-                self.session.click_farm_template_mouse(fresh_city.bounds, fresh_size)  # type: ignore[arg-type]
+                if fresh_map_to_city.actionable:
+                    self.session.tap_farm_template(return_control.bounds, fresh_size)  # type: ignore[arg-type]
+                    method = "touch"
+                else:
+                    self.session.click_farm_template_mouse(return_control.bounds, fresh_size)  # type: ignore[arg-type]
+                    method = "mouse"
                 self._farm_return_city_click_at = time.monotonic()
-                self._log_farm("tap_return_to_city", {"bounds": fresh_city.bounds, "method": "mouse"})
+                self._farm_return_city_clicks += 1
+                self._log_farm(
+                    "tap_return_to_city",
+                    {
+                        "bounds": return_control.bounds,
+                        "method": method,
+                        "attempt": self._farm_return_city_clicks,
+                        "control": "map_icon" if fresh_map_to_city.actionable else "city_icon",
+                    },
+                )
                 self._farm_next_at = time.monotonic() + 1.2
                 self._publish(WorkerState.RUNNING, "Auto Farm: đang về City để bắt đầu cycle mới")
                 return
@@ -1358,6 +1431,7 @@ class ProfileWorker:
         self._farm = FarmWorkflow()
         self._farm_city_clicks = 0
         self._farm_return_city_click_at = 0.0
+        self._farm_return_city_clicks = 0
         self._farm_world_map_click_at = 0.0
         self._farm_ready_teams = ()
         self._farm_roster = ()
@@ -1789,7 +1863,7 @@ class MultiProfileRunner:
         self.workers: dict[str, ProfileWorker] = {}
         self.sync_enabled = False
         self.sync_master_id: str | None = None
-        self.drag_items_visible = True
+        self.drag_items_visible = False
         self.scrollbars_visible = False
         self.windows_topmost = False
         self._resource_cpu_samples: dict[str, tuple[float, float]] = {}

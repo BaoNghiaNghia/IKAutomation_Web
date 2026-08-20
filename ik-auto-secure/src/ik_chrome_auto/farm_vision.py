@@ -33,6 +33,7 @@ class FarmTemplateId(StrEnum):
     TEAM_ADJUST_FORMATION_BUTTON = "team_adjust_formation_button"
     TEAM_ACTION_BUTTON_ENABLED = "team_action_button_enabled"
     CITY_TO_WORLD_MAP_BUTTON = "city_to_world_map_button"
+    BROWSER_MAP_TO_CITY_BUTTON = "browser_map_to_city_button"
     BROWSER_CANVAS_READY_ANCHOR = "browser_canvas_ready_anchor"
     BROWSER_WORLD_MAP_BACK_BUTTON = "browser_world_map_back_button"
     BROWSER_WORLD_MAP_COORDINATE_PIN = "browser_world_map_coordinate_pin"
@@ -176,16 +177,23 @@ class BrowserGameStateDetector:
             FarmTemplateId.CONTINENT_MAP_HOME_TERRITORY_ANCHOR,
             FarmTemplateId.CONTINENT_MAP_PIN_BUTTON,
         ))
+        # The compact X/Y HUD is rendered in both City and World Map by some
+        # browser skins.  It is therefore only supporting evidence for World
+        # Map, never a reason to discard a freshly verified City control.
+        # Strong World Map controls (back, anchor or resource search) still
+        # take precedence over the City toggle, whose artwork can remain on
+        # screen after a map transition.
+        world_map_strongly_confirmed = any(found[item] for item in (
+            FarmTemplateId.WORLD_MAP_ANCHOR,
+            FarmTemplateId.BROWSER_WORLD_MAP_BACK_BUTTON,
+            FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON,
+            FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON,
+        ))
         city_confirmed = (
             found[FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON]
             and not team_confirmed and not panel_confirmed and not popup_confirmed
             and not continent_confirmed
-            and not found[FarmTemplateId.WORLD_MAP_ANCHOR]
-            # The compact X/Y coordinate HUD is only present on World Map in
-            # the browser build. It remains visible after a dispatch, when the
-            # City-toggle artwork can otherwise match the home button.
-            and not found[FarmTemplateId.BROWSER_WORLD_MAP_COORDINATE_PIN]
-            and not found[FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON]
+            and not world_map_strongly_confirmed
         )
         state = (
             DetectedGameState.RESOURCE_EXPIRY_DIALOG if expiry_confirmed else
@@ -194,16 +202,11 @@ class BrowserGameStateDetector:
             DetectedGameState.RESOURCE_SEARCH_PANEL if panel_confirmed else
             DetectedGameState.RESOURCE_POPUP if popup_confirmed or browser_popup_confirmed else
             DetectedGameState.CONTINENT_MAP if continent_confirmed else
-            DetectedGameState.WORLD_MAP if (
-                found[FarmTemplateId.WORLD_MAP_ANCHOR]
-                or found[FarmTemplateId.BROWSER_WORLD_MAP_BACK_BUTTON]
-                or found[FarmTemplateId.BROWSER_WORLD_MAP_COORDINATE_PIN]
-                # On some web skins the stable World Map evidence is the
-                # lower-left magnifier itself. It is a distinct World Map HUD
-                # control, not the City toggle. Higher-priority panel/popup
-                # states above prevent it from reclassifying their screens.
-                or found[FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON]
-            ) else
-            DetectedGameState.CITY if city_confirmed else DetectedGameState.UNKNOWN
+            DetectedGameState.WORLD_MAP if world_map_strongly_confirmed else
+            DetectedGameState.CITY if city_confirmed else
+            # A coordinate pin without the City control is still useful on
+            # portal variants that lack the normal World Map controls.
+            DetectedGameState.WORLD_MAP if found[FarmTemplateId.BROWSER_WORLD_MAP_COORDINATE_PIN]
+            else DetectedGameState.UNKNOWN
         )
         return GameDetectionResult(state, values)

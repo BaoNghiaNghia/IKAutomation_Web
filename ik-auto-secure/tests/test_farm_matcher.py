@@ -4,6 +4,10 @@ import cv2
 import numpy as np
 
 from ik_chrome_auto.farm_matcher import BrowserCanvasMatcher
+
+
+def test_city_template_search_is_limited_to_bottom_left_corner() -> None:
+    assert BrowserCanvasMatcher._region("city_corner", 835, 432) == (0, 324, 139, 108)
 from ik_chrome_auto.farm_vision import FarmTemplateId
 
 

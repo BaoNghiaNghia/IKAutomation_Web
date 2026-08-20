@@ -104,7 +104,7 @@ class ChromeProfileSession:
         self._managed = profile.mode == ProfileMode.MANAGED
         self._sync_source = False
         self._inspector_enabled = False
-        self._drag_item_visible = True
+        self._drag_item_visible = False
         self._scrollbars_visible = False
         self._window_handle: int | None = None
         self._topmost = False
