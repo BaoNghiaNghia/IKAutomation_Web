@@ -449,10 +449,17 @@ class ProfileWorker:
             selected_border = detected.evidence_for(FarmTemplateId.BROWSER_TEAM_SELECTED_BORDER)
             expected_team = self._farm.team
             expected_badge = team_badges.get(expected_team) if expected_team is not None else None
+            expected_row_bounds = self._farm_expected_team_row
+            if expected_row_bounds is None and expected_team is not None:
+                expected_row_bounds = self._team_row_for_selection(
+                    expected_team,
+                    team_badges,
+                    image_size,
+                )
             expected_team_selected = self._is_expected_team_selected(
                 expected_badge,
                 selected_border,
-                self._farm_expected_team_row,
+                expected_row_bounds,
             )
             ready_teams = detected.ready_teams
             roster = detected.team_roster
@@ -1027,8 +1034,12 @@ class ProfileWorker:
                 self._publish(WorkerState.RUNNING, "Auto Farm: đã bấm Thu thập, đang xác minh chọn đội")
                 return
             if decision.step == FarmStep.SELECT_TEAM and state == FarmGameState.TEAM_SELECTION:
-                target_badge = team_badges.get(decision.team)
-                if not target_badge or not target_badge.actionable:
+                target_row = self._team_row_for_selection(
+                    decision.team,
+                    team_badges,
+                    image_size,
+                )
+                if target_row is None:
                     screenshot = self._save_farm_debug_capture("expected-team-not-visible")
                     self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
                     self._log_farm(
@@ -1037,7 +1048,7 @@ class ProfileWorker:
                     )
                     self._publish(
                         WorkerState.RUNNING,
-                        f"Auto Farm: không thấy badge đội {decision.team} trên panel chọn đội; đang chờ",
+                        f"Auto Farm: không xác định được hàng đội {decision.team} trên panel chọn đội; đang chờ",
                     )
                     return
                 if self._farm_team_selection_clicks >= 2:
@@ -1060,29 +1071,36 @@ class ProfileWorker:
                 fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                 fresh_panel = fresh.evidence_for(FarmTemplateId.BROWSER_TEAM_SELECTION_PANEL)
                 fresh_action = fresh.evidence_for(FarmTemplateId.BROWSER_TEAM_ACTION_BUTTON)
-                badge_template = {
-                    2: FarmTemplateId.BROWSER_TEAM_2_BADGE,
-                    3: FarmTemplateId.BROWSER_TEAM_3_BADGE,
-                    4: FarmTemplateId.BROWSER_TEAM_4_BADGE,
-                }.get(decision.team)
-                fresh_badge = fresh.evidence_for(badge_template) if badge_template else None
+                fresh_badges = {
+                    2: fresh.evidence_for(FarmTemplateId.BROWSER_TEAM_2_BADGE),
+                    3: fresh.evidence_for(FarmTemplateId.BROWSER_TEAM_3_BADGE),
+                    4: fresh.evidence_for(FarmTemplateId.BROWSER_TEAM_4_BADGE),
+                }
+                row_bounds = self._team_row_for_selection(
+                    decision.team,
+                    fresh_badges,
+                    fresh_size,
+                )
                 if not (
                     fresh_panel.actionable
                     and fresh_action.actionable
-                    and fresh_badge is not None
-                    and fresh_badge.actionable
+                    and row_bounds is not None
                 ):
                     self._farm_next_at = time.monotonic() + 0.8
                     self._publish(WorkerState.RUNNING, "Auto Farm: panel chọn đội thay đổi, đang nhận diện lại")
                     return
-                row_bounds = self._team_row_from_badge(fresh_badge.bounds, fresh_size)  # type: ignore[arg-type]
                 self.session.tap_farm_template(row_bounds, fresh_size)
                 self._farm_expected_team_row = row_bounds
                 self._farm_team_selection_clicks += 1
                 self._farm_next_at = time.monotonic() + 1.2
                 self._log_farm(
                     "tap_expected_team",
-                    {"team": decision.team, "badge_bounds": fresh_badge.bounds, "row_bounds": row_bounds},
+                    {
+                        "team": decision.team,
+                        "badge_bounds": getattr(fresh_badges.get(decision.team), "bounds", None),
+                        "row_bounds": row_bounds,
+                        "method": "inferred_first_row" if decision.team == 1 else "numbered_badge",
+                    },
                 )
                 self._publish(WorkerState.RUNNING, f"Auto Farm: đã chọn đội {decision.team}, đang xác minh viền chọn")
                 return
@@ -1823,6 +1841,46 @@ class ProfileWorker:
         if row_width <= 0 or row_height <= 0:
             raise ValueError("Không xác định được vùng chọn đội an toàn")
         return row_left, row_top, row_width, row_height
+
+    @classmethod
+    def _team_row_for_selection(
+        cls,
+        team: int | None,
+        badges: dict[int, object],
+        image_size: tuple[int, int],
+    ) -> tuple[int, int, int, int] | None:
+        """Resolve all four team rows without inventing a Team 1 badge.
+
+        The game labels rows 2–4 but the first row has no numbered badge. For
+        team 1, infer its badge slot from the freshly verified rows 2 and 3,
+        then reuse the same bounded row geometry as every other team.
+        """
+        if team in {2, 3, 4}:
+            badge = badges.get(team)
+            bounds = getattr(badge, "bounds", None)
+            if not getattr(badge, "actionable", False) or bounds is None:
+                return None
+            return cls._team_row_from_badge(bounds, image_size)
+        if team != 1:
+            return None
+        team_2 = badges.get(2)
+        team_2_bounds = getattr(team_2, "bounds", None)
+        if not getattr(team_2, "actionable", False) or team_2_bounds is None:
+            return None
+        team_3 = badges.get(3)
+        team_3_bounds = getattr(team_3, "bounds", None)
+        row_stride = 0
+        if getattr(team_3, "actionable", False) and team_3_bounds is not None:
+            row_stride = int(team_3_bounds[1]) - int(team_2_bounds[1])
+        if row_stride <= 0:
+            row_stride = max(1, round(image_size[1] * 0.21))
+        virtual_team_1_badge = (
+            int(team_2_bounds[0]),
+            max(0, int(team_2_bounds[1]) - row_stride),
+            int(team_2_bounds[2]),
+            int(team_2_bounds[3]),
+        )
+        return cls._team_row_from_badge(virtual_team_1_badge, image_size)
 
     def _save_farm_debug_capture(self, reason: str) -> Path | None:
         if self.session is None:

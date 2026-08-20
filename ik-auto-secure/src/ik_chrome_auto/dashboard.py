@@ -63,7 +63,6 @@ class ProfileRow:
     status: QLabel
     resource: QLabel
     badge: QLabel
-    inspect: PushButton
     farm: PushButton
     card: CardWidget
 
@@ -79,7 +78,6 @@ class Dashboard(QWidget):
         self.rows: dict[str, ProfileRow] = {}
         self._log_lines: deque[str] = deque(maxlen=10)
         self.last_coordinate: tuple[str, dict[str, object]] | None = None
-        self.inspecting_profile_id: str | None = None
         self.farm_profiles: set[str] = set()
         self._farm_launch_profiles: set[str] = set()
         self._farm_launcher_phase = "launch"
@@ -310,7 +308,7 @@ class Dashboard(QWidget):
                 profile.id,
             )
         for account_number, profile in enumerate(self.config.profiles, start=1):
-            card=self._card(); self._set_roster_tooltip(card, ()); layout=QVBoxLayout(card); top=QHBoxLayout(); top.addWidget(StrongBodyLabel(self._profile_display_name(profile, account_number))); top.addStretch(); badge=QLabel("Đã dừng"); badge.setStyleSheet("background:#f1f5f9;color:#475569;border-radius:10px;padding:3px 8px;"); top.addWidget(badge); layout.addLayout(top); status=self._muted("Đã dừng"); resource=self._muted("—"); details=QHBoxLayout(); details.addWidget(status,1); details.addWidget(resource); layout.addLayout(details); buttons=QHBoxLayout(); buttons.setSpacing(5); open_btn=self._compact_profile_button(PrimaryPushButton("Mở")); open_btn.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.OPEN)); buttons.addWidget(open_btn); farm=self._compact_profile_button(PushButton("Farm")); farm.clicked.connect(lambda _=False,pid=profile.id:self._toggle_farm(pid)); buttons.addWidget(farm); shot=self._compact_profile_button(PushButton("Ảnh")); shot.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.SCREENSHOT)); buttons.addWidget(shot); inspect=self._compact_profile_button(PushButton("Đo")); inspect.clicked.connect(lambda _=False,pid=profile.id:self._toggle_inspector(pid)); buttons.addWidget(inspect); buttons.addStretch(); delete=self._icon_button(FIF.DELETE,"Xóa profile"); delete.setFixedSize(29,29); delete.clicked.connect(lambda _=False,pid=profile.id:self._remove_profile(pid)); buttons.addWidget(delete); layout.addLayout(buttons); index=len(self.rows); self.table_layout.addWidget(card, index // 2, index % 2); self.rows[profile.id]=ProfileRow(status,resource,badge,inspect,farm,card)
+            card=self._card(); self._set_roster_tooltip(card, ()); layout=QVBoxLayout(card); top=QHBoxLayout(); top.addWidget(StrongBodyLabel(self._profile_display_name(profile, account_number))); top.addStretch(); badge=QLabel("Đã dừng"); badge.setStyleSheet("background:#f1f5f9;color:#475569;border-radius:10px;padding:3px 8px;"); top.addWidget(badge); layout.addLayout(top); status=self._muted("Đã dừng"); resource=self._muted("—"); details=QHBoxLayout(); details.addWidget(status,1); details.addWidget(resource); layout.addLayout(details); buttons=QHBoxLayout(); buttons.setSpacing(5); open_btn=self._compact_profile_button(PrimaryPushButton("Mở")); open_btn.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.OPEN)); buttons.addWidget(open_btn); farm=self._compact_profile_button(PushButton("Farm")); farm.clicked.connect(lambda _=False,pid=profile.id:self._toggle_farm(pid)); buttons.addWidget(farm); buttons.addStretch(); delete=self._icon_button(FIF.DELETE,"Xóa profile"); delete.setFixedSize(29,29); delete.clicked.connect(lambda _=False,pid=profile.id:self._remove_profile(pid)); buttons.addWidget(delete); layout.addLayout(buttons); index=len(self.rows); self.table_layout.addWidget(card, index // 2, index % 2); self.rows[profile.id]=ProfileRow(status,resource,badge,farm,card)
         self.table_layout.setRowStretch((len(self.rows) + 1) // 2, 1)
 
     @staticmethod
@@ -611,11 +609,6 @@ class Dashboard(QWidget):
             return set()
         return selected
 
-    def _toggle_inspector(self,pid:str) -> None:
-        if self.inspecting_profile_id==pid: self.runner.set_inspector(pid,False); self.rows[pid].inspect.setText("Đo"); self.inspecting_profile_id=None; return
-        if not self.runner.has_open_session(pid): self._warning("Profile chưa mở","Hãy bấm Mở profile trước khi bật đo tọa độ."); return
-        if self.inspecting_profile_id: self.runner.set_inspector(self.inspecting_profile_id,False); self.rows[self.inspecting_profile_id].inspect.setText("Đo")
-        self.inspecting_profile_id=pid; self.runner.set_inspector(pid,True); self.rows[pid].inspect.setText("Tắt đo"); self.coordinate.setText(f"[{pid}] Click vào game để lấy tọa độ…")
     def _manage_accounts(self) -> None:
         if not self._authorize_two_factor("xem hoặc chỉnh sửa tài khoản game"): return
         dialog=AccountManagerDialog(self, self.config.profiles)
@@ -803,10 +796,15 @@ class TwoFactorSetupDialog(QDialog):
         return pixmap.scaled(220, 220, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
     def _validate(self) -> None:
-        if TwoFactorService.verify_code(self.enrollment.secret, self.code.text()):
+        if TwoFactorService.verify_enrollment_code(self.enrollment.secret, self.code.text()):
             self.accept()
         else:
-            QMessageBox.warning(self, "Mã chưa đúng", "Mã 6 số không hợp lệ. Hãy kiểm tra thời gian trên điện thoại rồi thử lại.")
+            QMessageBox.warning(
+                self,
+                "Mã chưa đúng",
+                "Mã 6 số không hợp lệ. Hãy bật thời gian tự động trên Windows và điện thoại, "
+                "chờ mã mới rồi thử lại.",
+            )
 
     @classmethod
     def setup(cls, parent: QWidget, recovery: bool = False) -> tuple[TwoFactorEnrollment, str] | None:
