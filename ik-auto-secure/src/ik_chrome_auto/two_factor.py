@@ -52,7 +52,11 @@ class TwoFactorService:
     def begin_enrollment(self) -> TwoFactorEnrollment:
         secret = base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
         codes = tuple(self._new_recovery_code() for _ in range(_RECOVERY_COUNT))
-        label = quote(f"{_ISSUER}:Local account", safe="")
+        # This is an anonymous per-enrollment label, not an email or developer
+        # account. Credential Manager and the generated secret remain scoped to
+        # the current Windows user on this machine.
+        device_label = f"Thiết bị {secrets.token_hex(3).upper()}"
+        label = quote(f"{_ISSUER}:{device_label}", safe="")
         uri = f"otpauth://totp/{label}?secret={secret}&issuer={quote(_ISSUER)}&period={_STEP_SECONDS}&digits=6"
         return TwoFactorEnrollment(secret, uri, codes)
 

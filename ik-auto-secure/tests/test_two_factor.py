@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import unquote, urlparse
+
 from ik_chrome_auto.credential_store import AccountCredential
 from ik_chrome_auto.two_factor import TwoFactorEnrollment, TwoFactorService
 
@@ -16,6 +18,18 @@ class _MemoryStore:
 
     def save(self, credential: AccountCredential) -> None:
         self.values[credential.account_id] = credential
+
+
+def test_enrollment_uses_anonymous_unique_device_label_without_email() -> None:
+    service = TwoFactorService(_MemoryStore())  # type: ignore[arg-type]
+    first = service.begin_enrollment()
+    second = service.begin_enrollment()
+    first_label = unquote(urlparse(first.provisioning_uri).path)
+    second_label = unquote(urlparse(second.provisioning_uri).path)
+
+    assert first_label.startswith("/IK Auto:Thiết bị ")
+    assert "@" not in first_label
+    assert first_label != second_label
 
 
 def test_totp_accepts_current_code_and_one_step_clock_drift() -> None:
