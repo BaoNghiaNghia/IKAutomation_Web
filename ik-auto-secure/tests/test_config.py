@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from ik_chrome_auto.config import is_allowed_url, load_config, save_config, unique_profile_id
-from ik_chrome_auto.models import Auto2048Speed, ProfileMode
+from ik_chrome_auto.models import ProfileMode
 
 
 def test_load_resolves_relative_paths(tmp_path: Path) -> None:
@@ -42,7 +42,6 @@ def test_load_resolves_relative_paths(tmp_path: Path) -> None:
     assert config.browser.viewport_width == 500
     assert config.browser.viewport_height == 281
     assert config.browser.windows_per_row == 6
-    assert config.auto_2048_speed == Auto2048Speed.BALANCED
     assert config.capture.capture_response_bodies is False
     assert config.capture.network_capture_enabled is False
 
@@ -82,7 +81,6 @@ def test_save_round_trip(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     config = load_config(source)
-    config.auto_2048_speed = Auto2048Speed.FAST
     config.browser.low_memory_mode = False
     config.browser.windows_per_row = 6
 
@@ -95,7 +93,6 @@ def test_save_round_trip(tmp_path: Path) -> None:
     assert loaded.browser.app_mode is True
     assert loaded.browser.low_memory_mode is False
     assert loaded.browser.windows_per_row == 6
-    assert loaded.auto_2048_speed == Auto2048Speed.FAST
 
 
 def test_unique_profile_id() -> None:

@@ -5,7 +5,7 @@ from typing import Any
 
 import ik_chrome_auto.browser as browser_module
 from ik_chrome_auto.browser import ChromeProfileSession, _image_has_visible_content
-from ik_chrome_auto.game2048 import RGBImage, decode_png
+from ik_chrome_auto.image_utils import RGBImage, decode_png
 
 
 ASSET = (
@@ -13,7 +13,7 @@ ASSET = (
     / "src"
     / "ik_chrome_auto"
     / "assets"
-    / "2048-reference.png"
+    / "browser-capture-reference.png"
 )
 ASSET_PNG = ASSET.read_bytes()
 BOX = {"x": 12.5, "y": 34.25, "width": 500.0, "height": 300.0}
@@ -187,25 +187,6 @@ def test_farm_state_keeps_browser_capture_when_headless() -> None:
     session.detect_farm_state()
 
     assert capture_preferences == [True]
-
-
-def test_capture_and_swipe_reuse_one_page_cdp_session() -> None:
-    session, canvas, context, _page = make_session()
-    session._direct_canvas_capture_supported = False
-
-    session.capture_game_surface_png()
-    session.capture_game_surface_png()
-    session.swipe_game_surface("left", (0, 0, 100, 100), (100, 100))
-
-    cdp = context.sessions[0]
-    assert context.new_session_calls == 1
-    assert sum(method == "Page.captureScreenshot" for method, _ in cdp.calls) == 2
-    assert sum(
-        method == "Input.dispatchTouchEvent" and params["type"] == "touchStart"
-        for method, params in cdp.calls
-    ) == 1
-    assert cdp.detach_calls == 0
-    assert canvas.screenshot_calls == 0
 
 
 def test_scroll_game_surface_sends_wheel_at_canvas_centre() -> None:

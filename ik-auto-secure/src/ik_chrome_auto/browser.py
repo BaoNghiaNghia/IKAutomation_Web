@@ -16,7 +16,7 @@ from ik_chrome_auto.interaction import (
     calculate_target_point,
     validate_viewport,
 )
-from ik_chrome_auto.game2048 import RGBImage, decode_png
+from ik_chrome_auto.image_utils import RGBImage, decode_png
 from ik_chrome_auto.config import is_allowed_url
 from ik_chrome_auto.models import AppConfig, ProfileConfig, ProfileMode
 from ik_chrome_auto.reader import GameDataReader, redact_url
@@ -773,67 +773,6 @@ class ChromeProfileSession:
         if not _png_has_visible_content(png):
             raise RuntimeError("Ảnh màn hình game trống; hãy đưa cửa sổ profile ra màn hình")
         return png
-
-    def swipe_game_surface(
-        self,
-        direction: str,
-        grid_box: tuple[int, int, int, int],
-        image_size: tuple[int, int],
-    ) -> None:
-        """Swipe inside a detected board using screenshot-relative coordinates."""
-        if direction not in {"left", "right", "up", "down"}:
-            raise ValueError(f"Hướng vuốt không hợp lệ: {direction}")
-        frame = self.find_frame()
-        _canvas, surface = self._largest_canvas(frame)
-        image_width, image_height = image_size
-        left, top, right, bottom = grid_box
-        board_left = surface["x"] + surface["width"] * left / image_width
-        board_right = surface["x"] + surface["width"] * right / image_width
-        board_top = surface["y"] + surface["height"] * top / image_height
-        board_bottom = surface["y"] + surface["height"] * bottom / image_height
-        centre_x = (board_left + board_right) / 2.0
-        centre_y = (board_top + board_bottom) / 2.0
-        inset_x = (board_right - board_left) * 0.22
-        inset_y = (board_bottom - board_top) * 0.22
-        points = {
-            "left": ((board_right - inset_x, centre_y), (board_left + inset_x, centre_y)),
-            "right": ((board_left + inset_x, centre_y), (board_right - inset_x, centre_y)),
-            "up": ((centre_x, board_bottom - inset_y), (centre_x, board_top + inset_y)),
-            "down": ((centre_x, board_top + inset_y), (centre_x, board_bottom - inset_y)),
-        }
-        start, end = points[direction]
-        # The mini game is implemented for mobile touch input.  A Playwright
-        # mouse drag can focus/flash the Chrome window without moving the
-        # board.  CDP touch events work without moving the real cursor and are
-        # handled by the same swipe listener as a phone.
-        cdp = self._get_page_cdp_session(self.page)
-
-        def touch_point(x: float, y: float) -> dict[str, float | int]:
-            return {
-                "x": x,
-                "y": y,
-                "radiusX": 2,
-                "radiusY": 2,
-                "force": 1,
-                "id": 1,
-            }
-
-        cdp.send(
-            "Input.dispatchTouchEvent",
-            {"type": "touchStart", "touchPoints": [touch_point(*start)]},
-        )
-        for step in range(1, 10):
-            ratio = step / 9.0
-            x = start[0] + (end[0] - start[0]) * ratio
-            y = start[1] + (end[1] - start[1]) * ratio
-            cdp.send(
-                "Input.dispatchTouchEvent",
-                {"type": "touchMove", "touchPoints": [touch_point(x, y)]},
-            )
-        cdp.send(
-                "Input.dispatchTouchEvent",
-                {"type": "touchEnd", "touchPoints": []},
-            )
 
     def _largest_canvas(self, frame: Frame) -> tuple[Any, dict[str, float]]:
         canvases = frame.locator("canvas")

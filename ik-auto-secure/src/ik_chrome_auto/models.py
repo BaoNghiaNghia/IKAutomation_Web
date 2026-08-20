@@ -20,13 +20,6 @@ class WorkerState(StrEnum):
     ERROR = "error"
 
 
-class Auto2048Speed(StrEnum):
-    SAFE = "safe"
-    BALANCED = "balanced"
-    FAST = "fast"
-    TURBO = "turbo"
-
-
 class CommandKind(StrEnum):
     OPEN = "open"
     READ = "read"
@@ -39,11 +32,8 @@ class CommandKind(StrEnum):
     SET_SCROLLBARS = "set_scrollbars"
     MOVE_WINDOW = "move_window"
     SET_TOPMOST = "set_topmost"
-    START_2048 = "start_2048"
-    STOP_2048 = "stop_2048"
     START_FARM = "start_farm"
     STOP_FARM = "stop_farm"
-    SET_2048_SPEED = "set_2048_speed"
     STOP = "stop"
     SHUTDOWN = "shutdown"
 
@@ -96,7 +86,6 @@ class AppConfig:
     data_dir: Path
     browser: BrowserSettings
     capture: CaptureSettings
-    auto_2048_speed: Auto2048Speed = Auto2048Speed.BALANCED
     profiles: list[ProfileConfig] = field(default_factory=list)
 
     def profile(self, profile_id: str) -> ProfileConfig:

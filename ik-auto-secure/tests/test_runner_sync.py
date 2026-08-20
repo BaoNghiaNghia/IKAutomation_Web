@@ -2,16 +2,10 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 
 import ik_chrome_auto.runner as runner_module
-from ik_chrome_auto.models import Auto2048Speed, CommandKind, WorkerCommand
-from ik_chrome_auto.runner import (
-    AUTO_2048_TARGET_LEVEL,
-    AUTO_2048_TIMINGS,
-    MultiProfileRunner,
-    ProfileWorker,
-)
+from ik_chrome_auto.models import CommandKind, WorkerCommand
+from ik_chrome_auto.runner import MultiProfileRunner
 from ik_chrome_auto.windows import ProcessResourceUsage
 
 
@@ -107,97 +101,6 @@ def test_global_scrollbar_toggle_routes_to_every_profile() -> None:
         and worker.commands[-1].payload == {"visible": False}
         for worker in runner.workers.values()
     )
-
-
-def test_2048_speed_modes_are_ordered_from_safe_to_turbo() -> None:
-    delays = [
-        AUTO_2048_TIMINGS[speed].move_delay_seconds
-        for speed in (
-            Auto2048Speed.SAFE,
-            Auto2048Speed.BALANCED,
-            Auto2048Speed.FAST,
-            Auto2048Speed.TURBO,
-        )
-    ]
-    assert delays == sorted(delays, reverse=True)
-    assert delays == [1.20, 0.80, 0.55, 0.35]
-
-
-def test_global_2048_speed_routes_to_every_worker() -> None:
-    runner = make_runner()
-    runner.config = type(
-        "Config",
-        (),
-        {
-            "auto_2048_speed": Auto2048Speed.BALANCED,
-            "profiles": [
-                type("Profile", (), {"id": "master"})(),
-                type("Profile", (), {"id": "follower-open"})(),
-                type("Profile", (), {"id": "follower-closed"})(),
-            ],
-        },
-    )()
-
-    runner.set_auto_2048_speed(Auto2048Speed.FAST)
-
-    assert runner.auto_2048_speed == Auto2048Speed.FAST
-    assert runner.config.auto_2048_speed == Auto2048Speed.FAST
-    assert all(
-        worker.commands[-1].kind == CommandKind.SET_2048_SPEED
-        and worker.commands[-1].payload == {"speed": "fast"}
-        for worker in runner.workers.values()
-    )
-
-
-def test_auto_2048_stops_before_swipe_when_level_12_is_reached() -> None:
-    class Session:
-        def __init__(self) -> None:
-            self.swipes = 0
-
-        def capture_game_surface_png(self):
-            return b"png", {}
-
-        def swipe_game_surface(self, *_args, **_kwargs) -> None:
-            self.swipes += 1
-
-    board = (
-        (12, 1, 0, 0),
-        (2, 3, 4, 0),
-        (5, 6, 7, 0),
-        (8, 9, 10, 11),
-    )
-    scan = SimpleNamespace(
-        board=board,
-        grid=SimpleNamespace(box={}),
-        image_width=500,
-        image_height=300,
-        confidence=1.0,
-    )
-    player = SimpleNamespace(
-        plan=lambda _png: SimpleNamespace(
-            scan=scan,
-            direction="left",
-            depth=3,
-            waiting=False,
-        ),
-        stale_retries=0,
-    )
-    worker = ProfileWorker.__new__(ProfileWorker)
-    worker.session = Session()
-    worker._auto_2048 = player
-    worker._auto_2048_speed = Auto2048Speed.BALANCED
-    worker._auto_2048_errors = 0
-    updates: list[tuple[object, str, str]] = []
-    worker._publish = lambda state, message, detail="": updates.append(
-        (state, message, detail)
-    )
-
-    worker._run_2048_tick()
-
-    assert AUTO_2048_TARGET_LEVEL == 12
-    assert worker._auto_2048 is None
-    assert worker.session.swipes == 0
-    assert "đạt level 12" in updates[-1][1]
 
 
 def test_resource_overview_sums_open_profile_process_trees(monkeypatch) -> None:

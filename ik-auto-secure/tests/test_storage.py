@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from ik_chrome_auto.game2048 import decode_png
+from ik_chrome_auto.image_utils import decode_png
 from ik_chrome_auto.storage import upscale_png_for_diagnostics, write_retained_json, write_retained_png
 from ik_chrome_auto.windows import encode_rgb_png
 

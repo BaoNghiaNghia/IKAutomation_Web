@@ -9,6 +9,14 @@ def test_unknown_state_never_allows_input() -> None:
     assert decision.input_allowed is False
 
 
+def test_new_cycle_entering_on_world_map_must_verify_city_first() -> None:
+    farm = FarmWorkflow()
+
+    assert farm.decide(FarmGameState.WORLD_MAP).step == FarmStep.RETURN_TO_CITY
+    assert farm.decide(FarmGameState.WORLD_MAP).step == FarmStep.RETURN_TO_CITY
+    assert farm.decide(FarmGameState.CITY).step == FarmStep.ENTER_WORLD_MAP
+
+
 def test_happy_path_completes_exactly_one_verified_dispatch() -> None:
     farm = FarmWorkflow()
     assert farm.decide(FarmGameState.CITY).step == FarmStep.ENTER_WORLD_MAP

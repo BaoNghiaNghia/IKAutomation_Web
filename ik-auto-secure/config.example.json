@@ -28,9 +28,6 @@
     "capture_response_bodies": false,
     "snapshot_retention": 50
   },
-  "automation": {
-    "auto_2048_speed": "balanced"
-  },
   "profiles": [
     {
       "id": "main",

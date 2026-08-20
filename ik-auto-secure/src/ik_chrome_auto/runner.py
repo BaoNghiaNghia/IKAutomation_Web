@@ -11,12 +11,10 @@ from pathlib import Path
 from ik_chrome_auto.actions import ActionCancelled, AutomationFunctions
 from ik_chrome_auto.browser import ChromeProfileSession
 from ik_chrome_auto.event_log import JsonLineLog
-from ik_chrome_auto.game2048 import Auto2048Player, board_text
 from ik_chrome_auto.farm_vision import DetectedGameState, FarmTemplateId, TeamRosterRow
 from ik_chrome_auto.farm_workflow import FarmGameState, FarmStep, FarmWorkflow
 from ik_chrome_auto.models import (
     AppConfig,
-    Auto2048Speed,
     CommandKind,
     ProfileConfig,
     WorkerCommand,
@@ -41,23 +39,6 @@ from ik_chrome_auto.windows import (
 UpdateCallback = Callable[[WorkerSnapshot], None]
 InputCallback = Callable[[str, dict[str, object]], None]
 CoordinateCallback = Callable[[str, dict[str, object]], None]
-
-
-@dataclass(frozen=True, slots=True)
-class Auto2048Timing:
-    label: str
-    move_delay_seconds: float
-    pending_delay_seconds: float
-
-
-AUTO_2048_TIMINGS = {
-    Auto2048Speed.SAFE: Auto2048Timing("An toàn", 1.20, 0.50),
-    Auto2048Speed.BALANCED: Auto2048Timing("Cân bằng", 0.80, 0.35),
-    Auto2048Speed.FAST: Auto2048Timing("Nhanh", 0.55, 0.25),
-    Auto2048Speed.TURBO: Auto2048Timing("Turbo", 0.35, 0.18),
-}
-
-AUTO_2048_TARGET_LEVEL = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +73,6 @@ class ProfileWorker:
         drag_item_visible: bool = True,
         scrollbars_visible: bool = False,
         topmost: bool = False,
-        auto_2048_speed: Auto2048Speed = Auto2048Speed.BALANCED,
     ) -> None:
         self.config = config
         self.profile = profile
@@ -120,10 +100,6 @@ class ProfileWorker:
         self._drag_item_visible = drag_item_visible
         self._scrollbars_visible = scrollbars_visible
         self._topmost = topmost
-        self._auto_2048: Auto2048Player | None = None
-        self._auto_2048_next_at = 0.0
-        self._auto_2048_errors = 0
-        self._auto_2048_speed = auto_2048_speed
         self._farm: FarmWorkflow | None = None
         self._farm_next_at = 0.0
         self._farm_city_clicks = 0
@@ -213,8 +189,6 @@ class ProfileWorker:
                         pass
                     if self.session is not None and not self.session.is_alive():
                         self._handle_external_close()
-                    elif self._auto_2048 is not None and time.monotonic() >= self._auto_2048_next_at:
-                        self._run_2048_tick()
                     elif self._farm is not None and time.monotonic() >= self._farm_next_at:
                         self._run_farm_tick()
                 continue
@@ -226,26 +200,6 @@ class ProfileWorker:
                 if command.kind == CommandKind.STOP:
                     self._close_session()
                     self._publish(WorkerState.STOPPED, "Đã dừng profile")
-                    continue
-                if command.kind == CommandKind.START_2048:
-                    if self.session is None:
-                        self._publish(WorkerState.STARTING, "Đang mở profile cho Auto 2048")
-                        self._ensure_session(navigate=True)
-                    self._auto_2048 = Auto2048Player()
-                    self._auto_2048_errors = 0
-                    self._auto_2048_next_at = 0.0
-                    timing = AUTO_2048_TIMINGS[self._auto_2048_speed]
-                    self._publish(
-                        WorkerState.RUNNING,
-                        f"Auto 2048 Smart đã bật | tốc độ={timing.label}",
-                    )
-                    continue
-                if command.kind == CommandKind.STOP_2048:
-                    self._auto_2048 = None
-                    self._publish(
-                        WorkerState.READY if self.session is not None else WorkerState.STOPPED,
-                        "Đã dừng Auto 2048",
-                    )
                     continue
                 if command.kind == CommandKind.START_FARM:
                     if self.session is None:
@@ -287,17 +241,6 @@ class ProfileWorker:
                     self._farm = None
                     self._log_farm("stopped", {"reason": "user"})
                     self._publish(WorkerState.READY if self.session is not None else WorkerState.STOPPED, "Đã dừng Auto Farm")
-                    continue
-                if command.kind == CommandKind.SET_2048_SPEED:
-                    self._auto_2048_speed = Auto2048Speed(
-                        str(command.payload.get("speed", Auto2048Speed.BALANCED.value))
-                    )
-                    if self._auto_2048 is not None:
-                        timing = AUTO_2048_TIMINGS[self._auto_2048_speed]
-                        self._publish(
-                            WorkerState.RUNNING,
-                            f"Đã đổi tốc độ Auto 2048: {timing.label}",
-                        )
                     continue
                 if command.kind == CommandKind.SET_SYNC_SOURCE:
                     self._sync_source_enabled = bool(command.payload.get("enabled", False))
@@ -434,48 +377,6 @@ class ProfileWorker:
             self.stop_event,
             lambda message: self._publish(WorkerState.RUNNING, message),
         )
-
-    def _run_2048_tick(self) -> None:
-        if self.session is None or self._auto_2048 is None:
-            return
-        png: bytes | None = None
-        timing = AUTO_2048_TIMINGS[self._auto_2048_speed]
-        try:
-            png, _surface = self.session.capture_game_surface_png()
-            decision = self._auto_2048.plan(png)
-            maximum = max(value for row in decision.scan.board for value in row)
-            if maximum >= AUTO_2048_TARGET_LEVEL:
-                self._auto_2048 = None
-                self._publish(WorkerState.COMPLETED, f"Auto 2048 đã dừng khi đạt level {AUTO_2048_TARGET_LEVEL}", board_text(decision.scan.board))
-                return
-            if decision.waiting:
-                self._auto_2048_next_at = time.monotonic() + timing.pending_delay_seconds
-                if self._auto_2048.stale_retries == 1:
-                    self._publish(WorkerState.RUNNING, "Auto 2048 đang chờ bàn cập nhật; không gửi lặp touch", board_text(decision.scan.board))
-                return
-            if decision.direction is None:
-                self._auto_2048 = None
-                self._publish(WorkerState.COMPLETED, f"2048 kết thúc; ô cao nhất={maximum}", board_text(decision.scan.board))
-                return
-            self.session.swipe_game_surface(decision.direction, decision.scan.grid.box, (decision.scan.image_width, decision.scan.image_height))
-            self._auto_2048_errors = 0
-            self._auto_2048_next_at = time.monotonic() + timing.move_delay_seconds
-            arrows = {"left": "←", "right": "→", "up": "↑", "down": "↓"}
-            self._publish(WorkerState.RUNNING, f"Auto 2048 {arrows[decision.direction]} | max={maximum} | AI depth={decision.depth} | tin cậy={decision.scan.confidence:.0%} | tốc độ={timing.label}", board_text(decision.scan.board))
-        except Exception as error:
-            self._auto_2048_errors += 1
-            self._auto_2048_next_at = time.monotonic() + 1.0
-            debug_path: Path | None = None
-            if png is not None and self._auto_2048_errors in {1, 6}:
-                debug_dir = self.config.data_dir / "screenshots" / self.profile.id
-                debug_dir.mkdir(parents=True, exist_ok=True)
-                debug_path = debug_dir / f"2048-debug-{time.strftime('%Y%m%d-%H%M%S')}.png"
-                write_retained_png(debug_path, png, keep=2)
-            if self._auto_2048_errors >= 6:
-                self._auto_2048 = None
-                self._publish(WorkerState.ERROR, f"Auto 2048 đã dừng: {error}", f"{type(error).__name__}: {error}" + (f" | ảnh debug: {debug_path}" if debug_path else ""))
-            elif self._auto_2048_errors == 1:
-                self._publish(WorkerState.RUNNING, f"Auto 2048 đang chờ nhận dạng ({self._auto_2048_errors}/6): {error}", f"Ảnh debug: {debug_path}" if debug_path else "")
 
     def _run_farm_tick(self) -> None:
         """Perform only the first fully template-verified City → World Map step.
@@ -888,6 +789,44 @@ class ProfileWorker:
                 target_verified=city.actionable,
                 team_selected=expected_team_selected,
             )
+            if self._farm_return_city_click_at > 0:
+                elapsed_after_return = time.monotonic() - self._farm_return_city_click_at
+                if state == FarmGameState.CITY:
+                    self._farm_return_city_click_at = 0.0
+                    self._log_farm("city_verified_for_cycle", {"elapsed_seconds": round(elapsed_after_return, 2)})
+                elif elapsed_after_return <= 8.0:
+                    self._farm_next_at = time.monotonic() + 0.7
+                    self._publish(WorkerState.RUNNING, "Auto Farm: đã yêu cầu về City, đang xác minh")
+                    return
+                else:
+                    screenshot = self._save_farm_debug_capture("city-unverified")
+                    self._log_farm(
+                        "error",
+                        {"reason": "city_unverified_before_cycle", "screenshot": str(screenshot) if screenshot else None},
+                    )
+                    self._farm = None
+                    self._publish(
+                        WorkerState.ERROR,
+                        "Auto Farm dừng an toàn: chưa xác minh được City trước cycle mới",
+                        f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                    )
+                    return
+            if decision.step == FarmStep.RETURN_TO_CITY and state == FarmGameState.WORLD_MAP:
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
+                fresh_city = fresh.evidence_for(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
+                if fresh.state != DetectedGameState.WORLD_MAP or not fresh_city.actionable:
+                    self._farm_next_at = time.monotonic() + 0.8
+                    self._publish(WorkerState.RUNNING, "Auto Farm: chờ nút City ổn định trước cycle mới")
+                    return
+                # This circular HUD control ignores synthetic touch on some
+                # browser skins. It has just been freshly matched on World
+                # Map, so use the CDP mouse fallback for this state change.
+                self.session.click_farm_template_mouse(fresh_city.bounds, fresh_size)  # type: ignore[arg-type]
+                self._farm_return_city_click_at = time.monotonic()
+                self._log_farm("tap_return_to_city", {"bounds": fresh_city.bounds, "method": "mouse"})
+                self._farm_next_at = time.monotonic() + 1.2
+                self._publish(WorkerState.RUNNING, "Auto Farm: đang về City để bắt đầu cycle mới")
+                return
             if (
                 self._farm.step == FarmStep.OPEN_SEARCH
                 and state in {FarmGameState.CITY, FarmGameState.WORLD_MAP}
@@ -1817,7 +1756,6 @@ class ProfileWorker:
         return write_retained_png(path, upscale_png_for_diagnostics(png), keep=10)
 
     def _close_session(self) -> None:
-        self._auto_2048 = None
         self._farm = None
         if self.session is None:
             return
@@ -1827,7 +1765,6 @@ class ProfileWorker:
             self.session = None
 
     def _handle_external_close(self) -> None:
-        self._auto_2048 = None
         self._farm = None
         if self.session is None:
             return
@@ -1855,7 +1792,6 @@ class MultiProfileRunner:
         self.drag_items_visible = True
         self.scrollbars_visible = False
         self.windows_topmost = False
-        self.auto_2048_speed = config.auto_2048_speed
         self._resource_cpu_samples: dict[str, tuple[float, float]] = {}
         self._sync_lock = threading.Lock()
         self.sync_profiles()
@@ -1878,7 +1814,6 @@ class MultiProfileRunner:
                     drag_item_visible=self.drag_items_visible,
                     scrollbars_visible=self.scrollbars_visible,
                     topmost=self.windows_topmost,
-                    auto_2048_speed=self.auto_2048_speed,
                 )
 
     def submit(self, profile_id: str, kind: CommandKind, **payload: object) -> None:
@@ -1898,17 +1833,6 @@ class MultiProfileRunner:
         for profile in self.config.profiles:
             if profile.enabled:
                 self.submit(profile.id, CommandKind.RESIZE, width=width, height=height)
-
-    def set_auto_2048_speed(self, speed: Auto2048Speed) -> None:
-        self.auto_2048_speed = Auto2048Speed(speed)
-        self.config.auto_2048_speed = self.auto_2048_speed
-        for profile in self.config.profiles:
-            if profile.id in self.workers:
-                self.submit(
-                    profile.id,
-                    CommandKind.SET_2048_SPEED,
-                    speed=self.auto_2048_speed.value,
-                )
 
     def enable_sync(self, master_id: str) -> None:
         if master_id not in self.workers:
@@ -1978,11 +1902,19 @@ class MultiProfileRunner:
                 count += 1
         return count
 
-    def arrange_windows(self, columns_per_row: int | None = None) -> int:
-        if columns_per_row is not None and not 2 <= int(columns_per_row) <= 6:
-            raise ValueError("Số cửa sổ mỗi hàng phải từ 2 đến 6")
+    def arrange_windows(
+        self,
+        columns_per_row: int | None = None,
+        *,
+        profile_ids: set[str] | None = None,
+    ) -> int:
+        """Tile the requested profiles left-to-right, then top-to-bottom."""
+        if columns_per_row is not None and not 1 <= int(columns_per_row) <= 6:
+            raise ValueError("Số cửa sổ mỗi hàng phải từ 1 đến 6")
         opened: list[tuple[str, int, WindowRect, WindowRect]] = []
         for profile in self.config.profiles:
+            if profile_ids is not None and profile.id not in profile_ids:
+                continue
             worker = self.workers.get(profile.id)
             session = worker.session if worker else None
             if session is None:

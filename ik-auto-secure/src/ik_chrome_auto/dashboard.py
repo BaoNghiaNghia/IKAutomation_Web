@@ -17,15 +17,14 @@ from qfluentwidgets import CardWidget, CheckBox, ComboBox, FluentIcon as FIF, Li
 
 from ik_chrome_auto.config import ensure_data_dirs, load_config, save_config, unique_profile_id
 from ik_chrome_auto.interaction import format_coordinate
-from ik_chrome_auto.models import Auto2048Speed, CommandKind, ProfileConfig, ProfileMode, WorkerSnapshot, WorkerState
-from ik_chrome_auto.runner import AUTO_2048_TIMINGS, MultiProfileRunner
+from ik_chrome_auto.models import CommandKind, ProfileConfig, ProfileMode, WorkerSnapshot, WorkerState
+from ik_chrome_auto.runner import MultiProfileRunner
 from ik_chrome_auto.two_factor import TwoFactorEnrollment, TwoFactorService
 
 # Windows Hello implementation remains available in windows_auth.py, but is
 # intentionally disabled while Google Authenticator is the primary verifier.
 WINDOWS_HELLO_ENABLED = False
 
-SPEED_LABELS = {key: f"{value.label} ({value.move_delay_seconds:.2f}s)" for key, value in AUTO_2048_TIMINGS.items()}
 _launch_terminal_window = 0
 
 
@@ -65,7 +64,6 @@ class ProfileRow:
     resource: QLabel
     badge: QLabel
     inspect: PushButton
-    auto: PushButton
     farm: PushButton
     card: CardWidget
 
@@ -82,8 +80,13 @@ class Dashboard(QWidget):
         self._log_lines: deque[str] = deque(maxlen=10)
         self.last_coordinate: tuple[str, dict[str, object]] | None = None
         self.inspecting_profile_id: str | None = None
-        self.auto_profiles: set[str] = set()
         self.farm_profiles: set[str] = set()
+        self._farm_launch_profiles: set[str] = set()
+        self._farm_launcher_phase = "launch"
+        self._farm_open_states: dict[str, WorkerState] = {}
+        self._farm_open_queue: deque[str] = deque()
+        self._farm_next_open_at = 0.0
+        self._farm_open_deadline = 0.0
         self._auto_arrange_targets: set[str] | None = None
         self._auto_arrange_states: dict[str, WorkerState] = {}
         self._auto_arrange_deadline = 0.0
@@ -126,9 +129,12 @@ class Dashboard(QWidget):
         for index, (label, value) in enumerate((("Tổng profile",self.total),("Đang mở",self.opened),("RAM Chrome",self.ram),("CPU Chrome",self.cpu))):
             cell = QWidget(); cl = QVBoxLayout(cell); cl.setContentsMargins(0,0,0,0); cl.setSpacing(1); caption = self._muted(label); caption.setStyleSheet("color:#62758e;background:transparent;font-size:11px;"); value.setStyleSheet("font-size:16px;font-weight:700;"); cl.addWidget(caption); cl.addWidget(value); ol.addWidget(cell, index // 2, index % 2)
         ll.addWidget(overview)
-        accounts = self._card(); al = QVBoxLayout(accounts); al.addWidget(StrongBodyLabel("Tài khoản Chrome")); al.addWidget(self._muted("Mỗi tài khoản có một phiên browser riêng, lưu cục bộ.")); actions = QHBoxLayout(); actions.setSpacing(7); manage = PushButton("Quản lý tài khoản"); manage.setFixedSize(140, 34); manage.setStyleSheet("QPushButton { background:#ffffff; border:1px solid #8ad7d9; border-radius:8px; color:#087f8c; } QPushButton:hover { background:#effcfb; border-color:#0ea5a5; }"); manage.clicked.connect(self._manage_accounts); open_all = PrimaryPushButton("Mở tất cả"); open_all.setFixedSize(100, 34); open_all.setStyleSheet("QPushButton { background:#3b82f6; border:1px solid #3b82f6; border-radius:8px; color:#ffffff; } QPushButton:hover { background:#2563eb; border-color:#2563eb; }"); open_all.clicked.connect(self._open_all_and_arrange); stop_all = self._icon_button(FIF.CLOSE, "Dừng tất cả profile đang chạy"); stop_all.setIcon(FIF.CLOSE.icon(color=QColor("#ffffff"))); stop_all.setStyleSheet("QToolButton { background:#ef4444; border:1px solid #ef4444; border-radius:8px; color:#ffffff; } QToolButton:hover { background:#dc2626; border-color:#dc2626; }"); stop_all.clicked.connect(self.runner.stop_all); actions.addWidget(manage); actions.addWidget(open_all); actions.addWidget(stop_all); actions.addStretch(); al.addLayout(actions); ll.addWidget(accounts)
+        accounts = self._card(); al = QVBoxLayout(accounts); al.addWidget(StrongBodyLabel("Tài khoản Chrome")); al.addWidget(self._muted("Mỗi tài khoản có một phiên browser riêng, lưu cục bộ."))
+        manage = PushButton("Quản lý tài khoản"); manage.setFixedHeight(34); manage.setStyleSheet("QPushButton { background:#ffffff; border:1px solid #8ad7d9; border-radius:8px; color:#087f8c; } QPushButton:hover { background:#effcfb; border-color:#0ea5a5; }"); manage.clicked.connect(self._manage_accounts)
+        self.farm_launcher = PrimaryPushButton("Khởi động Farm"); self.farm_launcher.setFixedHeight(34); self.farm_launcher.setStyleSheet("QPushButton { background:#0ea5a5; border:1px solid #0ea5a5; border-radius:8px; color:#ffffff; font-weight:600; } QPushButton:hover { background:#078b8b; border-color:#078b8b; } QPushButton:disabled { background:#9ccfd0; border-color:#9ccfd0; color:#efffff; }"); self.farm_launcher.clicked.connect(self._farm_launcher_action)
+        primary_actions = QHBoxLayout(); primary_actions.setSpacing(7); primary_actions.addWidget(manage, 1); primary_actions.addWidget(self.farm_launcher, 1); al.addLayout(primary_actions); ll.addWidget(accounts)
         arrange_card = self._card(); acl = QVBoxLayout(arrange_card); acl.addWidget(StrongBodyLabel("Sắp xếp cửa sổ")); acl.addWidget(self._muted("Chọn số cửa sổ trên mỗi hàng rồi áp dụng cho Chrome đang mở.")); row = QHBoxLayout(); row.addWidget(QLabel("Số cửa sổ / hàng")); row.addStretch(); self.windows_per_row = ComboBox(); self.windows_per_row.addItems(["2","3","4","5","6"]); self.windows_per_row.setCurrentText(str(self.config.browser.windows_per_row)); self.windows_per_row.currentTextChanged.connect(self._apply_windows_per_row); row.addWidget(self.windows_per_row); acl.addLayout(row); apply = PrimaryPushButton("Áp dụng & sắp xếp"); apply.clicked.connect(self._arrange); acl.addWidget(apply); tools = QHBoxLayout(); self.drag = PushButton("Ẩn nút kéo"); self.drag.clicked.connect(self._toggle_drag); self.scrollbars = PushButton("Hiện thanh cuộn"); self.scrollbars.clicked.connect(self._toggle_scrollbars); self.pin = CheckBox("Luôn nổi trên các cửa sổ khác"); self.pin.stateChanged.connect(lambda _s: self.runner.set_all_topmost(self.pin.isChecked())); tools.addWidget(self.drag); tools.addWidget(self.scrollbars); acl.addLayout(tools); acl.addWidget(self.pin); ll.addWidget(arrange_card)
-        automation = self._card(); au = QVBoxLayout(automation); au.addWidget(StrongBodyLabel("Tự động hóa")); au.addWidget(self._muted("Sync thao tác · Auto 2048")); sync = QHBoxLayout(); self.master = ComboBox(); sync.addWidget(self.master,1); self.sync = PushButton("Bật sync chuột"); self.sync.clicked.connect(self._toggle_sync); sync.addWidget(self.sync); au.addLayout(sync); self.sync_status = self._muted("Sync đang tắt"); au.addWidget(self.sync_status); speed = QHBoxLayout(); self.speed = ComboBox(); self.speed.addItems(list(SPEED_LABELS.values())); self.speed.setCurrentText(SPEED_LABELS[self.config.auto_2048_speed]); save_speed = PushButton("Lưu tốc độ"); save_speed.clicked.connect(self._save_speed); speed.addWidget(self.speed,1); speed.addWidget(save_speed); au.addLayout(speed); ll.addWidget(automation); ll.addStretch()
+        automation = self._card(); au = QVBoxLayout(automation); au.addWidget(StrongBodyLabel("Đồng bộ chuột")); au.addWidget(self._muted("Chọn profile master để đồng bộ thao tác.")); sync = QHBoxLayout(); self.master = ComboBox(); sync.addWidget(self.master,1); self.sync = PushButton("Bật sync chuột"); self.sync.clicked.connect(self._toggle_sync); sync.addWidget(self.sync); au.addLayout(sync); self.sync_status = self._muted("Sync đang tắt"); au.addWidget(self.sync_status); ll.addWidget(automation); ll.addStretch()
         right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8); body.addWidget(right,1)
         progress = self._card(); pl = QVBoxLayout(progress); ph = QHBoxLayout(); ph.addWidget(StrongBodyLabel("Tiến trình profile")); ph.addStretch(); self.open_badge = QLabel("0 đang mở"); self.open_badge.setStyleSheet("background:#e2edff;color:#2767bd;border-radius:10px;padding:3px 8px;"); ph.addWidget(self.open_badge); pl.addLayout(ph); self.table_layout = QGridLayout(); self.table_layout.setSpacing(8); self.table_layout.setColumnStretch(0, 1); self.table_layout.setColumnStretch(1, 1); content=QWidget(); content.setLayout(self.table_layout); self.scroll=QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setWidget(content); pl.addWidget(self.scroll,1); rl.addWidget(progress,1)
         foot=QHBoxLayout(); coords=self._card(); cl=QVBoxLayout(coords); ch=QHBoxLayout(); ch.addWidget(StrongBodyLabel("Lấy tọa độ")); ch.addStretch(); bjson=PushButton("JSON"); bjson.clicked.connect(self._copy_json); bxy=PushButton("Copy x,y"); bxy.clicked.connect(self._copy_xy); ch.addWidget(bjson); ch.addWidget(bxy); cl.addLayout(ch); self.coordinate= self._muted("Chưa đo tọa độ"); cl.addWidget(self.coordinate); foot.addWidget(coords,2); logs=self._card(); logl=QVBoxLayout(logs); logl.addWidget(StrongBodyLabel("Nhật ký gần nhất")); self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setFixedHeight(86); logl.addWidget(self.log); foot.addWidget(logs,3); rl.addLayout(foot)
@@ -161,7 +167,7 @@ class Dashboard(QWidget):
         for profile in self.config.profiles:
             self.master.addItem(self._masked_profile_username(profile), profile.id)
         for profile in self.config.profiles:
-            card=self._card(); self._set_roster_tooltip(card, ()); layout=QVBoxLayout(card); top=QHBoxLayout(); top.addWidget(StrongBodyLabel(profile.name)); top.addWidget(self._muted(f"{profile.id} · {profile.mode.value}")); top.addStretch(); badge=QLabel("Đã dừng"); badge.setStyleSheet("background:#f1f5f9;color:#475569;border-radius:10px;padding:3px 8px;"); top.addWidget(badge); layout.addLayout(top); status=self._muted("Đã dừng"); resource=self._muted("—"); details=QHBoxLayout(); details.addWidget(status,1); details.addWidget(resource); layout.addLayout(details); buttons=QHBoxLayout(); buttons.setSpacing(5); open_btn=self._compact_profile_button(PrimaryPushButton("Mở")); open_btn.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.OPEN)); buttons.addWidget(open_btn); farm=self._compact_profile_button(PushButton("Farm")); farm.clicked.connect(lambda _=False,pid=profile.id:self._toggle_farm(pid)); buttons.addWidget(farm); auto=self._compact_profile_button(PushButton("Auto 2048")); auto.clicked.connect(lambda _=False,pid=profile.id:self._toggle_auto(pid)); buttons.addWidget(auto); shot=self._compact_profile_button(PushButton("Ảnh")); shot.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.SCREENSHOT)); buttons.addWidget(shot); inspect=self._compact_profile_button(PushButton("Đo")); inspect.clicked.connect(lambda _=False,pid=profile.id:self._toggle_inspector(pid)); buttons.addWidget(inspect); buttons.addStretch(); delete=self._icon_button(FIF.DELETE,"Xóa profile"); delete.setFixedSize(29,29); delete.clicked.connect(lambda _=False,pid=profile.id:self._remove_profile(pid)); buttons.addWidget(delete); layout.addLayout(buttons); index=len(self.rows); self.table_layout.addWidget(card, index // 2, index % 2); self.rows[profile.id]=ProfileRow(status,resource,badge,inspect,auto,farm,card)
+            card=self._card(); self._set_roster_tooltip(card, ()); layout=QVBoxLayout(card); top=QHBoxLayout(); top.addWidget(StrongBodyLabel(profile.name)); top.addWidget(self._muted(f"{profile.id} · {profile.mode.value}")); top.addStretch(); badge=QLabel("Đã dừng"); badge.setStyleSheet("background:#f1f5f9;color:#475569;border-radius:10px;padding:3px 8px;"); top.addWidget(badge); layout.addLayout(top); status=self._muted("Đã dừng"); resource=self._muted("—"); details=QHBoxLayout(); details.addWidget(status,1); details.addWidget(resource); layout.addLayout(details); buttons=QHBoxLayout(); buttons.setSpacing(5); open_btn=self._compact_profile_button(PrimaryPushButton("Mở")); open_btn.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.OPEN)); buttons.addWidget(open_btn); farm=self._compact_profile_button(PushButton("Farm")); farm.clicked.connect(lambda _=False,pid=profile.id:self._toggle_farm(pid)); buttons.addWidget(farm); shot=self._compact_profile_button(PushButton("Ảnh")); shot.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.SCREENSHOT)); buttons.addWidget(shot); inspect=self._compact_profile_button(PushButton("Đo")); inspect.clicked.connect(lambda _=False,pid=profile.id:self._toggle_inspector(pid)); buttons.addWidget(inspect); buttons.addStretch(); delete=self._icon_button(FIF.DELETE,"Xóa profile"); delete.setFixedSize(29,29); delete.clicked.connect(lambda _=False,pid=profile.id:self._remove_profile(pid)); buttons.addWidget(delete); layout.addLayout(buttons); index=len(self.rows); self.table_layout.addWidget(card, index // 2, index % 2); self.rows[profile.id]=ProfileRow(status,resource,badge,inspect,farm,card)
         self.table_layout.setRowStretch((len(self.rows) + 1) // 2, 1)
 
     @staticmethod
@@ -241,18 +247,149 @@ class Dashboard(QWidget):
         master=str(self.master.currentData() or ""); opened=[p.id for p in self.config.profiles if self.runner.has_open_session(p.id)]
         if master not in opened or len(opened)<2: self._warning("Chưa đủ profile","Hãy mở master và ít nhất một follower trước khi bật sync."); return
         self.runner.enable_sync(master); self.sync.setText("Tắt sync chuột"); self.sync_status.setText(f"MASTER: {master} → {len(opened)-1} follower")
-    def _save_speed(self) -> None:
-        speed=next((key for key,label in SPEED_LABELS.items() if label==self.speed.currentText()),Auto2048Speed.BALANCED); self.runner.set_auto_2048_speed(speed); self.config.auto_2048_speed=speed; save_config(self.config)
-    def _toggle_auto(self,pid:str) -> None:
-        row=self.rows[pid]
-        if pid in self.auto_profiles: self.auto_profiles.remove(pid); row.auto.setText("Auto 2048"); self.runner.submit(pid,CommandKind.STOP_2048)
-        else: self.auto_profiles.add(pid); row.auto.setText("Dừng 2048"); self.runner.submit(pid,CommandKind.START_2048)
     def _toggle_farm(self, pid: str) -> None:
         row = self.rows[pid]
         if pid in self.farm_profiles:
             self.farm_profiles.remove(pid); row.farm.setText("Farm"); self.runner.submit(pid, CommandKind.STOP_FARM)
         else:
             self.farm_profiles.add(pid); row.farm.setText("Dừng Farm"); self.runner.submit(pid, CommandKind.START_FARM)
+
+    def _farm_launcher_action(self) -> None:
+        """Advance the explicit open → run → stop Farm control flow."""
+        if self._farm_launcher_phase == "launch":
+            selected = self._choose_farm_profiles()
+            if not selected:
+                return
+            self._farm_launch_profiles = selected
+            self._farm_open_states = {
+                profile_id: WorkerState.READY
+                for profile_id in selected
+                if self.runner.has_open_session(profile_id)
+            }
+            self._farm_open_queue = deque(
+                profile.id
+                for profile in self.config.profiles
+                if profile.id in selected and not self.runner.has_open_session(profile.id)
+            )
+            pending = len(self._farm_open_queue)
+            self.farm_launcher.setEnabled(False)
+            self.farm_launcher.setText("Đang mở tab…")
+            self._farm_launcher_phase = "opening"
+            self._farm_next_open_at = 0.0
+            self._farm_open_deadline = time.monotonic() + self.config.browser.startup_timeout_ms / 1000
+            self._advance_farm_opening()
+            self._append_log(f"Đang mở {len(selected)} tab để chuẩn bị Farm" + (f" ({pending} tab mới, cách nhau 500 ms)" if pending else ""))
+            return
+        if self._farm_launcher_phase == "ready":
+            for profile_id in self._farm_launch_profiles:
+                if profile_id in self.farm_profiles:
+                    continue
+                self.farm_profiles.add(profile_id)
+                row = self.rows.get(profile_id)
+                if row:
+                    row.farm.setText("Dừng Farm")
+                self.runner.submit(profile_id, CommandKind.START_FARM)
+            self.farm_launcher.setText("Dừng tất cả")
+            self.farm_launcher.setStyleSheet("QPushButton { background:#ef4444; border:1px solid #ef4444; border-radius:8px; color:#ffffff; font-weight:600; } QPushButton:hover { background:#dc2626; border-color:#dc2626; }")
+            self._farm_launcher_phase = "running"
+            self._append_log(f"Đã gửi lệnh chạy Farm cho {len(self._farm_launch_profiles)} profile")
+            return
+        if self._farm_launcher_phase == "running":
+            for profile_id in tuple(self.farm_profiles):
+                self.runner.submit(profile_id, CommandKind.STOP_FARM)
+                row = self.rows.get(profile_id)
+                if row:
+                    row.farm.setText("Farm")
+            stopped = len(self.farm_profiles)
+            self.farm_profiles.clear()
+            self._farm_launch_profiles.clear()
+            self._farm_open_queue.clear()
+            self._farm_launcher_phase = "launch"
+            self.farm_launcher.setText("Khởi động Farm")
+            self._set_farm_launcher_launch_style()
+            self._append_log(f"Đã dừng Farm trên {stopped} profile")
+
+    def _finish_farm_opening_if_ready(self) -> None:
+        """Keep the launcher locked until selected tabs have opened and tiled."""
+        if self._farm_launcher_phase != "opening":
+            return
+        if self._farm_open_queue:
+            return
+        targets = self._farm_launch_profiles
+        ready = {
+            profile_id for profile_id, state in self._farm_open_states.items()
+            if state in {WorkerState.READY, WorkerState.COMPLETED}
+        }
+        failed = {
+            profile_id for profile_id, state in self._farm_open_states.items()
+            if state == WorkerState.ERROR
+        }
+        if ready != targets and not failed and time.monotonic() < self._farm_open_deadline:
+            return
+        if ready != targets:
+            missing = targets - ready
+            self._farm_launcher_phase = "launch"
+            self._farm_launch_profiles.clear()
+            self._farm_open_queue.clear()
+            self.farm_launcher.setEnabled(True)
+            self.farm_launcher.setText("Khởi động Farm")
+            self._set_farm_launcher_launch_style()
+            self._warning("Không mở đủ tab", f"Chưa sẵn sàng: {', '.join(sorted(missing))}")
+            return
+        try:
+            # Farm uses up to six columns so a large selected batch fills the
+            # monitor before continuing to the next row.  The runner keeps
+            # profile order, therefore placement is left → right, top → down.
+            columns = min(6, len(self._farm_launch_profiles))
+            count = self.runner.arrange_windows(
+                columns,
+                profile_ids=self._farm_launch_profiles,
+            )
+        except Exception as error:
+            self._farm_launcher_phase = "launch"
+            self._farm_launch_profiles.clear()
+            self._farm_open_queue.clear()
+            self.farm_launcher.setEnabled(True)
+            self.farm_launcher.setText("Khởi động Farm")
+            self._set_farm_launcher_launch_style()
+            self._error("Không sắp xếp được tab", str(error))
+            return
+        self._farm_launcher_phase = "ready"
+        self.farm_launcher.setEnabled(True)
+        self.farm_launcher.setText("Chạy Farm")
+        self._append_log(
+            f"Đã mở và xếp {count} tab theo {columns} cột (trái → phải, trên → dưới); sẵn sàng chạy Farm"
+        )
+
+    def _advance_farm_opening(self) -> None:
+        """Submit one browser open at a time, with a 500 ms interval."""
+        if self._farm_launcher_phase != "opening" or not self._farm_open_queue:
+            return
+        if time.monotonic() < self._farm_next_open_at:
+            return
+        profile_id = self._farm_open_queue.popleft()
+        self.runner.submit(profile_id, CommandKind.OPEN)
+        self._farm_next_open_at = time.monotonic() + 0.5
+        self._append_log(f"Đang mở tab {profile_id}; còn {len(self._farm_open_queue)} tab trong hàng đợi")
+
+    def _set_farm_launcher_launch_style(self) -> None:
+        self.farm_launcher.setStyleSheet("QPushButton { background:#0ea5a5; border:1px solid #0ea5a5; border-radius:8px; color:#ffffff; font-weight:600; } QPushButton:hover { background:#078b8b; border-color:#078b8b; } QPushButton:disabled { background:#9ccfd0; border-color:#9ccfd0; color:#efffff; }")
+
+    def _choose_farm_profiles(self) -> set[str]:
+        """Return profiles chosen for the next Farm run, without starting them."""
+        profiles = [profile for profile in self.config.profiles if profile.enabled]
+        if not profiles:
+            self._warning("Chưa có profile", "Hãy thêm ít nhất một tài khoản game trước khi chạy Farm.")
+            return set()
+        dialog = FarmProfileDialog(self, profiles, self._farm_launch_profiles or self.farm_profiles)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return set()
+        selected = dialog.selected_profile_ids()
+        if not selected:
+            self._warning("Chưa chọn profile", "Chọn ít nhất một profile để chạy Farm.")
+            return set()
+        return selected
+
     def _toggle_inspector(self,pid:str) -> None:
         if self.inspecting_profile_id==pid: self.runner.set_inspector(pid,False); self.rows[pid].inspect.setText("Đo"); self.inspecting_profile_id=None; return
         if not self.runner.has_open_session(pid): self._warning("Profile chưa mở","Hãy bấm Mở profile trước khi bật đo tọa độ."); return
@@ -333,10 +470,12 @@ class Dashboard(QWidget):
     def _poll(self) -> None:
         try:
             while True:
-                snap=self.updates.get_nowait(); self._auto_arrange_states[snap.profile_id] = snap.state; row=self.rows.get(snap.profile_id)
+                snap=self.updates.get_nowait(); self._auto_arrange_states[snap.profile_id] = snap.state
+                if self._farm_launcher_phase == "opening" and snap.profile_id in self._farm_launch_profiles:
+                    self._farm_open_states[snap.profile_id] = snap.state
+                row=self.rows.get(snap.profile_id)
                 if row:
                     row.status.setText(snap.message); text,bg,fg=self._state(snap.state); row.badge.setText(text); row.badge.setStyleSheet(f"background:{bg};color:{fg};border-radius:10px;padding:3px 8px;"); self._set_profile_card_state(row,snap.state)
-                    if snap.state==WorkerState.STOPPED or "2048" in snap.message: self.auto_profiles.discard(snap.profile_id); row.auto.setText("Auto 2048")
                     self._set_roster_tooltip(row.card, snap.farm_roster)
                     if snap.state in {WorkerState.STOPPED, WorkerState.ERROR} or "Đã dừng Auto Farm" in snap.message: self.farm_profiles.discard(snap.profile_id); row.farm.setText("Farm")
                 self._append_log(f"[{snap.profile_id}] {snap.message}")
@@ -346,6 +485,8 @@ class Dashboard(QWidget):
                 pid,event=self.coordinate_updates.get_nowait(); self.last_coordinate=(pid,event); self.coordinate.setText(format_coordinate(pid,event))
         except queue.Empty: pass
         self._finish_auto_arrange_if_ready()
+        self._advance_farm_opening()
+        self._finish_farm_opening_if_ready()
         now=time.monotonic()
         if now-self._last_resources>=2:
             try:
@@ -477,10 +618,79 @@ class RecoveryCodesDialog(QDialog):
         actions=QHBoxLayout(); copy=PushButton("Sao chép"); copy.clicked.connect(lambda: QApplication.clipboard().setText("\n".join(codes))); actions.addWidget(copy); actions.addStretch(); close=PrimaryPushButton("Đã lưu an toàn"); close.clicked.connect(self.accept); actions.addWidget(close); layout.addLayout(actions)
 
 
+class FarmProfileDialog(QDialog):
+    """Batch picker for starting the same Farm workflow on several profiles."""
+
+    def __init__(self, parent: Dashboard, profiles: list[ProfileConfig], selected: set[str]) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Chọn profile chạy Farm")
+        self.setMinimumWidth(470)
+        self.resize(500, 430)
+        self._checks: dict[str, CheckBox] = {}
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(12)
+        header = QHBoxLayout()
+        title = SubtitleLabel("Chạy Farm")
+        title.setStyleSheet("font-size:20px;font-weight:700;")
+        header.addWidget(title)
+        header.addStretch()
+        check_all = PushButton("Chọn tất cả")
+        clear_all = PushButton("Bỏ chọn")
+        check_all.clicked.connect(self._check_all)
+        clear_all.clicked.connect(self._clear_all)
+        header.addWidget(check_all)
+        header.addWidget(clear_all)
+        layout.addLayout(header)
+        subtitle = QLabel("Chọn các profile muốn khởi động Auto Farm. Profile đang chạy sẽ được giữ nguyên.")
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color:#62758e;")
+        layout.addWidget(subtitle)
+
+        content = QWidget()
+        rows = QVBoxLayout(content)
+        rows.setContentsMargins(4, 4, 4, 4)
+        rows.setSpacing(7)
+        for profile in profiles:
+            check = CheckBox(profile.name)
+            check.setChecked(profile.id in selected)
+            check.setToolTip(profile.id)
+            check.setStyleSheet("CheckBox { background:#f7faff; border:1px solid #dce6f3; border-radius:9px; padding:10px 12px; font-weight:600; } CheckBox:hover { background:#eef6ff; border-color:#9ec5fe; }")
+            self._checks[profile.id] = check
+            rows.addWidget(check)
+        rows.addStretch()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+
+        footer = QHBoxLayout()
+        footer.addStretch()
+        cancel = PushButton("Hủy")
+        cancel.clicked.connect(self.reject)
+        run = PrimaryPushButton("Chạy Farm")
+        run.clicked.connect(self.accept)
+        footer.addWidget(cancel)
+        footer.addWidget(run)
+        layout.addLayout(footer)
+
+    def _check_all(self) -> None:
+        for check in self._checks.values():
+            check.setChecked(True)
+
+    def _clear_all(self) -> None:
+        for check in self._checks.values():
+            check.setChecked(False)
+
+    def selected_profile_ids(self) -> set[str]:
+        return {profile_id for profile_id, check in self._checks.items() if check.isChecked()}
+
+
 class AccountManagerDialog(QDialog):
     """Central CRUD form. Secrets only live in this dialog until saved to Windows Vault."""
     def __init__(self,parent:Dashboard,profiles:list[ProfileConfig])->None:
-        super().__init__(parent); self.rows:list[tuple[str|None,LineEdit,PasswordLineEdit,QWidget]]=[]; self.setWindowTitle("Quản lý tài khoản game"); self.resize(720,520); layout=QVBoxLayout(self); layout.addWidget(SubtitleLabel("Quản lý tài khoản game")); layout.addWidget(QLabel("Thêm, sửa hoặc xóa tài khoản. Password chỉ được lưu mã hóa trong Windows Credential Manager.")); self.list=QVBoxLayout(); self.list.setAlignment(Qt.AlignmentFlag.AlignTop); self.list.setSpacing(8); content=QWidget(); content.setLayout(self.list); scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(content); layout.addWidget(scroll,1); control=QHBoxLayout(); add=PushButton("+ Thêm tài khoản"); add.clicked.connect(lambda:self.add_row()); control.addWidget(add); control.addStretch(); self.show=CheckBox("Hiện password"); self.show.stateChanged.connect(self.toggle_password); control.addWidget(self.show); layout.addLayout(control); actions=QHBoxLayout(); actions.addStretch(); cancel=PushButton("Hủy"); cancel.clicked.connect(self.reject); save=PrimaryPushButton("Lưu thay đổi"); save.clicked.connect(self.validate); actions.addWidget(cancel); actions.addWidget(save); layout.addLayout(actions)
+        super().__init__(parent); self.rows:list[tuple[str|None,LineEdit,PasswordLineEdit,QWidget]]=[]; self._username_warnings:dict[LineEdit,QLabel]={}; self.setWindowTitle("Quản lý tài khoản game"); self.resize(720,520); layout=QVBoxLayout(self); layout.addWidget(SubtitleLabel("Quản lý tài khoản game")); layout.addWidget(QLabel("Thêm, sửa hoặc xóa tài khoản. Password chỉ được lưu mã hóa trong Windows Credential Manager.")); self.search=LineEdit(); self.search.setPlaceholderText("Tìm theo tên tài khoản hoặc username / email"); self.search.addAction(QAction(FIF.SEARCH.icon(),"Tìm kiếm",self.search),QLineEdit.ActionPosition.LeadingPosition); self.search.textChanged.connect(self._filter_rows); layout.addWidget(self.search); self.list=QVBoxLayout(); self.list.setAlignment(Qt.AlignmentFlag.AlignTop); self.list.setSpacing(8); content=QWidget(); content.setLayout(self.list); scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(content); layout.addWidget(scroll,1); control=QHBoxLayout(); add=PushButton("+ Thêm tài khoản"); add.clicked.connect(lambda:self.add_row()); control.addWidget(add); control.addStretch(); self.show=CheckBox("Hiện password"); self.show.stateChanged.connect(self.toggle_password); control.addWidget(self.show); layout.addLayout(control); actions=QHBoxLayout(); actions.addStretch(); cancel=PushButton("Hủy"); cancel.clicked.connect(self.reject); save=PrimaryPushButton("Lưu thay đổi"); save.clicked.connect(self.validate); actions.addWidget(cancel); actions.addWidget(save); layout.addLayout(actions)
         for profile in profiles:
             if profile.mode != ProfileMode.MANAGED: continue
             username=password=""
@@ -491,10 +701,38 @@ class AccountManagerDialog(QDialog):
             except Exception: pass
             self.add_row(profile.id,username,password)
         if not self.rows: self.add_row()
+        self._filter_rows()
     def add_row(self,profile_id:str|None=None,username_value:str="",password_value:str="")->None:
-        row=CardWidget(); row.setFixedHeight(104); row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed); layout=QVBoxLayout(row); layout.setContentsMargins(12,8,12,8); layout.setSpacing(7); header=QHBoxLayout(); header.addWidget(StrongBodyLabel(f"Tài khoản {len(self.rows)+1:02d}")); header.addStretch(); remove=PushButton("×"); remove.setToolTip("Xóa tài khoản"); remove.setFixedSize(32,28); header.addWidget(remove); layout.addLayout(header); fields=QHBoxLayout(); fields.setSpacing(8); username=LineEdit(); username.addAction(QAction(FIF.PEOPLE.icon(),"Username",username),QLineEdit.ActionPosition.LeadingPosition); username.setPlaceholderText("Username / email"); username.setText(username_value); password=PasswordLineEdit(); password.addAction(QAction(FIF.FINGERPRINT.icon(),"Password",password),QLineEdit.ActionPosition.LeadingPosition); password.setPlaceholderText("Password"); password.setText(password_value); fields.addWidget(username); fields.addWidget(password); layout.addLayout(fields); remove.clicked.connect(lambda:self.remove_row(row)); self.rows.append((profile_id,username,password,row)); self.list.addWidget(row)
+        row=CardWidget(); row.setFixedHeight(124); row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed); layout=QVBoxLayout(row); layout.setContentsMargins(12,8,12,8); layout.setSpacing(7); header=QHBoxLayout(); header.addWidget(StrongBodyLabel(f"Tài khoản {len(self.rows)+1:02d}")); header.addStretch(); remove=PushButton("×"); remove.setToolTip("Xóa tài khoản"); remove.setFixedSize(32,28); header.addWidget(remove); layout.addLayout(header); fields=QHBoxLayout(); fields.setSpacing(8); username=LineEdit(); username.addAction(QAction(FIF.PEOPLE.icon(),"Username",username),QLineEdit.ActionPosition.LeadingPosition); username.setPlaceholderText("Username / email"); username.setText(username_value); username_box=QVBoxLayout(); username_box.setContentsMargins(0,0,0,0); username_box.setSpacing(3); username_box.addWidget(username); warning=QLabel("Username đã tồn tại ở một tài khoản khác."); warning.setStyleSheet("color:#dc2626;background:transparent;font-size:11px;"); warning.setVisible(False); username_box.addWidget(warning); password=PasswordLineEdit(); password.addAction(QAction(FIF.FINGERPRINT.icon(),"Password",password),QLineEdit.ActionPosition.LeadingPosition); password.setPlaceholderText("Password"); password.setText(password_value); fields.addLayout(username_box,1); fields.addWidget(password,1,Qt.AlignmentFlag.AlignTop); layout.addLayout(fields); remove.clicked.connect(lambda:self.remove_row(row)); username.textChanged.connect(self._filter_rows); username.textChanged.connect(self._update_username_validation); self.rows.append((profile_id,username,password,row)); self._username_warnings[username]=warning; self.list.addWidget(row); self._filter_rows(); self._update_username_validation()
     def remove_row(self,row:QWidget)->None:
-        self.rows=[item for item in self.rows if item[3] is not row]; self.list.removeWidget(row); row.deleteLater()
+        removed = [item for item in self.rows if item[3] is row]; self.rows=[item for item in self.rows if item[3] is not row];
+        for _, username, _, _ in removed: self._username_warnings.pop(username, None)
+        self.list.removeWidget(row); row.deleteLater(); self._filter_rows(); self._update_username_validation()
+    def _filter_rows(self) -> None:
+        query = self.search.text().strip().casefold()
+        for index, (_profile_id, username, _password, row) in enumerate(self.rows, start=1):
+            haystack = f"tài khoản {index:02d} {username.text()}".casefold()
+            row.setVisible(not query or query in haystack)
+    def _update_username_validation(self) -> bool:
+        values:dict[str,int]={}
+        for _, username, _, _ in self.rows:
+            value=username.text().strip().casefold()
+            if value: values[value]=values.get(value,0)+1
+        valid=True
+        for _, username, _, _ in self.rows:
+            raw_value = username.text()
+            has_whitespace = any(character.isspace() for character in raw_value)
+            duplicate=bool((value:=raw_value.strip().casefold()) and values.get(value,0)>1)
+            warning=self._username_warnings.get(username)
+            if warning:
+                warning.setText(
+                    "Username không được có khoảng trắng."
+                    if has_whitespace
+                    else "Username đã tồn tại ở một tài khoản khác."
+                )
+                warning.setVisible(has_whitespace or duplicate)
+            valid=valid and not has_whitespace and not duplicate
+        return valid
     def toggle_password(self,_state:int)->None:
         mode=LineEdit.EchoMode.Normal if self.show.isChecked() else LineEdit.EchoMode.Password
         for _,_,password,_ in self.rows: password.setEchoMode(mode)
@@ -502,6 +740,7 @@ class AccountManagerDialog(QDialog):
         values=self.accounts()
         if not values: QMessageBox.warning(self,"Thiếu thông tin","Hãy giữ hoặc thêm ít nhất một tài khoản."); return
         if any(not username or not password for _,username,password in values): QMessageBox.warning(self,"Thiếu thông tin","Mỗi tài khoản cần có đủ username và password."); return
+        if not self._update_username_validation(): QMessageBox.warning(self,"Username không hợp lệ","Username không được có khoảng trắng và phải khác nhau giữa các tài khoản."); return
         self.accept()
     def accounts(self)->list[tuple[str|None,str,str]]: return [(profile_id,username.text().strip(),password.text()) for profile_id,username,password,_ in self.rows]
 

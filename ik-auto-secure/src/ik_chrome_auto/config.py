@@ -8,7 +8,6 @@ from urllib.parse import urlsplit
 
 from ik_chrome_auto.models import (
     AppConfig,
-    Auto2048Speed,
     BrowserSettings,
     CaptureSettings,
     ProfileConfig,
@@ -80,7 +79,6 @@ def load_config(path: Path) -> AppConfig:
     browser_raw = raw.get("browser", {})
     viewport = browser_raw.get("viewport", {})
     capture_raw = raw.get("capture", {})
-    automation_raw = raw.get("automation", {})
 
     browser = BrowserSettings(
         chrome_executable=str(browser_raw.get("chrome_executable", "auto")),
@@ -143,9 +141,6 @@ def load_config(path: Path) -> AppConfig:
         data_dir=_resolve(root, str(raw.get("data_dir", "data"))) or root / "data",
         browser=browser,
         capture=capture,
-        auto_2048_speed=Auto2048Speed(
-            str(automation_raw.get("auto_2048_speed", Auto2048Speed.BALANCED.value))
-        ),
         profiles=profiles,
     )
 
@@ -176,9 +171,6 @@ def save_config(config: AppConfig) -> None:
             "capture_response_bodies": config.capture.capture_response_bodies,
             "network_capture_enabled": config.capture.network_capture_enabled,
             "snapshot_retention": config.capture.snapshot_retention,
-        },
-        "automation": {
-            "auto_2048_speed": config.auto_2048_speed.value,
         },
         "profiles": [
             {

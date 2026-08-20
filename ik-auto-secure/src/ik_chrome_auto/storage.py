@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ik_chrome_auto.game2048 import decode_png
+from ik_chrome_auto.image_utils import decode_png
 from ik_chrome_auto.windows import encode_rgb_png
 
 
