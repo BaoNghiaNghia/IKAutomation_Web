@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import struct
 import sys
 import uuid
@@ -37,6 +38,13 @@ class ProcessResourceUsage:
     @property
     def process_count(self) -> int:
         return len(self.process_ids)
+
+
+@dataclass(frozen=True, slots=True)
+class SystemMemoryStatus:
+    total_bytes: int
+    available_bytes: int
+    load_percent: float
 
 
 def calculate_tiled_positions(
@@ -211,6 +219,33 @@ if sys.platform == "win32":
     _psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
     _psapi.EmptyWorkingSet.argtypes = [wintypes.HANDLE]
     _psapi.EmptyWorkingSet.restype = wintypes.BOOL
+
+    class _MEMORYSTATUSEX(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", wintypes.DWORD),
+            ("dwMemoryLoad", wintypes.DWORD),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    _kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(_MEMORYSTATUSEX)]
+    _kernel32.GlobalMemoryStatusEx.restype = wintypes.BOOL
+
+    class _MONITORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("rcMonitor", wintypes.RECT),
+            ("rcWork", wintypes.RECT),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    _user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.POINTER(_MONITORINFO)]
+    _user32.GetMonitorInfoW.restype = wintypes.BOOL
 
     class _GUID(ctypes.Structure):
         _fields_ = [
@@ -662,6 +697,54 @@ def get_work_area() -> WindowRect:
     if not _user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
         raise ctypes.WinError(ctypes.get_last_error())
     return WindowRect(rect.left, rect.top, rect.right, rect.bottom)
+
+
+def get_monitor_work_areas() -> tuple[WindowRect, ...]:
+    """Return every extended-desktop work area ordered left-to-right."""
+    if sys.platform != "win32":
+        return (get_work_area(),)
+    areas: list[WindowRect] = []
+    callback_type = ctypes.WINFUNCTYPE(
+        wintypes.BOOL,
+        wintypes.HMONITOR,
+        wintypes.HDC,
+        ctypes.POINTER(wintypes.RECT),
+        wintypes.LPARAM,
+    )
+
+    @callback_type
+    def collect(monitor: int, _dc: int, _rect: object, _data: int) -> bool:
+        info = _MONITORINFO()
+        info.cbSize = ctypes.sizeof(_MONITORINFO)
+        if _user32.GetMonitorInfoW(wintypes.HMONITOR(monitor), ctypes.byref(info)):
+            work = info.rcWork
+            areas.append(WindowRect(work.left, work.top, work.right, work.bottom))
+        return True
+
+    if not _user32.EnumDisplayMonitors(0, None, collect, 0):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not areas:
+        return (get_work_area(),)
+    return tuple(sorted(areas, key=lambda area: (area.left, area.top)))
+
+
+def get_system_memory_status() -> SystemMemoryStatus:
+    """Return physical-memory pressure without adding a psutil dependency."""
+    if sys.platform == "win32":
+        status = _MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+        if not _kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return SystemMemoryStatus(
+            int(status.ullTotalPhys),
+            int(status.ullAvailPhys),
+            float(status.dwMemoryLoad),
+        )
+    page_size = int(os.sysconf("SC_PAGE_SIZE"))
+    total = page_size * int(os.sysconf("SC_PHYS_PAGES"))
+    available = page_size * int(os.sysconf("SC_AVPHYS_PAGES"))
+    load = 100.0 * (1.0 - available / max(1, total))
+    return SystemMemoryStatus(total, available, load)
 
 
 def outer_size_for_client(hwnd: int, client_width: int, client_height: int) -> tuple[int, int]:

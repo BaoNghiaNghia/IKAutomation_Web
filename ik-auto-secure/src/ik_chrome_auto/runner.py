@@ -26,10 +26,10 @@ from ik_chrome_auto.resource_area_points import ResourceAreaPointSelector
 from ik_chrome_auto.storage import upscale_png_for_diagnostics, write_retained_png
 from ik_chrome_auto.windows import (
     calculate_tiled_positions,
+    get_monitor_work_areas,
     get_visible_window_rect,
     get_window_rect,
     get_window_process_tree_usage,
-    get_work_area,
     move_window_outer,
     snapshot_process_parents,
     trim_window_process_tree,
@@ -2068,27 +2068,35 @@ class MultiProfileRunner:
         if not opened:
             return 0
         columns = int(columns_per_row or len(opened))
-        rows = max(1, (len(opened) + columns - 1) // columns)
-        work_area = get_work_area()
-        # Keep every game surface at 16:9 while fitting the requested grid.
-        # The resulting windows still tile edge-to-edge; unused space (when
-        # the screen aspect ratio cannot fit the final row exactly) stays at
-        # the outside of the grid rather than between profiles.
-        max_width_by_columns = max(1, work_area.width // columns)
-        max_width_by_rows = max(1, (work_area.height // rows) * 16 // 9)
-        visible_width = min(max_width_by_columns, max_width_by_rows)
-        visible_height = max(1, visible_width * 9 // 16)
-        positions = calculate_tiled_positions(
-            work_area,
-            visible_width,
-            visible_height,
-            len(opened),
-            columns_per_row=columns,
-        )
+        work_areas = get_monitor_work_areas()
+        monitor_count = min(len(work_areas), len(opened))
+        base_count, remainder = divmod(len(opened), monitor_count)
+        layouts: list[tuple[tuple[str, int, WindowRect, WindowRect], tuple[int, int], int, int]] = []
+        offset = 0
+        for monitor_index, work_area in enumerate(work_areas[:monitor_count]):
+            profile_count = base_count + (1 if monitor_index < remainder else 0)
+            monitor_profiles = opened[offset : offset + profile_count]
+            offset += profile_count
+            rows = max(1, (profile_count + columns - 1) // columns)
+            # Keep every game surface at 16:9 while fitting the selected grid
+            # independently inside each monitor's work area.
+            max_width_by_columns = max(1, work_area.width // columns)
+            max_width_by_rows = max(1, (work_area.height // rows) * 16 // 9)
+            visible_width = min(max_width_by_columns, max_width_by_rows)
+            visible_height = max(1, visible_width * 9 // 16)
+            positions = calculate_tiled_positions(
+                work_area,
+                visible_width,
+                visible_height,
+                profile_count,
+                columns_per_row=columns,
+            )
+            layouts.extend(
+                (profile, position, visible_width, visible_height)
+                for profile, position in zip(monitor_profiles, positions, strict=True)
+            )
         moved = 0
-        for (profile_id, _hwnd, outer, visible), (x, y) in zip(
-            opened, positions, strict=True
-        ):
+        for (profile_id, _hwnd, outer, visible), (x, y), visible_width, visible_height in layouts:
             worker = self.workers.get(profile_id)
             session = worker.session if worker else None
             if session is None:

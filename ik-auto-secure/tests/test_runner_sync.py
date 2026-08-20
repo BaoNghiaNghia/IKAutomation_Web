@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import ik_chrome_auto.runner as runner_module
 from ik_chrome_auto.models import CommandKind, WorkerCommand
-from ik_chrome_auto.runner import MultiProfileRunner
+from ik_chrome_auto.runner import MultiProfileRunner, ProfileWorker
 from ik_chrome_auto.windows import ProcessResourceUsage
+from ik_chrome_auto.windows import WindowRect
 
 
 @dataclass
@@ -149,6 +151,35 @@ def test_trim_ram_routes_each_open_window_once(monkeypatch) -> None:
     assert calls == [101, 202]
 
 
+def test_arrange_windows_balances_profiles_across_two_monitors(monkeypatch) -> None:
+    runner = make_runner()
+    runner.config = SimpleNamespace(
+        profiles=[SimpleNamespace(id=f"p{index}") for index in range(4)]
+    )
+    runner.windows_topmost = False
+    runner.workers = {
+        f"p{index}": FakeWorker(SimpleNamespace(window_handle=100 + index))
+        for index in range(4)
+    }
+    rect = WindowRect(0, 0, 500, 281)
+    monkeypatch.setattr(runner_module, "get_window_rect", lambda _hwnd: rect)
+    monkeypatch.setattr(runner_module, "get_visible_window_rect", lambda _hwnd: rect)
+    monkeypatch.setattr(
+        runner_module,
+        "get_monitor_work_areas",
+        lambda: (WindowRect(0, 0, 1000, 600), WindowRect(1000, 0, 2000, 600)),
+    )
+    moves: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(
+        runner_module,
+        "move_window_outer",
+        lambda hwnd, x, y, _width, _height, **_kwargs: moves.append((hwnd, x, y)),
+    )
+
+    assert runner.arrange_windows(2) == 4
+    assert moves == [(100, 0, 0), (101, 500, 0), (102, 1000, 0), (103, 1500, 0)]
+
+
 class FakeLog:
     def __init__(self) -> None:
         self.rows: list[tuple[str, dict[str, object]]] = []
@@ -171,6 +202,7 @@ def test_external_close_publishes_stopped_state() -> None:
     worker.profile = type("Profile", (), {"id": "farm-1"})()
     worker.on_update = updates.append
     worker.event_log = FakeLog()
+    worker._farm_roster = ()
     session = DeadSession()
     worker.session = session
 

@@ -18,6 +18,7 @@ from ik_chrome_auto.interaction import (
 )
 from ik_chrome_auto.image_utils import RGBImage, decode_png
 from ik_chrome_auto.config import is_allowed_url
+from ik_chrome_auto.chrome_preferences import suppress_browser_prompts
 from ik_chrome_auto.models import AppConfig, ProfileConfig, ProfileMode
 from ik_chrome_auto.reader import GameDataReader, redact_url
 from ik_chrome_auto.windows import (
@@ -177,6 +178,7 @@ class ChromeProfileSession:
         if self.profile.user_data_dir is None:
             raise RuntimeError(f"Profile {self.profile.id} thiếu user_data_dir")
         self.profile.user_data_dir.mkdir(parents=True, exist_ok=True)
+        suppress_browser_prompts(self.profile.user_data_dir)
         chrome = find_chrome(self.config.browser.chrome_executable)
         if chrome is None:
             raise RuntimeError("Không tìm thấy Google Chrome; sửa browser.chrome_executable")
@@ -193,7 +195,11 @@ class ChromeProfileSession:
             # safer for a browser that signs into game accounts.
             "chromium_sandbox": True,
         }
-        args: list[str] = []
+        args: list[str] = [
+            "--disable-notifications",
+            "--no-default-browser-check",
+            "--no-first-run",
+        ]
         if self.config.browser.app_mode:
             args.append(f"--app={self.config.target_url}")
         if self.config.browser.low_memory_mode:
@@ -211,7 +217,6 @@ class ChromeProfileSession:
                     "--disable-sync",
                     "--metrics-recording-only",
                     "--mute-audio",
-                    "--no-first-run",
                     "--process-per-site",
                     "--renderer-process-limit=2",
                 ]

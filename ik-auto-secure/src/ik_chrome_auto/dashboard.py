@@ -16,10 +16,12 @@ from PySide6.QtWidgets import QApplication, QDialog, QGridLayout, QHBoxLayout, Q
 from qfluentwidgets import CardWidget, CheckBox, ComboBox, FluentIcon as FIF, LineEdit, PasswordLineEdit, PrimaryPushButton, PrimaryToolButton, PushButton, StrongBodyLabel, SubtitleLabel, ToolButton
 
 from ik_chrome_auto.config import ensure_data_dirs, load_config, save_config, unique_profile_id
+from ik_chrome_auto.farm_launch_policy import FarmLaunchPolicy
 from ik_chrome_auto.interaction import format_coordinate
 from ik_chrome_auto.models import CommandKind, ProfileConfig, ProfileMode, WorkerSnapshot, WorkerState
 from ik_chrome_auto.runner import MultiProfileRunner
 from ik_chrome_auto.two_factor import TwoFactorEnrollment, TwoFactorService
+from ik_chrome_auto.windows import get_system_memory_status
 
 # Windows Hello implementation remains available in windows_auth.py, but is
 # intentionally disabled while Google Authenticator is the primary verifier.
@@ -85,6 +87,13 @@ class Dashboard(QWidget):
         self._farm_open_queue: deque[str] = deque()
         self._farm_next_open_at = 0.0
         self._farm_open_deadline = 0.0
+        self._farm_launch_policy = FarmLaunchPolicy.for_total_memory(32 * 1_073_741_824)
+        self._farm_batch_profiles: set[str] = set()
+        self._farm_batch_submitted = 0
+        self._farm_batch_resume_at = 0.0
+        self._farm_resource_pause_started = 0.0
+        self._farm_resource_pause_reason: str | None = None
+        self._latest_profile_cpu_percent = 0.0
         self._farm_close_queue: deque[str] = deque()
         self._farm_close_in_flight: str | None = None
         self._farm_close_deadline = 0.0
@@ -452,9 +461,32 @@ class Dashboard(QWidget):
             self.farm_launcher.setText("Đang mở tab…")
             self._farm_launcher_phase = "opening"
             self._farm_next_open_at = 0.0
-            self._farm_open_deadline = time.monotonic() + self.config.browser.startup_timeout_ms / 1000
+            self._farm_batch_profiles.clear()
+            self._farm_batch_submitted = 0
+            self._farm_batch_resume_at = 0.0
+            self._farm_resource_pause_started = 0.0
+            self._farm_resource_pause_reason = None
+            try:
+                memory = get_system_memory_status()
+                self._farm_launch_policy = FarmLaunchPolicy.for_total_memory(memory.total_bytes)
+            except Exception:
+                self._farm_launch_policy = FarmLaunchPolicy.for_total_memory(32 * 1_073_741_824)
+            startup_timeout = self.config.browser.startup_timeout_ms / 1000
+            self._farm_open_deadline = time.monotonic() + self._farm_launch_policy.estimated_timeout_seconds(
+                pending,
+                startup_timeout,
+            )
             self._advance_farm_opening()
-            self._append_log(f"Đang mở {len(selected)} tab để chuẩn bị Farm" + (f" ({pending} tab mới, cách nhau 500 ms)" if pending else ""))
+            policy = self._farm_launch_policy
+            self._append_log(
+                f"Đang mở {len(selected)} tab để chuẩn bị Farm"
+                + (
+                    f" ({pending} tab mới; {policy.batch_size} tab/đợt; "
+                    f"cách nhau {policy.profile_interval_seconds:.2f}s; "
+                    f"nghỉ {policy.batch_pause_seconds:.0f}s giữa các đợt)"
+                    if pending else ""
+                )
+            )
             return
         if self._farm_launcher_phase == "ready":
             for profile_id in self._farm_launch_profiles:
@@ -509,13 +541,7 @@ class Dashboard(QWidget):
             return
         if ready != targets:
             missing = targets - ready
-            self._farm_launcher_phase = "launch"
-            self._farm_launch_profiles.clear()
-            self._farm_open_queue.clear()
-            self.farm_launcher.setEnabled(True)
-            self.farm_launcher.setText("Khởi động Farm")
-            self._set_farm_launcher_launch_style()
-            self._warning("Không mở đủ tab", f"Chưa sẵn sàng: {', '.join(sorted(missing))}")
+            self._abort_farm_opening("Không mở đủ tab", f"Chưa sẵn sàng: {', '.join(sorted(missing))}")
             return
         try:
             # Farm follows the user-selected layout setting. The runner keeps
@@ -526,13 +552,7 @@ class Dashboard(QWidget):
                 profile_ids=self._farm_launch_profiles,
             )
         except Exception as error:
-            self._farm_launcher_phase = "launch"
-            self._farm_launch_profiles.clear()
-            self._farm_open_queue.clear()
-            self.farm_launcher.setEnabled(True)
-            self.farm_launcher.setText("Khởi động Farm")
-            self._set_farm_launcher_launch_style()
-            self._error("Không sắp xếp được tab", str(error))
+            self._abort_farm_opening("Không sắp xếp được tab", str(error), critical=True)
             return
         self._farm_launcher_phase = "ready"
         self.farm_launcher.setEnabled(True)
@@ -542,15 +562,87 @@ class Dashboard(QWidget):
         )
 
     def _advance_farm_opening(self) -> None:
-        """Submit one browser open at a time, with a 500 ms interval."""
+        """Open profiles in resource-guarded batches instead of one startup burst."""
         if self._farm_launcher_phase != "opening" or not self._farm_open_queue:
             return
-        if time.monotonic() < self._farm_next_open_at:
+        now = time.monotonic()
+        if now > self._farm_open_deadline:
+            waiting = sorted(
+                profile_id
+                for profile_id in self._farm_launch_profiles
+                if self._farm_open_states.get(profile_id) not in {WorkerState.READY, WorkerState.COMPLETED}
+            )
+            self._abort_farm_opening(
+                "Mở profile quá thời gian",
+                "Các profile chưa sẵn sàng: " + ", ".join(waiting),
+            )
             return
+        policy = self._farm_launch_policy
+        if self._farm_batch_submitted >= policy.batch_size:
+            terminal_states = {WorkerState.READY, WorkerState.COMPLETED, WorkerState.ERROR}
+            if any(self._farm_open_states.get(profile_id) not in terminal_states for profile_id in self._farm_batch_profiles):
+                return
+            if now < self._farm_batch_resume_at:
+                return
+            self._append_log(f"Đợt {len(self._farm_batch_profiles)} tab đã ổn định; bắt đầu đợt tiếp theo")
+            self._farm_batch_profiles.clear()
+            self._farm_batch_submitted = 0
+        if now < self._farm_next_open_at:
+            return
+        reason: str | None = None
+        try:
+            memory = get_system_memory_status()
+            reason = policy.resource_block_reason(
+                available_memory_bytes=memory.available_bytes,
+                memory_load_percent=memory.load_percent,
+                profile_cpu_percent=self._latest_profile_cpu_percent,
+            )
+        except Exception as error:
+            self._append_log(f"Không đọc được tài nguyên hệ thống: {error}")
+        if reason:
+            if not self._farm_resource_pause_started:
+                self._farm_resource_pause_started = now
+                self._farm_resource_pause_reason = reason
+                self.farm_launcher.setText("Tạm dừng do tải cao…")
+                self._append_log(f"Tạm dừng mở tab: {reason}")
+            if now - self._farm_resource_pause_started >= policy.resource_pause_timeout_seconds:
+                self._abort_farm_opening(
+                    "Đã dừng mở thêm profile",
+                    f"Tài nguyên không hồi phục sau {policy.resource_pause_timeout_seconds:.0f} giây: {reason}",
+                )
+            return
+        if self._farm_resource_pause_started:
+            self._append_log(f"Tài nguyên đã ổn định; tiếp tục mở tab (trước đó: {self._farm_resource_pause_reason})")
+            self._farm_resource_pause_started = 0.0
+            self._farm_resource_pause_reason = None
+            self.farm_launcher.setText("Đang mở tab…")
         profile_id = self._farm_open_queue.popleft()
         self.runner.submit(profile_id, CommandKind.OPEN)
-        self._farm_next_open_at = time.monotonic() + 0.5
-        self._append_log(f"Đang mở tab {profile_id}; còn {len(self._farm_open_queue)} tab trong hàng đợi")
+        self._farm_batch_profiles.add(profile_id)
+        self._farm_batch_submitted += 1
+        self._farm_next_open_at = now + policy.profile_interval_seconds
+        if self._farm_batch_submitted >= policy.batch_size and self._farm_open_queue:
+            self._farm_batch_resume_at = now + policy.batch_pause_seconds
+        self._append_log(
+            f"Đang mở tab {profile_id} "
+            f"({self._farm_batch_submitted}/{policy.batch_size} trong đợt); "
+            f"còn {len(self._farm_open_queue)} tab"
+        )
+
+    def _abort_farm_opening(self, title: str, message: str, *, critical: bool = False) -> None:
+        """Reset only the launch controller; already opened profiles stay recoverable."""
+        self._farm_launcher_phase = "launch"
+        self._farm_launch_profiles.clear()
+        self._farm_open_queue.clear()
+        self._farm_batch_profiles.clear()
+        self._farm_batch_submitted = 0
+        self._farm_batch_resume_at = 0.0
+        self._farm_resource_pause_started = 0.0
+        self._farm_resource_pause_reason = None
+        self.farm_launcher.setEnabled(True)
+        self.farm_launcher.setText("Khởi động Farm")
+        self._set_farm_launcher_launch_style()
+        (self._error if critical else self._warning)(title, message)
 
     def _advance_farm_stopping(self) -> None:
         """Close the selected Chrome windows one at a time."""
@@ -582,6 +674,11 @@ class Dashboard(QWidget):
         self.farm_profiles.clear()
         self._farm_launch_profiles.clear()
         self._farm_open_queue.clear()
+        self._farm_batch_profiles.clear()
+        self._farm_batch_submitted = 0
+        self._farm_batch_resume_at = 0.0
+        self._farm_resource_pause_started = 0.0
+        self._farm_resource_pause_reason = None
         self._farm_close_queue.clear()
         self._farm_close_in_flight = None
         self._farm_close_deadline = 0.0
@@ -712,7 +809,7 @@ class Dashboard(QWidget):
         now=time.monotonic()
         if now-self._last_resources>=2:
             try:
-                overview=self.runner.resource_overview(); self.total.setText(str(overview.total_profiles)); self.opened.setText(str(overview.opened_profiles)); self.open_badge.setText(f"{overview.opened_profiles} đang mở"); self.ram.setText(f"{overview.ram_bytes/1_048_576:.0f} MB"); self.cpu.setText(f"{overview.cpu_percent:.1f}%")
+                overview=self.runner.resource_overview(); self._latest_profile_cpu_percent=overview.cpu_percent; self.total.setText(str(overview.total_profiles)); self.opened.setText(str(overview.opened_profiles)); self.open_badge.setText(f"{overview.opened_profiles} đang mở"); self.ram.setText(f"{overview.ram_bytes/1_048_576:.0f} MB"); self.cpu.setText(f"{overview.cpu_percent:.1f}%")
                 for item in overview.profiles:
                     if item.profile_id in self.rows:self.rows[item.profile_id].resource.setText("—" if not item.opened else f"{item.ram_bytes/1_048_576:.0f} MB | {item.cpu_percent:.1f}%")
             except Exception as error:self._append_log(str(error))
