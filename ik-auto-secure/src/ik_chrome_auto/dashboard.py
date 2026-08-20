@@ -137,7 +137,34 @@ class Dashboard(QWidget):
         self.farm_launcher = PrimaryPushButton("Khởi động Farm"); self.farm_launcher.setFixedHeight(34); self.farm_launcher.setStyleSheet("QPushButton { background:#2563eb; border:1px solid #2563eb; border-radius:8px; color:#ffffff; font-weight:600; } QPushButton:hover { background:#1d4ed8; border-color:#1d4ed8; } QPushButton:disabled { background:#93c5fd; border-color:#93c5fd; color:#eff6ff; }"); self.farm_launcher.clicked.connect(self._farm_launcher_action)
         primary_actions = QHBoxLayout(); primary_actions.setSpacing(7); primary_actions.addWidget(manage, 1); primary_actions.addWidget(self.farm_launcher, 1); al.addLayout(primary_actions); ll.addWidget(accounts)
         arrange_card = self._card(); acl = QVBoxLayout(arrange_card); acl.addWidget(StrongBodyLabel("Sắp xếp cửa sổ")); acl.addWidget(self._muted("Chọn số cửa sổ trên mỗi hàng rồi áp dụng cho Chrome đang mở.")); row = QHBoxLayout(); row.addWidget(QLabel("Số cửa sổ / hàng")); row.addStretch(); self.windows_per_row = ComboBox(); self.windows_per_row.addItems(["2","3","4","5","6"]); self.windows_per_row.setCurrentText(str(self.config.browser.windows_per_row)); self.windows_per_row.currentTextChanged.connect(self._apply_windows_per_row); row.addWidget(self.windows_per_row); acl.addLayout(row); apply = PrimaryPushButton("Áp dụng & sắp xếp"); apply.clicked.connect(self._arrange); acl.addWidget(apply); tools = QHBoxLayout(); self.drag = PushButton("Hiện nút kéo"); self.drag.clicked.connect(self._toggle_drag); self.scrollbars = PushButton("Hiện thanh cuộn"); self.scrollbars.clicked.connect(self._toggle_scrollbars); self.pin = CheckBox("Luôn nổi trên các cửa sổ khác"); self.pin.stateChanged.connect(lambda _s: self.runner.set_all_topmost(self.pin.isChecked())); tools.addWidget(self.drag); tools.addWidget(self.scrollbars); acl.addLayout(tools); acl.addWidget(self.pin); ll.addWidget(arrange_card)
-        automation = self._card(); au = QVBoxLayout(automation); au.addWidget(StrongBodyLabel("Đồng bộ chuột")); au.addWidget(self._muted("Chọn profile master để đồng bộ thao tác.")); sync = QHBoxLayout(); self.master = ComboBox(); sync.addWidget(self.master,1); self.sync = PushButton("Bật sync chuột"); self.sync.clicked.connect(self._toggle_sync); sync.addWidget(self.sync); au.addLayout(sync); self.sync_status = self._muted("Sync đang tắt"); au.addWidget(self.sync_status); ll.addWidget(automation); ll.addStretch()
+        automation = self._card()
+        au = QVBoxLayout(automation)
+        sync_header = QHBoxLayout()
+        sync_header.addWidget(StrongBodyLabel("Đồng bộ chuột"))
+        sync_header.addStretch()
+        self.sync_section_toggle = self._icon_button(FIF.CHEVRON_RIGHT, "Mở rộng Đồng bộ chuột")
+        self.sync_section_toggle.clicked.connect(self._toggle_sync_section)
+        sync_header.addWidget(self.sync_section_toggle)
+        au.addLayout(sync_header)
+        self.sync_section_expanded = False
+        self.sync_section = QWidget()
+        sync_section_layout = QVBoxLayout(self.sync_section)
+        sync_section_layout.setContentsMargins(0, 0, 0, 0)
+        sync_section_layout.setSpacing(7)
+        sync_section_layout.addWidget(self._muted("Chọn profile master để đồng bộ thao tác."))
+        sync = QHBoxLayout()
+        self.master = ComboBox()
+        sync.addWidget(self.master, 1)
+        self.sync = PushButton("Bật sync chuột")
+        self.sync.clicked.connect(self._toggle_sync)
+        sync.addWidget(self.sync)
+        sync_section_layout.addLayout(sync)
+        self.sync_status = self._muted("Sync đang tắt")
+        sync_section_layout.addWidget(self.sync_status)
+        self.sync_section.hide()
+        au.addWidget(self.sync_section)
+        ll.addWidget(automation)
+        ll.addStretch()
         right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8); body.addWidget(right,1)
         progress = self._card(); pl = QVBoxLayout(progress); ph = QHBoxLayout(); ph.addWidget(StrongBodyLabel("Tiến trình profile")); ph.addStretch(); self.open_badge = QLabel("0 đang mở"); self.open_badge.setStyleSheet("background:#e2edff;color:#2767bd;border-radius:10px;padding:3px 8px;"); ph.addWidget(self.open_badge); pl.addLayout(ph); self.table_layout = QGridLayout(); self.table_layout.setSpacing(8); self.table_layout.setColumnStretch(0, 1); self.table_layout.setColumnStretch(1, 1); content=QWidget(); content.setLayout(self.table_layout); self.scroll=QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setWidget(content); pl.addWidget(self.scroll,1); rl.addWidget(progress,1)
         foot=QHBoxLayout(); coords=self._card(); cl=QVBoxLayout(coords); ch=QHBoxLayout(); ch.addWidget(StrongBodyLabel("Lấy tọa độ")); ch.addStretch(); bjson=PushButton("JSON"); bjson.clicked.connect(self._copy_json); bxy=PushButton("Copy x,y"); bxy.clicked.connect(self._copy_xy); ch.addWidget(bjson); ch.addWidget(bxy); cl.addLayout(ch); self.coordinate= self._muted("Chưa đo tọa độ"); cl.addWidget(self.coordinate); foot.addWidget(coords,2); logs=self._card(); logl=QVBoxLayout(logs); logl.addWidget(StrongBodyLabel("Nhật ký gần nhất")); self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setFixedHeight(86); logl.addWidget(self.log); foot.addWidget(logs,3); coords.hide(); logs.hide(); rl.addLayout(foot)
@@ -261,6 +288,15 @@ class Dashboard(QWidget):
         master=str(self.master.currentData() or ""); opened=[p.id for p in self.config.profiles if self.runner.has_open_session(p.id)]
         if master not in opened or len(opened)<2: self._warning("Chưa đủ profile","Hãy mở master và ít nhất một follower trước khi bật sync."); return
         self.runner.enable_sync(master); self.sync.setText("Tắt sync chuột"); self.sync_status.setText(f"MASTER: {master} → {len(opened)-1} follower")
+    def _toggle_sync_section(self) -> None:
+        self.sync_section_expanded = not self.sync_section_expanded
+        self.sync_section.setVisible(self.sync_section_expanded)
+        self.sync_section_toggle.setIcon(
+            FIF.CHEVRON_DOWN_MED if self.sync_section_expanded else FIF.CHEVRON_RIGHT
+        )
+        self.sync_section_toggle.setToolTip(
+            "Thu gọn Đồng bộ chuột" if self.sync_section_expanded else "Mở rộng Đồng bộ chuột"
+        )
     def _toggle_farm(self, pid: str) -> None:
         row = self.rows[pid]
         if pid in self.farm_profiles:
