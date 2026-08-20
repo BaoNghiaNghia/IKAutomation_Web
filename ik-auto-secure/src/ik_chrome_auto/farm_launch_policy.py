@@ -25,7 +25,7 @@ class FarmLaunchPolicy:
             return cls(
                 batch_size=5,
                 profile_interval_seconds=0.75,
-                batch_pause_seconds=12.0,
+                batch_pause_seconds=20.0,
                 min_available_memory_bytes=max(16 * _GIB, int(total * 0.18)),
             )
         if total >= 32 * _GIB:

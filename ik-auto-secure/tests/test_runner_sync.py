@@ -169,15 +169,56 @@ def test_arrange_windows_balances_profiles_across_two_monitors(monkeypatch) -> N
         "get_monitor_work_areas",
         lambda: (WindowRect(0, 0, 1000, 600), WindowRect(1000, 0, 2000, 600)),
     )
-    moves: list[tuple[int, int, int]] = []
+    moves: list[tuple[int, int, int, bool]] = []
     monkeypatch.setattr(
         runner_module,
         "move_window_outer",
-        lambda hwnd, x, y, _width, _height, **_kwargs: moves.append((hwnd, x, y)),
+        lambda hwnd, x, y, _width, _height, **kwargs: moves.append(
+            (hwnd, x, y, kwargs["resize"])
+        ),
     )
 
     assert runner.arrange_windows(2) == 4
-    assert moves == [(100, 0, 0), (101, 500, 0), (102, 1000, 0), (103, 1500, 0)]
+    assert moves == [
+        (101, 500, 0, False),
+        (102, 1000, 0, False),
+        (103, 1500, 0, False),
+    ]
+
+
+def test_large_arrangement_throttles_webgl_resizes_in_five_window_batches(monkeypatch) -> None:
+    runner = make_runner()
+    runner.config = SimpleNamespace(
+        profiles=[SimpleNamespace(id=f"p{index}") for index in range(11)]
+    )
+    runner.windows_topmost = False
+    runner.workers = {
+        f"p{index}": FakeWorker(SimpleNamespace(window_handle=200 + index))
+        for index in range(11)
+    }
+    rect = WindowRect(0, 0, 500, 281)
+    monkeypatch.setattr(runner_module, "get_window_rect", lambda _hwnd: rect)
+    monkeypatch.setattr(runner_module, "get_visible_window_rect", lambda _hwnd: rect)
+    monkeypatch.setattr(
+        runner_module,
+        "get_monitor_work_areas",
+        lambda: (WindowRect(0, 0, 1200, 800),),
+    )
+    resize_flags: list[bool] = []
+    monkeypatch.setattr(
+        runner_module,
+        "move_window_outer",
+        lambda _hwnd, _x, _y, _width, _height, **kwargs: resize_flags.append(
+            kwargs["resize"]
+        ),
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(runner_module.time, "sleep", sleeps.append)
+
+    assert runner.arrange_windows(6) == 11
+    assert resize_flags == [True] * 11
+    assert sleeps.count(0.12) == 11
+    assert sleeps.count(1.25) == 2
 
 
 class FakeLog:

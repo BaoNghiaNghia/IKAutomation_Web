@@ -841,13 +841,25 @@ def move_window_position(hwnd: int, x: int, y: int, *, topmost: bool) -> None:
 
 
 def move_window_outer(
-    hwnd: int, x: int, y: int, width: int, height: int, *, topmost: bool
+    hwnd: int,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    *,
+    topmost: bool,
+    resize: bool = True,
 ) -> None:
-    """Move and resize a native window using its full outer frame size."""
+    """Move a native window and resize it only when explicitly required."""
     if not is_window(hwnd):
         raise RuntimeError("Cửa sổ Chrome không còn tồn tại")
     insert_after = -1 if topmost else -2
     flags = 0x0010 | 0x0040  # SWP_NOACTIVATE | SWP_SHOWWINDOW
+    if not resize:
+        # Re-submitting an unchanged size still causes Chromium/WebGL and DWM
+        # to redraw the whole surface. SWP_NOSIZE avoids that GPU spike when
+        # an already-sized profile only needs to move to another grid cell.
+        flags |= 0x0001  # SWP_NOSIZE
     if not _user32.SetWindowPos(
         wintypes.HWND(hwnd),
         wintypes.HWND(insert_after),

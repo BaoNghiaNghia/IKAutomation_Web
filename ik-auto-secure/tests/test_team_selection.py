@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from ik_chrome_auto.runner import ProfileWorker
+from ik_chrome_auto.farm_vision import TeamRosterRow, TeamRowState
+from ik_chrome_auto.farm_workflow import FarmGameState
 
 
 def evidence(bounds: tuple[int, int, int, int]):
@@ -18,7 +20,7 @@ def test_team_one_row_is_inferred_from_numbered_rows_below_it() -> None:
 
     row = ProfileWorker._team_row_for_selection(1, badges, (835, 432))
 
-    assert row == (0, 1, 144, 96)
+    assert row == (0, 1, 144, 82)
 
 
 def test_team_one_selected_border_is_verified_against_inferred_row() -> None:
@@ -32,9 +34,58 @@ def test_team_one_selected_border_is_verified_against_inferred_row() -> None:
     assert ProfileWorker._is_expected_team_selected(None, selected_border, row) is True
 
 
-def test_numbered_team_still_uses_its_own_badge() -> None:
+def test_numbered_team_uses_its_fixed_panel_row() -> None:
     badges = {3: evidence((4, 191, 24, 24))}
 
     row = ProfileWorker._team_row_for_selection(3, badges, (835, 432))
 
-    assert row == (0, 183, 144, 96)
+    assert row == (0, 179, 144, 82)
+
+
+def test_false_team_two_badge_match_cannot_redirect_click_to_team_three() -> None:
+    # Production log: Team 2 falsely matched the Team 3 badge at y=188.
+    badges = {2: evidence((4, 188, 24, 24))}
+
+    row = ProfileWorker._team_row_for_selection(2, badges, (835, 432))
+
+    assert row == (0, 90, 144, 82)
+
+
+def test_dispatch_accepts_world_map_when_selected_team_became_busy() -> None:
+    roster = (
+        TeamRosterRow(1, TeamRowState.BUSY, "BusyLabel"),
+        TeamRosterRow(2, TeamRowState.READY, "ReadyLabel"),
+    )
+
+    assert ProfileWorker._is_dispatch_postcondition_verified(
+        state=FarmGameState.WORLD_MAP,
+        team_panel_visible=False,
+        team_action_visible=False,
+        world_map_anchor_visible=True,
+        expected_team=1,
+        roster=roster,
+    ) is True
+
+
+def test_dispatch_rejects_world_map_when_selected_team_is_still_ready() -> None:
+    roster = (TeamRosterRow(1, TeamRowState.READY, "ReadyLabel"),)
+
+    assert ProfileWorker._is_dispatch_postcondition_verified(
+        state=FarmGameState.WORLD_MAP,
+        team_panel_visible=False,
+        team_action_visible=False,
+        world_map_anchor_visible=True,
+        expected_team=1,
+        roster=roster,
+    ) is False
+
+
+def test_dispatch_rejects_visible_team_panel() -> None:
+    assert ProfileWorker._is_dispatch_postcondition_verified(
+        state=FarmGameState.WORLD_MAP,
+        team_panel_visible=True,
+        team_action_visible=True,
+        world_map_anchor_visible=True,
+        expected_team=1,
+        roster=(),
+    ) is False

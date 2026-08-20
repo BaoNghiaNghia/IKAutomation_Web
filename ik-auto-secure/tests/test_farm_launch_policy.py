@@ -10,7 +10,7 @@ def test_large_workstation_uses_five_profile_batches() -> None:
 
     assert policy.batch_size == 5
     assert policy.profile_interval_seconds == 0.75
-    assert policy.batch_pause_seconds == 12.0
+    assert policy.batch_pause_seconds == 20.0
     assert policy.min_available_memory_bytes >= 16 * GIB
 
 
@@ -47,4 +47,4 @@ def test_timeout_budget_includes_all_batch_pauses() -> None:
 
     timeout = policy.estimated_timeout_seconds(50, 90)
 
-    assert timeout >= 90 + (49 * 0.75) + (9 * 12) + 60
+    assert timeout >= 90 + (49 * 0.75) + (9 * 20) + 60

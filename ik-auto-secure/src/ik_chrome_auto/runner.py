@@ -619,13 +619,21 @@ class ProfileWorker:
                 elapsed_after_dispatch = time.monotonic() - self._farm_dispatch_click_at
                 dispatched = (
                     # The expiry confirmation can arrive shortly *after* the
-                    # team panel disappears.  Keep that short observation
-                    # window open so the dialog above is handled before a
-                    # normal World Map is recorded as a completed dispatch.
+                    # team panel disappears. Keep that short observation
+                    # window open before accepting the World Map result.
                     elapsed_after_dispatch >= 4.0
-                    and browser_canvas.found
-                    and not team_panel.found
-                    and not team_action.found
+                    and self._is_dispatch_postcondition_verified(
+                        state=state,
+                        team_panel_visible=team_panel.found,
+                        team_action_visible=team_action.found,
+                        world_map_anchor_visible=(
+                            browser_canvas.found
+                            or world.found
+                            or world_map_coordinate_pin.found
+                        ),
+                        expected_team=self._farm.team,
+                        roster=roster,
+                    )
                 )
                 if dispatched:
                     completed_team = self._farm.team
@@ -1157,13 +1165,13 @@ class ProfileWorker:
                     # farm retry cadence or re-open the tab.
                     self._farm_resource_template_misses += 1
                     # Each resource button occupies a stable slot in the
-                    # already independently verified web search panel. Some
-                    # city skins recolour the icon art enough that a visual
-                    # template never reaches its threshold (Food scored 0.37
-                    # on account-3 while the panel and Search button scored
-                    # above 0.95). After three bounded observations, use the
-                    # panel-relative slot rather than waiting indefinitely.
-                    if self._farm_resource_template_misses >= 3 and find_resource.actionable:
+                    # independently verified search panel. A selected icon is
+                    # deliberately recoloured by each city skin, so repeating
+                    # the same failed artwork match only delays Search. Once
+                    # both the panel and its enabled Search button are fresh,
+                    # use the panel-relative slot immediately and verify the
+                    # resulting panel state on the next frame.
+                    if find_resource.actionable:
                         layout_bounds = self._resource_button_layout_bounds(target_resource, image_size)
                         self.session.tap_farm_template(layout_bounds, image_size)
                         self._farm_resource_selected_at = time.monotonic()
@@ -1607,6 +1615,36 @@ class ProfileWorker:
         return (left, top, button_width, button_height)
 
     @staticmethod
+    def _is_dispatch_postcondition_verified(
+        *,
+        state: FarmGameState,
+        team_panel_visible: bool,
+        team_action_visible: bool,
+        world_map_anchor_visible: bool,
+        expected_team: int | None,
+        roster: tuple[TeamRosterRow, ...],
+    ) -> bool:
+        """Verify that a Collect action returned to a stable World Map.
+
+        The generic canvas-ready template is not stable across map themes and
+        was false in production even though the coordinate pin and roster were
+        both valid. A fresh World Map classification plus disappearance of the
+        dispatch panel is the primary invariant. When the roster is readable,
+        the selected row must additionally have changed from Ready to Busy.
+        """
+        if (
+            state != FarmGameState.WORLD_MAP
+            or team_panel_visible
+            or team_action_visible
+            or not world_map_anchor_visible
+        ):
+            return False
+        if expected_team is None or not roster:
+            return True
+        expected_row = next((row for row in roster if row.team == expected_team), None)
+        return expected_row is not None and expected_row.state.value == "busy"
+
+    @staticmethod
     def _world_map_search_layout_bounds(
         image_size: tuple[int, int]
     ) -> tuple[int, int, int, int]:
@@ -1849,38 +1887,28 @@ class ProfileWorker:
         badges: dict[int, object],
         image_size: tuple[int, int],
     ) -> tuple[int, int, int, int] | None:
-        """Resolve all four team rows without inventing a Team 1 badge.
+        """Resolve team 1→4 from the verified panel's fixed visual rows.
 
-        The game labels rows 2–4 but the first row has no numbered badge. For
-        team 1, infer its badge slot from the freshly verified rows 2 and 3,
-        then reuse the same bounded row geometry as every other team.
+        Number templates are retained as diagnostic evidence only. In live
+        captures the Team 2 glyph can also match Team 3 at a higher score; if
+        its Y coordinate is used for input, the wrong march is selected. The
+        panel itself has four stable rows independent of hero art and skin,
+        so derive a small non-overlapping target from canvas proportions.
         """
-        if team in {2, 3, 4}:
-            badge = badges.get(team)
-            bounds = getattr(badge, "bounds", None)
-            if not getattr(badge, "actionable", False) or bounds is None:
-                return None
-            return cls._team_row_from_badge(bounds, image_size)
-        if team != 1:
+        del cls, badges
+        if team not in {1, 2, 3, 4}:
             return None
-        team_2 = badges.get(2)
-        team_2_bounds = getattr(team_2, "bounds", None)
-        if not getattr(team_2, "actionable", False) or team_2_bounds is None:
-            return None
-        team_3 = badges.get(3)
-        team_3_bounds = getattr(team_3, "bounds", None)
-        row_stride = 0
-        if getattr(team_3, "actionable", False) and team_3_bounds is not None:
-            row_stride = int(team_3_bounds[1]) - int(team_2_bounds[1])
-        if row_stride <= 0:
-            row_stride = max(1, round(image_size[1] * 0.21))
-        virtual_team_1_badge = (
-            int(team_2_bounds[0]),
-            max(0, int(team_2_bounds[1]) - row_stride),
-            int(team_2_bounds[2]),
-            int(team_2_bounds[3]),
+        image_width, image_height = image_size
+        row_left = 0
+        row_width = min(image_width, max(48, round(image_width * 0.172)))
+        row_height = max(48, round(image_height * 0.19))
+        first_top = max(0, round(image_height * 0.002))
+        row_stride = max(row_height + 1, round(image_height * 0.205))
+        row_top = min(
+            max(0, image_height - row_height),
+            first_top + (team - 1) * row_stride,
         )
-        return cls._team_row_from_badge(virtual_team_1_badge, image_size)
+        return row_left, row_top, row_width, row_height
 
     def _save_farm_debug_capture(self, reason: str) -> Path | None:
         if self.session is None:
@@ -2096,6 +2124,16 @@ class MultiProfileRunner:
                 for profile, position in zip(monitor_profiles, positions, strict=True)
             )
         moved = 0
+        resized = 0
+        pending_resizes = sum(
+            1
+            for (_profile, _position, target_width, target_height) in layouts
+            if (
+                abs(_profile[2].width - (target_width + (_profile[2].width - _profile[3].width))) > 2
+                or abs(_profile[2].height - (target_height + (_profile[2].height - _profile[3].height))) > 2
+            )
+        )
+        stagger_resizes = pending_resizes > 10
         for (profile_id, _hwnd, outer, visible), (x, y), visible_width, visible_height in layouts:
             worker = self.workers.get(profile_id)
             session = worker.session if worker else None
@@ -2107,15 +2145,37 @@ class MultiProfileRunner:
                 # profiles already running, rather than only to future opens.
                 frame_width = visible_width + (outer.width - visible.width)
                 frame_height = visible_height + (outer.height - visible.height)
+                target_x = x - (visible.left - outer.left)
+                target_y = y - (visible.top - outer.top)
+                needs_resize = (
+                    abs(outer.width - frame_width) > 2
+                    or abs(outer.height - frame_height) > 2
+                )
+                needs_move = (
+                    abs(outer.left - target_x) > 2
+                    or abs(outer.top - target_y) > 2
+                )
+                if not needs_move and not needs_resize:
+                    moved += 1
+                    continue
                 move_window_outer(
                     _hwnd,
-                    x - (visible.left - outer.left),
-                    y - (visible.top - outer.top),
+                    target_x,
+                    target_y,
                     frame_width,
                     frame_height,
                     topmost=self.windows_topmost,
+                    resize=needs_resize,
                 )
                 moved += 1
+                if stagger_resizes and needs_resize:
+                    resized += 1
+                    # WebGL canvases redraw after native resize. Throttle
+                    # large layouts so 45+ Chrome profiles do not submit all
+                    # texture reallocations to the display driver at once.
+                    time.sleep(0.12)
+                    if resized % 5 == 0 and resized < pending_resizes:
+                        time.sleep(1.25)
             except Exception:
                 continue
         return moved
