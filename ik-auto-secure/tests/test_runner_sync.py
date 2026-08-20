@@ -47,6 +47,20 @@ def test_sync_routes_master_event_only_to_open_followers() -> None:
     assert runner.workers["follower-closed"].commands == []
 
 
+def test_sync_routes_keyboard_event_to_open_followers() -> None:
+    runner = make_runner()
+    event = {
+        "type": "keydown",
+        "keyboard": {"key": "Enter", "code": "Enter", "key_code": 13},
+    }
+
+    runner._on_input("master", event)
+
+    command = runner.workers["follower-open"].commands[0]
+    assert command.kind == CommandKind.SYNC_INPUT
+    assert command.payload["event"] == event
+
+
 def test_sync_ignores_non_master_event() -> None:
     runner = make_runner()
 

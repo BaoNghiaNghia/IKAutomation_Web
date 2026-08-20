@@ -222,6 +222,52 @@ def test_escape_is_dispatched_without_focusing_real_window() -> None:
     assert all(params["windowsVirtualKeyCode"] == 27 for _method, params in calls)
 
 
+def test_synced_printable_keyboard_event_is_dispatched_with_text_and_modifiers() -> None:
+    session, _canvas, context, _page = make_session()
+
+    session.apply_synced_input({
+        "type": "keydown",
+        "keyboard": {
+            "key": "A",
+            "code": "KeyA",
+            "key_code": 65,
+            "location": 0,
+            "repeat": False,
+            "shift": True,
+            "ctrl": False,
+            "alt": False,
+            "meta": False,
+        },
+    })
+
+    method, params = context.sessions[0].calls[0]
+    assert method == "Input.dispatchKeyEvent"
+    assert params["type"] == "keyDown"
+    assert params["key"] == "A"
+    assert params["code"] == "KeyA"
+    assert params["windowsVirtualKeyCode"] == 65
+    assert params["modifiers"] == 8
+    assert params["text"] == "A"
+
+
+def test_synced_ctrl_shortcut_does_not_inject_printable_text() -> None:
+    session, _canvas, context, _page = make_session()
+
+    session.apply_synced_input({
+        "type": "keydown",
+        "keyboard": {
+            "key": "c",
+            "code": "KeyC",
+            "key_code": 67,
+            "ctrl": True,
+        },
+    })
+
+    _method, params = context.sessions[0].calls[0]
+    assert params["modifiers"] == 2
+    assert "text" not in params
+
+
 def test_mouse_fallback_click_uses_the_template_center() -> None:
     session, _canvas, context, _page = make_session()
 

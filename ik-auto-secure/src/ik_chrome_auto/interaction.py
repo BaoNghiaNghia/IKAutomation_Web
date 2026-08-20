@@ -15,6 +15,7 @@ INTERACTION_PROBE = r"""
   let pointerActive = false;
   let lastMoveAt = 0;
   let sequence = 0;
+  const activeKeys = new Map();
 
   const round = (value, digits = 6) => {
     const factor = 10 ** digits;
@@ -129,6 +130,35 @@ INTERACTION_PROBE = r"""
     if (window.__IK_SYNC_EVENTS.length > 500) window.__IK_SYNC_EVENTS.splice(0, 100);
   };
 
+  const describeKeyboard = (event, type) => ({
+    sequence: ++sequence,
+    type,
+    captured_at: new Date().toISOString(),
+    frame_url: location.href,
+    keyboard: {
+      key: String(event.key || ''),
+      code: String(event.code || ''),
+      key_code: Number(event.keyCode || event.which || 0),
+      location: Number(event.location || 0),
+      repeat: Boolean(event.repeat),
+      is_composing: Boolean(event.isComposing),
+      alt: Boolean(event.altKey),
+      ctrl: Boolean(event.ctrlKey),
+      meta: Boolean(event.metaKey),
+      shift: Boolean(event.shiftKey)
+    }
+  });
+
+  const pushKeyboardSync = (event, type) => {
+    if (!window.__IK_SYNC_SOURCE || window.__IK_INSPECT_ENABLED || event.isComposing) return;
+    const row = describeKeyboard(event, type);
+    window.__IK_SYNC_EVENTS.push(row);
+    if (window.__IK_SYNC_EVENTS.length > 500) window.__IK_SYNC_EVENTS.splice(0, 100);
+    const identity = row.keyboard.code || row.keyboard.key;
+    if (type === 'keydown') activeKeys.set(identity, row);
+    else activeKeys.delete(identity);
+  };
+
   const blockInspector = (event, record = false) => {
     if (!window.__IK_INSPECT_ENABLED) return false;
     if (record) {
@@ -173,6 +203,15 @@ INTERACTION_PROBE = r"""
     row.wheel = {delta_x: event.deltaX, delta_y: event.deltaY, delta_mode: event.deltaMode};
     window.__IK_SYNC_EVENTS.push(row);
   }, {capture: true, passive: false});
+  window.addEventListener('keydown', (event) => pushKeyboardSync(event, 'keydown'), true);
+  window.addEventListener('keyup', (event) => pushKeyboardSync(event, 'keyup'), true);
+  window.addEventListener('blur', () => {
+    if (!window.__IK_SYNC_SOURCE || window.__IK_INSPECT_ENABLED) return;
+    for (const row of activeKeys.values()) {
+      window.__IK_SYNC_EVENTS.push({...row, sequence: ++sequence, type: 'keyup'});
+    }
+    activeKeys.clear();
+  }, true);
 
   window.__IK_SET_INTERACTION_MODES = (syncSource, inspectEnabled) => {
     window.__IK_SYNC_SOURCE = Boolean(syncSource);

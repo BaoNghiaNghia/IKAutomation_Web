@@ -936,6 +936,10 @@ class ChromeProfileSession:
         return events
 
     def apply_synced_input(self, event: dict[str, Any]) -> None:
+        event_type = str(event.get("type", ""))
+        if event_type in {"keydown", "keyup"}:
+            self._apply_synced_keyboard_input(event, event_type)
+            return
         frame = self._frame_for_input(event)
         canvas = event.get("canvas")
         if isinstance(canvas, dict):
@@ -943,7 +947,6 @@ class ChromeProfileSession:
         else:
             box = self._frame_box(frame)
         x, y = calculate_target_point(event, box)
-        event_type = str(event.get("type", ""))
         button_number = int(event.get("pointer", {}).get("button", 0))
         button = {0: "left", 1: "middle", 2: "right"}.get(button_number, "left")
         if event_type == "pointerdown":
@@ -961,6 +964,39 @@ class ChromeProfileSession:
                 float(wheel.get("delta_x", 0.0)),
                 float(wheel.get("delta_y", 0.0)),
             )
+
+    def _apply_synced_keyboard_input(self, event: dict[str, Any], event_type: str) -> None:
+        keyboard = event.get("keyboard")
+        if not isinstance(keyboard, dict):
+            return
+        key = str(keyboard.get("key", ""))
+        code = str(keyboard.get("code", ""))
+        key_code = max(0, int(keyboard.get("key_code", 0) or 0))
+        if not key and not code and not key_code:
+            return
+        modifiers = (
+            (1 if keyboard.get("alt") else 0)
+            | (2 if keyboard.get("ctrl") else 0)
+            | (4 if keyboard.get("meta") else 0)
+            | (8 if keyboard.get("shift") else 0)
+        )
+        params: dict[str, Any] = {
+            "type": "keyDown" if event_type == "keydown" else "keyUp",
+            "key": key,
+            "code": code,
+            "windowsVirtualKeyCode": key_code,
+            "nativeVirtualKeyCode": key_code,
+            "modifiers": modifiers,
+            "location": max(0, int(keyboard.get("location", 0) or 0)),
+            "autoRepeat": bool(keyboard.get("repeat", False)),
+            "isKeypad": int(keyboard.get("location", 0) or 0) == 3,
+        }
+        # Printable keys need `text` to update focused inputs. Shortcuts must
+        # not inject that character in addition to the Ctrl/Alt/Meta action.
+        if event_type == "keydown" and len(key) == 1 and not (modifiers & 0b0111):
+            params["text"] = key
+            params["unmodifiedText"] = key
+        self._get_page_cdp_session(self.page).send("Input.dispatchKeyEvent", params)
 
     def _configure_interaction_frames(self, *, force: bool = False) -> None:
         if self._page is None or self._page.is_closed():
@@ -1088,7 +1124,7 @@ class ChromeProfileSession:
         box = frame.frame_element().bounding_box()
         if box:
             return box
-        raise RuntimeError("Không xác định được vị trí frame đích để sync chuột")
+        raise RuntimeError("Không xác định được vị trí frame đích để đồng bộ thao tác")
 
     def pump(self, milliseconds: int = 50) -> None:
         if self._page is not None and not self._page.is_closed():

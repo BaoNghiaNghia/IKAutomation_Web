@@ -139,14 +139,14 @@ class Dashboard(QWidget):
         automation = self._card()
         au = QVBoxLayout(automation)
         sync_header = QHBoxLayout()
-        sync_header.addWidget(StrongBodyLabel("Đồng bộ chuột"))
+        sync_header.addWidget(StrongBodyLabel("Đồng bộ chuột - bàn phím"))
         sync_header.addStretch()
         self.sync_status_icon = QLabel("●")
         self.sync_status_icon.setFixedWidth(22)
         self.sync_status_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._set_sync_status_indicator(False)
         sync_header.addWidget(self.sync_status_icon)
-        self.sync_section_toggle = self._icon_button(FIF.CHEVRON_RIGHT, "Mở rộng Đồng bộ chuột")
+        self.sync_section_toggle = self._icon_button(FIF.CHEVRON_RIGHT, "Mở rộng Đồng bộ chuột - bàn phím")
         self.sync_section_toggle.clicked.connect(self._toggle_sync_section)
         sync_header.addWidget(self.sync_section_toggle)
         au.addLayout(sync_header)
@@ -155,11 +155,11 @@ class Dashboard(QWidget):
         sync_section_layout = QVBoxLayout(self.sync_section)
         sync_section_layout.setContentsMargins(0, 0, 0, 0)
         sync_section_layout.setSpacing(7)
-        sync_section_layout.addWidget(self._muted("Chọn profile master để đồng bộ thao tác."))
+        sync_section_layout.addWidget(self._muted("Chọn profile master để đồng bộ chuột và bàn phím."))
         sync = QHBoxLayout()
         self.master = ComboBox()
         sync.addWidget(self.master, 1)
-        self.sync = PushButton("Bật sync chuột")
+        self.sync = PushButton("Bật đồng bộ")
         self.sync.clicked.connect(self._toggle_sync)
         sync.addWidget(self.sync)
         sync_section_layout.addLayout(sync)
@@ -406,14 +406,14 @@ class Dashboard(QWidget):
     def _toggle_sync(self) -> None:
         if self.runner.sync_enabled:
             self.runner.disable_sync()
-            self.sync.setText("Bật sync chuột")
+            self.sync.setText("Bật đồng bộ")
             self.sync_status.setText("Sync đang tắt")
             self._set_sync_status_indicator(False)
             return
         master=str(self.master.currentData() or ""); opened=[p.id for p in self.config.profiles if self.runner.has_open_session(p.id)]
         if master not in opened or len(opened)<2: self._warning("Chưa đủ profile","Hãy mở master và ít nhất một follower trước khi bật sync."); return
         self.runner.enable_sync(master)
-        self.sync.setText("Tắt sync chuột")
+        self.sync.setText("Tắt đồng bộ")
         self.sync_status.setText(f"MASTER: {master} → {len(opened)-1} follower")
         self._set_sync_status_indicator(True)
     def _set_sync_status_indicator(self, enabled: bool) -> None:
@@ -422,7 +422,7 @@ class Dashboard(QWidget):
         self.sync_status_icon.setStyleSheet(
             f"color:{color}; background:transparent; font-size:22px; font-weight:700;"
         )
-        self.sync_status_icon.setToolTip(f"Đồng bộ chuột đang {state}")
+        self.sync_status_icon.setToolTip(f"Đồng bộ chuột - bàn phím đang {state}")
     def _toggle_sync_section(self) -> None:
         self.sync_section_expanded = not self.sync_section_expanded
         self.sync_section.setVisible(self.sync_section_expanded)
@@ -430,7 +430,9 @@ class Dashboard(QWidget):
             FIF.CHEVRON_DOWN_MED if self.sync_section_expanded else FIF.CHEVRON_RIGHT
         )
         self.sync_section_toggle.setToolTip(
-            "Thu gọn Đồng bộ chuột" if self.sync_section_expanded else "Mở rộng Đồng bộ chuột"
+            "Thu gọn Đồng bộ chuột - bàn phím"
+            if self.sync_section_expanded
+            else "Mở rộng Đồng bộ chuột - bàn phím"
         )
     def _toggle_farm(self, pid: str) -> None:
         row = self.rows[pid]

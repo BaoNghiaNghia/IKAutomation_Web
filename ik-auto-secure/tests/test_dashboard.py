@@ -82,12 +82,12 @@ def test_mouse_sync_section_is_collapsed_by_default_and_can_toggle() -> None:
     dashboard._toggle_sync_section()
     assert dashboard.sync_section_expanded is True
     assert dashboard.sync_section.visible is True
-    assert dashboard.sync_section_toggle.tooltip == "Thu gọn Đồng bộ chuột"
+    assert dashboard.sync_section_toggle.tooltip == "Thu gọn Đồng bộ chuột - bàn phím"
 
     dashboard._toggle_sync_section()
     assert dashboard.sync_section_expanded is False
     assert dashboard.sync_section.visible is False
-    assert dashboard.sync_section_toggle.tooltip == "Mở rộng Đồng bộ chuột"
+    assert dashboard.sync_section_toggle.tooltip == "Mở rộng Đồng bộ chuột - bàn phím"
 
 
 def test_mouse_sync_status_indicator_changes_colour_and_tooltip() -> None:
@@ -97,11 +97,11 @@ def test_mouse_sync_status_indicator_changes_colour_and_tooltip() -> None:
     dashboard._set_sync_status_indicator(False)
     assert "#94a3b8" in dashboard.sync_status_icon.style
     assert "font-size:22px" in dashboard.sync_status_icon.style
-    assert dashboard.sync_status_icon.tooltip == "Đồng bộ chuột đang tắt"
+    assert dashboard.sync_status_icon.tooltip == "Đồng bộ chuột - bàn phím đang tắt"
 
     dashboard._set_sync_status_indicator(True)
     assert "#16a34a" in dashboard.sync_status_icon.style
-    assert dashboard.sync_status_icon.tooltip == "Đồng bộ chuột đang bật"
+    assert dashboard.sync_status_icon.tooltip == "Đồng bộ chuột - bàn phím đang bật"
 
 
 def test_sync_master_profile_id_is_stored_as_combo_user_data() -> None:
