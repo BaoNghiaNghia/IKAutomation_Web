@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 
-from ik_chrome_auto.dashboard import Dashboard
+from ik_chrome_auto.dashboard import Dashboard, FarmProfileDialog
 
 
 class FakeLogWidget:
@@ -136,3 +136,10 @@ def test_dashboard_uses_smaller_typography_on_high_dpi_logical_screen() -> None:
     assert dense == (7.25, 7.0, 12.0, 6.5, 9.25, 30)
     assert dense[0] < compact[0] < desktop[0]
     assert dense[-1] < compact[-1] < desktop[-1]
+
+
+def test_farm_profile_picker_uses_two_columns_only_above_ten_profiles() -> None:
+    assert FarmProfileDialog._column_count(1) == 1
+    assert FarmProfileDialog._column_count(10) == 1
+    assert FarmProfileDialog._column_count(11) == 2
+    assert FarmProfileDialog._column_count(50) == 2

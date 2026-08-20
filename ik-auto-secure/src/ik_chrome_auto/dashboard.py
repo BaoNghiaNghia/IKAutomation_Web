@@ -948,8 +948,9 @@ class FarmProfileDialog(QDialog):
     def __init__(self, parent: Dashboard, profiles: list[ProfileConfig], selected: set[str]) -> None:
         super().__init__(parent)
         self.setWindowTitle("Chọn profile chạy Farm")
-        self.setMinimumWidth(470)
-        self.resize(500, 430)
+        column_count = self._column_count(len(profiles))
+        self.setMinimumWidth(470 if column_count == 1 else 760)
+        self.resize(500 if column_count == 1 else 820, 430 if column_count == 1 else 520)
         self._checks: dict[str, CheckBox] = {}
 
         layout = QVBoxLayout(self)
@@ -973,17 +974,19 @@ class FarmProfileDialog(QDialog):
         layout.addWidget(subtitle)
 
         content = QWidget()
-        rows = QVBoxLayout(content)
+        rows = QGridLayout(content)
         rows.setContentsMargins(4, 4, 4, 4)
         rows.setSpacing(7)
-        for profile in profiles:
+        for index, profile in enumerate(profiles):
             check = CheckBox(profile.name)
             check.setChecked(profile.id in selected)
             check.setToolTip(profile.id)
             check.setStyleSheet("CheckBox { background:#f7faff; border:1px solid #dce6f3; border-radius:9px; padding:10px 12px; font-weight:600; } CheckBox:hover { background:#eef6ff; border-color:#9ec5fe; }")
             self._checks[profile.id] = check
-            rows.addWidget(check)
-        rows.addStretch()
+            rows.addWidget(check, index // column_count, index % column_count)
+        for column in range(column_count):
+            rows.setColumnStretch(column, 1)
+        rows.setRowStretch((len(profiles) + column_count - 1) // column_count, 1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(content)
@@ -998,6 +1001,10 @@ class FarmProfileDialog(QDialog):
         footer.addWidget(cancel)
         footer.addWidget(run)
         layout.addLayout(footer)
+
+    @staticmethod
+    def _column_count(profile_count: int) -> int:
+        return 2 if profile_count > 10 else 1
 
     def _check_all(self) -> None:
         for check in self._checks.values():
