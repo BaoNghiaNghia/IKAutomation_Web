@@ -235,13 +235,22 @@ class Dashboard(QWidget):
     def _muted(text: str) -> QLabel:
         label=QLabel(text); label.setStyleSheet("color:#62758e; background:transparent;"); label.setWordWrap(True); return label
 
+    @staticmethod
+    def _add_master_profile_option(combo: ComboBox, label: str, profile_id: str) -> None:
+        """Store the profile ID as combo user data, not as a Fluent icon."""
+        combo.addItem(label, userData=profile_id)
+
     def _draw_rows(self) -> None:
         while self.table_layout.count():
             item=self.table_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
         self.rows.clear(); self.master.clear()
         for profile in self.config.profiles:
-            self.master.addItem(self._masked_profile_username(profile), profile.id)
+            self._add_master_profile_option(
+                self.master,
+                self._masked_profile_username(profile),
+                profile.id,
+            )
         for account_number, profile in enumerate(self.config.profiles, start=1):
             card=self._card(); self._set_roster_tooltip(card, ()); layout=QVBoxLayout(card); top=QHBoxLayout(); top.addWidget(StrongBodyLabel(self._profile_display_name(profile, account_number))); top.addWidget(self._muted(f"{profile.id} · {profile.mode.value}")); top.addStretch(); badge=QLabel("Đã dừng"); badge.setStyleSheet("background:#f1f5f9;color:#475569;border-radius:10px;padding:3px 8px;"); top.addWidget(badge); layout.addLayout(top); status=self._muted("Đã dừng"); resource=self._muted("—"); details=QHBoxLayout(); details.addWidget(status,1); details.addWidget(resource); layout.addLayout(details); buttons=QHBoxLayout(); buttons.setSpacing(5); open_btn=self._compact_profile_button(PrimaryPushButton("Mở")); open_btn.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.OPEN)); buttons.addWidget(open_btn); farm=self._compact_profile_button(PushButton("Farm")); farm.clicked.connect(lambda _=False,pid=profile.id:self._toggle_farm(pid)); buttons.addWidget(farm); shot=self._compact_profile_button(PushButton("Ảnh")); shot.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.SCREENSHOT)); buttons.addWidget(shot); inspect=self._compact_profile_button(PushButton("Đo")); inspect.clicked.connect(lambda _=False,pid=profile.id:self._toggle_inspector(pid)); buttons.addWidget(inspect); buttons.addStretch(); delete=self._icon_button(FIF.DELETE,"Xóa profile"); delete.setFixedSize(29,29); delete.clicked.connect(lambda _=False,pid=profile.id:self._remove_profile(pid)); buttons.addWidget(delete); layout.addLayout(buttons); index=len(self.rows); self.table_layout.addWidget(card, index // 2, index % 2); self.rows[profile.id]=ProfileRow(status,resource,badge,inspect,farm,card)
         self.table_layout.setRowStretch((len(self.rows) + 1) // 2, 1)

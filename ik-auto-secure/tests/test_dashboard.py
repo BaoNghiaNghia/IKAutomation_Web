@@ -54,6 +54,14 @@ class FakeStatusIcon:
         self.tooltip = tooltip
 
 
+class FakeProfileCombo:
+    def __init__(self) -> None:
+        self.items: list[tuple[str, object, object]] = []
+
+    def addItem(self, text: str, icon=None, userData=None) -> None:
+        self.items.append((text, icon, userData))
+
+
 def test_dashboard_log_keeps_only_ten_latest_rows() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     dashboard._log_lines = deque(maxlen=10)
@@ -93,6 +101,14 @@ def test_mouse_sync_status_indicator_changes_colour_and_tooltip() -> None:
     dashboard._set_sync_status_indicator(True)
     assert "#16a34a" in dashboard.sync_status_icon.style
     assert dashboard.sync_status_icon.tooltip == "Đồng bộ chuột đang bật"
+
+
+def test_sync_master_profile_id_is_stored_as_combo_user_data() -> None:
+    combo = FakeProfileCombo()
+
+    Dashboard._add_master_profile_option(combo, "cuongg********", "account-2")
+
+    assert combo.items == [("cuongg********", None, "account-2")]
 
 
 def test_dashboard_uses_more_space_on_compact_screens_and_half_on_desktop() -> None:
