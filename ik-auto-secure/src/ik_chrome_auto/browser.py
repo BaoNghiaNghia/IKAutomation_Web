@@ -26,7 +26,6 @@ from ik_chrome_auto.windows import (
     find_chrome_window,
     get_window_rect,
     get_renderer_rect,
-    is_region_visible_for_window,
     is_window,
     move_window_position,
     move_window_renderer,
@@ -532,25 +531,23 @@ class ChromeProfileSession:
     ) -> tuple[bytes, dict[str, float]]:
         """Capture the largest game canvas and return its viewport box.
 
-        Headed Chrome uses the pixels already composed by Windows. Calling
-        ``canvas.toDataURL`` or ``Page.captureScreenshot`` repeatedly on a
-        WebGL game forces a GPU readback and visibly stalls the game window.
-        Browser capture remains available for headless sessions, where there
-        is no visible desktop surface to read.
+        The capture is taken from this profile's Chrome renderer, never from
+        desktop pixels. This keeps Farm correct when another application or
+        profile window overlaps the visible Chrome window. Headed WebGL uses
+        a clipped ``Page.captureScreenshot`` first; it is a little more
+        expensive than a GDI copy, but it cannot accidentally capture another
+        window.
         """
         page = self.page
         self._ensure_page_runtime(page)
         frame = self.find_frame()
         canvas, box = self._largest_canvas(frame)
-        if (
-            sys.platform == "win32"
-            and not self.config.browser.headless
-            and not prefer_browser_capture
-        ):
-            # In headed Chrome, even a single WebGL readback/screenshot can
-            # make the compositor display a ghost frame. Never ask Chrome for
-            # pixels in this mode; copy only what Windows already displays.
-            return self._capture_visible_canvas_png(page, box), box
+        if sys.platform == "win32" and not self.config.browser.headless:
+            # ``toDataURL`` can synchronously read a WebGL buffer and cause a
+            # visible frame hitch. Go straight to CDP's clipped renderer
+            # capture in headed mode; unlike GDI it is also independent of
+            # z-order and desktop occlusion.
+            self._direct_canvas_capture_supported = False
         png: bytes | None = None
         if self._direct_canvas_capture_supported is not False:
             try:
@@ -640,6 +637,98 @@ class ChromeProfileSession:
 
     def tap_farm_template(self, bounds: tuple[int, int, int, int], image_size: tuple[int, int]) -> None:
         """Send one CDP touch at freshly matched screenshot-relative bounds."""
+        x, y = self._farm_template_center(bounds, image_size)
+        point = {"x": x, "y": y, "radiusX": 2, "radiusY": 2, "force": 1, "id": 1}
+        cdp = self._get_page_cdp_session(self.page)
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [point]})
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+
+    def read_focused_numeric_farm_input(
+        self,
+        bounds: tuple[int, int, int, int],
+        image_size: tuple[int, int],
+    ) -> int | None:
+        """Focus a verified coordinate field and return its numeric DOM value.
+
+        This intentionally refuses canvas-only focus: callers must not alter
+        World Map coordinates unless the browser exposes a readable input, so
+        the original X/Y values remain available for rollback.
+        """
+        self.tap_farm_template(bounds, image_size)
+        cdp = self._get_page_cdp_session(self.page)
+        result = cdp.send(
+            "Runtime.evaluate",
+            {
+                "expression": "(() => { const e = document.activeElement; return e && 'value' in e ? String(e.value) : null; })()",
+                "returnByValue": True,
+            },
+        )
+        value = result.get("result", {}).get("value") if isinstance(result, dict) else None
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+
+    def replace_focused_farm_input(self, value: int) -> bool:
+        """Replace the currently verified browser input and confirm its value."""
+        if value < 0:
+            return False
+        cdp = self._get_page_cdp_session(self.page)
+        for event in (
+            {"type": "keyDown", "key": "Control", "code": "ControlLeft", "windowsVirtualKeyCode": 17},
+            {"type": "keyDown", "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65, "modifiers": 2},
+            {"type": "keyUp", "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65, "modifiers": 2},
+            {"type": "keyUp", "key": "Control", "code": "ControlLeft", "windowsVirtualKeyCode": 17},
+            {"type": "keyDown", "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8},
+            {"type": "keyUp", "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8},
+        ):
+            cdp.send("Input.dispatchKeyEvent", event)
+        cdp.send("Input.insertText", {"text": str(value)})
+        result = cdp.send(
+            "Runtime.evaluate",
+            {
+                "expression": "(() => { const e = document.activeElement; return e && 'value' in e ? String(e.value) : null; })()",
+                "returnByValue": True,
+            },
+        )
+        observed = result.get("result", {}).get("value") if isinstance(result, dict) else None
+        return str(observed).strip() == str(value)
+
+    def click_farm_template_mouse(
+        self,
+        bounds: tuple[int, int, int, int],
+        image_size: tuple[int, int],
+    ) -> None:
+        """Use one mouse click for a fresh template as a guarded input fallback.
+
+        Some browser portal HUD controls ignore synthetic touch while accepting
+        normal mouse input.  Callers use this only after a verified touch has
+        not changed state; gameplay controls continue to prefer touch.
+        """
+        x, y = self._farm_template_center(bounds, image_size)
+        cdp = self._get_page_cdp_session(self.page)
+        for event_type, button, click_count in (
+            ("mouseMoved", "none", 0),
+            ("mousePressed", "left", 1),
+            ("mouseReleased", "left", 1),
+        ):
+            cdp.send(
+                "Input.dispatchMouseEvent",
+                {
+                    "type": event_type,
+                    "x": x,
+                    "y": y,
+                    "button": button,
+                    "clickCount": click_count,
+                    "pointerType": "mouse",
+                },
+            )
+
+    def _farm_template_center(
+        self,
+        bounds: tuple[int, int, int, int],
+        image_size: tuple[int, int],
+    ) -> tuple[float, float]:
         left, top, width, height = bounds
         image_width, image_height = image_size
         if width <= 0 or height <= 0 or image_width <= 0 or image_height <= 0:
@@ -648,10 +737,7 @@ class ChromeProfileSession:
         _canvas, surface = self._largest_canvas(frame)
         x = float(surface["x"]) + float(surface["width"]) * (left + width / 2) / image_width
         y = float(surface["y"]) + float(surface["height"]) * (top + height / 2) / image_height
-        point = {"x": x, "y": y, "radiusX": 2, "radiusY": 2, "force": 1, "id": 1}
-        cdp = self._get_page_cdp_session(self.page)
-        cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [point]})
-        cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        return x, y
 
     def _capture_visible_canvas_png(
         self,
@@ -674,11 +760,15 @@ class ChromeProfileSession:
         right = renderer.left + round((float(box["x"]) + float(box["width"])) * scale_x)
         bottom = renderer.top + round((float(box["y"]) + float(box["height"])) * scale_y)
         region = WindowRect(left, top, right, bottom)
-        if not is_region_visible_for_window(hwnd, region):
-            raise RuntimeError(
-                "Cửa sổ game đang bị thu nhỏ hoặc bị cửa sổ khác che; "
-                "hãy bấm Sắp xếp cửa sổ trước khi chạy Auto Farm hoặc Auto 2048"
-            )
+        # WindowFromPoint is advisory only.  Chrome's app-mode/WebGL renderer
+        # can be reported under a compositor HWND unrelated to the profile
+        # window even while the GDI capture below contains the live game.  A
+        # hard failure here therefore stopped valid farm runs.  Capture first;
+        # the non-empty pixels are the actual input for the template gate, and
+        # no gameplay click is allowed until that fresh capture matches the
+        # intended target.  A real overlay normally yields non-game pixels and
+        # is rejected by that gate as Unknown rather than triggering a blind
+        # click against the profile.
         png = capture_screen_region_png(region)
         if not _png_has_visible_content(png):
             raise RuntimeError("Ảnh màn hình game trống; hãy đưa cửa sổ profile ra màn hình")
@@ -967,6 +1057,43 @@ class ChromeProfileSession:
                         `;
                     }""",
                     self._scrollbars_visible,
+                )
+                # The portal can put the game canvas inside one or more plain
+                # wrapper elements.  Resetting only ``body`` was insufficient
+                # for that variant: its wrapper still retained the browser's
+                # 8px layout gutter, visibly leaving a black frame around the
+                # game.  Make every canvas ancestor fill the document and
+                # make the largest canvas fill that resulting surface.
+                frame.evaluate(
+                    """() => {
+                        if (!document.querySelector('canvas')) return;
+                        const styleId = '__ik_auto_canvas_fit';
+                        let style = document.getElementById(styleId);
+                        if (!style) {
+                            style = document.createElement('style');
+                            style.id = styleId;
+                            (document.head || document.documentElement).appendChild(style);
+                        }
+                        const canvases = [...document.querySelectorAll('canvas')];
+                        const canvas = canvases.sort((left, right) =>
+                            (right.width * right.height) - (left.width * left.height)
+                        )[0];
+                        if (!canvas) return;
+                        for (let node = canvas; node && node !== document.documentElement; node = node.parentElement) {
+                            node.style.setProperty('margin', '0', 'important');
+                            node.style.setProperty('padding', '0', 'important');
+                            node.style.setProperty('border', '0', 'important');
+                            node.style.setProperty('width', '100%', 'important');
+                            node.style.setProperty('height', '100%', 'important');
+                            node.style.setProperty('max-width', 'none', 'important');
+                            node.style.setProperty('max-height', 'none', 'important');
+                            node.style.setProperty('overflow', 'hidden', 'important');
+                        }
+                        style.textContent = `
+                            html, body { margin: 0 !important; padding: 0 !important; width: 100% !important; height: 100% !important; overflow: hidden !important; background: #000 !important; }
+                            canvas { display: block !important; margin: 0 !important; padding: 0 !important; border: 0 !important; width: 100% !important; height: 100% !important; max-width: none !important; max-height: none !important; }
+                        `;
+                    }"""
                 )
                 self._configured_frames[key] = signature
             except Exception:

@@ -9,6 +9,7 @@ from ik_chrome_auto.farm_vision import (
     TeamRowState,
     TemplateEvidence,
 )
+from ik_chrome_auto.farm_matcher import BrowserCanvasMatcher
 
 
 def detect(*templates: FarmTemplateId):
@@ -18,11 +19,16 @@ def detect(*templates: FarmTemplateId):
 def test_city_requires_map_button_and_no_higher_priority_overlay() -> None:
     assert detect(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON).state == DetectedGameState.CITY
     assert detect(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON, FarmTemplateId.WORLD_MAP_ANCHOR).state == DetectedGameState.WORLD_MAP
+    assert detect(
+        FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON,
+        FarmTemplateId.BROWSER_WORLD_MAP_COORDINATE_PIN,
+    ).state == DetectedGameState.WORLD_MAP
     assert detect(FarmTemplateId.BROWSER_CANVAS_READY_ANCHOR).state == DetectedGameState.UNKNOWN
     assert detect(FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON).state == DetectedGameState.UNKNOWN
     assert detect(FarmTemplateId.BROWSER_RESOURCE_SEARCH_PANEL).state == DetectedGameState.RESOURCE_SEARCH_PANEL
     assert detect(FarmTemplateId.BROWSER_RESOURCE_TAB_BUTTON).state == DetectedGameState.UNKNOWN
     assert detect(FarmTemplateId.BROWSER_IRON_RESOURCE_BUTTON).state == DetectedGameState.UNKNOWN
+    assert detect(FarmTemplateId.BROWSER_SEARCH_TARGET_CHECKBOX_UNCHECKED).state == DetectedGameState.UNKNOWN
 
 
 def test_detection_result_keeps_ready_team_slots() -> None:
@@ -36,6 +42,15 @@ def test_detection_result_keeps_ready_team_slots() -> None:
     assert [(row.team, row.state.value) for row in result.team_roster] == [
         (1, "ready"), (2, "busy"), (3, "ready"),
     ]
+
+
+def test_ready_label_maps_to_its_visual_roster_row_not_label_count() -> None:
+    # Reference screenshot: roster starts at y=187 and each row is 31px.
+    # Ready labels for rows 1, 3 and 4 must never be remapped to 2, 3 and 4.
+    assert [
+        BrowserCanvasMatcher._team_for_ready_label(y, 187, 31)
+        for y in (201, 262, 291)
+    ] == [1, 3, 4]
 
 
 def test_panel_requires_two_independent_signals() -> None:
@@ -57,6 +72,10 @@ def test_dialog_priority_matches_adb_detector() -> None:
 def test_popup_requires_multiple_signals() -> None:
     assert detect(FarmTemplateId.GATHER_BUTTON_ENABLED).state == DetectedGameState.UNKNOWN
     assert detect(FarmTemplateId.RESOURCE_POPUP_INFO_ANCHOR, FarmTemplateId.GATHER_BUTTON_ENABLED).state == DetectedGameState.RESOURCE_POPUP
+
+
+def test_browser_gather_button_confirms_resource_popup() -> None:
+    assert detect(FarmTemplateId.BROWSER_GATHER_BUTTON_ENABLED).state == DetectedGameState.RESOURCE_POPUP
 
 
 def test_browser_team_selection_requires_panel_and_action() -> None:

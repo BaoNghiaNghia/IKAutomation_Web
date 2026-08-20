@@ -557,24 +557,40 @@ def encode_rgb_png(width: int, height: int, rgb: bytes) -> bytes:
 
 
 def is_region_visible_for_window(hwnd: int, rect: WindowRect) -> bool:
-    """Check representative points so another profile cannot be read by mistake."""
+    """Check that the usable interior of a region belongs to its Chrome window.
+
+    WindowFromPoint may report Chrome's renderer child instead of the exact
+    top-level HWND.  In app-mode this child can have a different root while
+    still belonging to the same isolated Chrome profile process.  Treat that
+    process match as belonging to the profile, otherwise a fully visible game
+    is falsely marked covered.  We still require a strong interior majority,
+    so a real overlay from another process remains blocked.
+    """
     if sys.platform != "win32" or not is_window(hwnd) or _user32.IsIconic(hwnd):
         return False
     if rect.width <= 0 or rect.height <= 0:
         return False
-    for y_ratio in (0.08, 0.30, 0.50, 0.70, 0.92):
-        for x_ratio in (0.08, 0.30, 0.50, 0.70, 0.92):
+    target_pid = wintypes.DWORD()
+    _user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(target_pid))
+    matched = total = 0
+    for y_ratio in (0.20, 0.35, 0.50, 0.65, 0.80):
+        for x_ratio in (0.20, 0.35, 0.50, 0.65, 0.80):
+            total += 1
             point = wintypes.POINT(
                 rect.left + int((rect.width - 1) * x_ratio),
                 rect.top + int((rect.height - 1) * y_ratio),
             )
             hit = _user32.WindowFromPoint(point)
             if not hit:
-                return False
+                continue
             root = _user32.GetAncestor(hit, 2)  # GA_ROOT
-            if int(root or 0) != int(hwnd):
-                return False
-    return True
+            hit_pid = wintypes.DWORD()
+            _user32.GetWindowThreadProcessId(hit, ctypes.byref(hit_pid))
+            if int(root or 0) == int(hwnd) or (
+                target_pid.value and hit_pid.value == target_pid.value
+            ):
+                matched += 1
+    return matched * 100 >= total * 80
 
 
 def capture_screen_region_png(rect: WindowRect) -> bytes:

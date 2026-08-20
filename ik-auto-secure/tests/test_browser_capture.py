@@ -133,16 +133,15 @@ def test_black_direct_capture_is_probed_only_once() -> None:
     assert session._direct_canvas_capture_supported is False
 
 
-def test_headed_windows_capture_never_calls_chrome_screenshot(monkeypatch: Any) -> None:
+def test_headed_windows_capture_uses_profile_cdp_not_desktop_capture(monkeypatch: Any) -> None:
     session, canvas, context, _page = make_session()
     session.config.browser.headless = False
-    session._capture_visible_canvas_png = lambda _page, _box: ASSET_PNG
     monkeypatch.setattr(browser_module.sys, "platform", "win32")
 
     png, _ = session.capture_game_surface_png()
 
     assert png == ASSET_PNG
-    assert context.new_session_calls == 0
+    assert context.new_session_calls == 1
     assert canvas.evaluate_calls == 0
     assert canvas.screenshot_calls == 0
 
@@ -240,6 +239,21 @@ def test_escape_is_dispatched_without_focusing_real_window() -> None:
     ]
     assert [params["type"] for _method, params in calls] == ["keyDown", "keyUp"]
     assert all(params["windowsVirtualKeyCode"] == 27 for _method, params in calls)
+
+
+def test_mouse_fallback_click_uses_the_template_center() -> None:
+    session, _canvas, context, _page = make_session()
+
+    session.click_farm_template_mouse((10, 20, 30, 40), (100, 100))
+
+    calls = context.sessions[0].calls
+    assert [method for method, _params in calls] == ["Input.dispatchMouseEvent"] * 3
+    assert [params["type"] for _method, params in calls] == [
+        "mouseMoved",
+        "mousePressed",
+        "mouseReleased",
+    ]
+    assert all(params["x"] == 137.5 and params["y"] == 154.25 for _method, params in calls)
 
 
 def test_cdp_capture_uses_exact_canvas_clip() -> None:

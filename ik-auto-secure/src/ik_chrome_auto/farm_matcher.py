@@ -22,7 +22,9 @@ _REFERENCE_WIDTH = 1280
 _REFERENCE_HEIGHT = 720
 _BROWSER_REFERENCE_WIDTH = 836
 _BROWSER_REFERENCE_HEIGHT = 433
-_READY_TEAM_LABEL = "ready_team_label.png"
+_READY_TEAM_LABEL = "browser_ready_team_label.png"
+_READY_TEAM_LABEL_SNOW = "browser_ready_team_label_snow.png"
+_BUSY_TEAM_LABEL = "browser_busy_team_label.png"
 # Browser screenshots have their own HUD scaling. These are stable roster
 # layout proportions, not gameplay click coordinates. A matched Ready label
 # is mapped to its actual row before any scheduler decision is made.
@@ -40,24 +42,45 @@ class TemplateSpec:
     reference_height: int = _REFERENCE_HEIGHT
     alternatives: tuple[str, ...] = ()
     uniform_width_scale: bool = False
+    # Text rendered in the canvas can differ by one or two device pixels
+    # between Chrome profiles.  Text-specific templates may opt into a small
+    # bounded scale sweep and luminance matching.
+    scale_variants: tuple[float, ...] = (1.0,)
+    grayscale: bool = False
+    # Edge matching is used for controls whose artwork changes colour with
+    # the game environment, while their silhouette remains stable.
+    edge: bool = False
 
 
 SPECS: dict[FarmTemplateId, TemplateSpec] = {
     FarmTemplateId.WORLD_MAP_ANCHOR: TemplateSpec("world_map_anchor.png", region="lower_left"),
     # The portal renders the same City → World Map control with different
-    # artwork in its green and snowy city skins. Both browser canvas templates
-    # are matched, then the strongest result is used (never a fixed click).
+    # artwork in its green and snowy city skins. Match the icon's edge map,
+    # not its colour, and crop alternatives tightly around its silhouette so
+    # lighting and surrounding terrain cannot dominate the score.
     FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON: TemplateSpec(
         "browser_city_to_world_map_green.png",
-        threshold=0.78,
+        threshold=0.55,
         region="lower_left",
         reference_width=835,
         reference_height=432,
-        alternatives=("browser_city_to_world_map_button.png",),
+        alternatives=(
+            "browser_city_to_world_map_button.png",
+            "browser_city_to_world_map_green_core.png",
+            "browser_city_to_world_map_red_core.png",
+        ),
+        scale_variants=(0.92, 0.96, 1.0, 1.04, 1.08),
+        edge=True,
     ),
     FarmTemplateId.CONTINENT_MAP_TITLE: TemplateSpec("continent_map_title.png"),
     FarmTemplateId.CONTINENT_MAP_HOME_TERRITORY_ANCHOR: TemplateSpec("continent_map_home_territory_anchor.png", region="center"),
     FarmTemplateId.CONTINENT_MAP_PIN_BUTTON: TemplateSpec("continent_map_pin_button.png", region="top_left"),
+    FarmTemplateId.CONTINENT_MAP_SEARCH_TARGET_PIN: TemplateSpec(
+        "continent_map_search_target_pin.png", reference_width=1280, reference_height=720
+    ),
+    FarmTemplateId.WORLD_MAP_PIN_BUTTON: TemplateSpec(
+        "world_map_pin_button.png", region="top_left", reference_width=1280, reference_height=720
+    ),
     FarmTemplateId.RESOURCE_SEARCH_PANEL_ANCHOR: TemplateSpec("resource_search_panel_anchor.png", region="lower"),
     FarmTemplateId.SEARCH_BUTTON_ENABLED: TemplateSpec("search_button_enabled.png", region="lower"),
     FarmTemplateId.LEVEL_MINUS_BUTTON: TemplateSpec("level_minus_button.png", region="lower"),
@@ -82,9 +105,40 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
         reference_width=835,
         reference_height=432,
     ),
+    # The blue return control in the top-left exists only while the portal is
+    # on World Map. It prevents the City icon at lower-left from being used as
+    # a false City classification when a new farm cycle begins.
+    FarmTemplateId.BROWSER_WORLD_MAP_BACK_BUTTON: TemplateSpec(
+        "browser_world_map_back_button.png",
+        threshold=0.80,
+        region="top_left",
+        reference_width=838,
+        reference_height=436,
+    ),
+    # The web portal opens Continent Map from the small location-pin control
+    # next to the live X/Y indicator, unlike the larger ADB minimap button.
+    FarmTemplateId.BROWSER_WORLD_MAP_COORDINATE_PIN: TemplateSpec(
+        "browser_world_map_coordinate_pin.png",
+        threshold=0.75,
+        region="top",
+        reference_width=835,
+        reference_height=432,
+        scale_variants=(0.94, 0.97, 1.0, 1.03, 1.06),
+        grayscale=True,
+    ),
+    FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON: TemplateSpec(
+        "browser_city_continent_map_button.png",
+        threshold=0.80,
+        region="lower_left",
+        reference_width=850,
+        reference_height=437,
+        scale_variants=(0.94, 0.97, 1.0, 1.03, 1.06),
+    ),
     FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON: TemplateSpec(
         "browser_resource_search_button.png",
-        threshold=0.78,
+        # Account-2's green World Map skin consistently scores about 0.75.
+        # It is used only after a World Map state is independently verified.
+        threshold=0.70,
         region="lower_left",
         reference_width=836,
         reference_height=433,
@@ -108,7 +162,11 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
         reference_width=881, reference_height=239, uniform_width_scale=True,
     ),
     FarmTemplateId.BROWSER_WOOD_RESOURCE_BUTTON: TemplateSpec(
-        "browser_resource_wood.png", threshold=0.80, region="lower",
+        # Browser canvas capture of the selected/unselected Wood artwork is
+        # consistently softer than the original source pack. Production
+        # captures score ~0.687 while the panel and Search button are already
+        # independently verified, so 0.66 is the safe observed gate here.
+        "browser_resource_wood.png", threshold=0.66, region="lower",
         reference_width=881, reference_height=239, uniform_width_scale=True,
     ),
     FarmTemplateId.BROWSER_STONE_RESOURCE_BUTTON: TemplateSpec(
@@ -122,12 +180,81 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
         reference_width=835,
         reference_height=432,
     ),
+    # Captured from the four active states supplied for the web UI.  Match
+    # the complete icon plus its orange label so an adjacent inactive icon is
+    # never mistaken for the selected resource.  Use width-only scaling: this
+    # lower panel keeps its native artwork aspect while the canvas height may
+    # be letterboxed by the host page.
+    FarmTemplateId.BROWSER_FOOD_RESOURCE_ACTIVE: TemplateSpec(
+        "browser_resource_food_active.png", threshold=0.72, region="lower",
+        reference_width=881, reference_height=239, uniform_width_scale=True,
+    ),
+    FarmTemplateId.BROWSER_WOOD_RESOURCE_ACTIVE: TemplateSpec(
+        "browser_resource_wood_active.png", threshold=0.72, region="lower",
+        reference_width=881, reference_height=239, uniform_width_scale=True,
+    ),
+    FarmTemplateId.BROWSER_STONE_RESOURCE_ACTIVE: TemplateSpec(
+        "browser_resource_stone_active.png", threshold=0.72, region="lower",
+        reference_width=881, reference_height=239, uniform_width_scale=True,
+    ),
+    FarmTemplateId.BROWSER_IRON_RESOURCE_ACTIVE: TemplateSpec(
+        "browser_resource_iron_active.png", threshold=0.72, region="lower",
+        reference_width=881, reference_height=239, uniform_width_scale=True,
+    ),
+    # The resource panel's "only search eligible target" checkbox must be
+    # enabled before Search.  Match the *unchecked* glyph only; after tapping
+    # it, its disappearance is the verified checked state.  This keeps the
+    # input anchored to the live UI rather than a hard-coded canvas point.
+    FarmTemplateId.BROWSER_SEARCH_TARGET_CHECKBOX_UNCHECKED: TemplateSpec(
+        "browser_search_target_checkbox_unchecked.png",
+        # Green World Map skin uses a smaller blue unchecked circle. The
+        # original template scored only ~0.53 there, so include its verified
+        # crop rather than treating a failed match as an already-checked box.
+        threshold=0.72,
+        region="lower_right",
+        reference_width=836,
+        reference_height=433,
+        alternatives=("browser_search_target_checkbox_unchecked_green.png",),
+        scale_variants=(0.94, 0.97, 1.0, 1.03, 1.06),
+    ),
     FarmTemplateId.BROWSER_SEARCH_BUTTON_ENABLED: TemplateSpec(
         "browser_search_button_enabled.png",
         threshold=0.80,
         region="lower",
         reference_width=835,
         reference_height=432,
+    ),
+    # These localized toast anchors are shared from the ADB pack. They are
+    # observed after a Search tap only; they never authorise an input.
+    FarmTemplateId.BROWSER_TOAST_NOT_FOUND: TemplateSpec(
+        "browser_toast_not_found.png", threshold=0.78, region="toast"
+    ),
+    FarmTemplateId.BROWSER_TOAST_NOT_FOUND_SHORT: TemplateSpec(
+        "browser_toast_not_found_short.png", threshold=0.78, region="toast"
+    ),
+    FarmTemplateId.BROWSER_TOAST_OTHER_REGION: TemplateSpec(
+        "browser_toast_other_region.png", threshold=0.78, region="toast"
+    ),
+    FarmTemplateId.BROWSER_TOAST_LEVEL_TOO_LOW: TemplateSpec(
+        "browser_toast_level_too_low.png", threshold=0.78, region="toast"
+    ),
+    # Confirmation is permitted only when both the invariant beginning of the
+    # target-resource expiry message and its red confirm button are visible.
+    FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_TOAST: TemplateSpec(
+        # Match only the fixed message prefix. The following timer and amount
+        # change every time this warning opens, so including them caused a
+        # valid dialog to be rejected despite a strong Confirm match.
+        # Browser canvas anti-aliasing makes this text prefix score ~0.57 on
+        # a confirmed production dialog. It is never used alone: the runner
+        # also requires the independently matched red Confirm button (0.80).
+        "browser_target_resource_expiry_toast.png", threshold=0.55,
+        reference_width=850, reference_height=446,
+        scale_variants=(0.94, 0.97, 1.0, 1.03, 1.06), grayscale=True,
+    ),
+    FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_CONFIRM: TemplateSpec(
+        "browser_target_resource_expiry_confirm.png", threshold=0.80,
+        reference_width=850, reference_height=446,
+        scale_variants=(0.97, 1.0, 1.03),
     ),
     FarmTemplateId.BROWSER_GATHER_BUTTON_ENABLED: TemplateSpec(
         "browser_gather_button_enabled.png",
@@ -213,55 +340,80 @@ class BrowserCanvasMatcher:
         """
         import cv2
 
-        template = self._load(_READY_TEAM_LABEL)
+        ready_templates = (
+            self._load(_READY_TEAM_LABEL),
+            self._load(_READY_TEAM_LABEL_SNOW),
+        )
+        busy_template = self._load(_BUSY_TEAM_LABEL)
         image_height, image_width = image.shape[:2]
-        scaled_width = max(1, round(template.shape[1] * image_width / _BROWSER_REFERENCE_WIDTH))
-        scaled_height = max(1, round(template.shape[0] * image_height / _BROWSER_REFERENCE_HEIGHT))
-        scaled = cv2.resize(template, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
-        # The team list is a visual panel, so restrict matching to it.  The
-        # exact rows are found from image matches and may move vertically.
-        left, top, width, height = 0, image_height // 3, image_width // 6, image_height * 5 // 12
-        search = image[top : top + height, left : left + width]
-        if scaled.shape[1] > search.shape[1] or scaled.shape[0] > search.shape[0]:
-            return ()
-        # Text is anti-aliased slightly differently between a 836×433 desktop
-        # capture and a 835×432 CDP canvas. Match luminance, not the changing
-        # city-skin colours behind the label.
-        search_gray = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
-        template_gray = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
-        scores = cv2.matchTemplate(search_gray, template_gray, cv2.TM_CCOEFF_NORMED)
-        label_tops: list[int] = []
-        while True:
-            _, confidence, _, location = cv2.minMaxLoc(scores)
-            if confidence < 0.48:
-                break
-            label_y = top + int(location[1])
-            if all(abs(label_y - existing) >= max(8, scaled_height) for existing in label_tops):
-                label_tops.append(label_y)
-            cv2.rectangle(
-                scores,
-                (max(0, location[0] - scaled_width), max(0, location[1] - scaled_height)),
-                (min(scores.shape[1], location[0] + scaled_width), min(scores.shape[0], location[1] + scaled_height)),
-                -1,
-                thickness=-1,
-            )
+        def scale(template: object) -> object:
+            scaled_width = max(1, round(template.shape[1] * image_width / _BROWSER_REFERENCE_WIDTH))
+            scaled_height = max(1, round(template.shape[0] * image_height / _BROWSER_REFERENCE_HEIGHT))
+            return cv2.resize(template, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
+
+        scaled_ready = tuple(scale(template) for template in ready_templates)
+        scaled_busy = scale(busy_template)
         roster_top = round(image_height * _ROSTER_TOP_RATIO)
         row_height = max(1, round(image_height * _ROSTER_ROW_HEIGHT_RATIO))
-        ready = {
-            min(_MAX_TEAM_ROWS, max(1, round((label_top - roster_top) / row_height) + 1))
-            for label_top in label_tops
-        }
-        if not ready:
+        # Never infer a row from the count/order of all template matches. A
+        # match in the city HUD or another row caused exactly that bug. Probe
+        # the label slot in each of the four fixed rows independently: top to
+        # bottom is game team 1 → 4 and only a local `Sẵn sàng` match is Ready.
+        label_left = round(image_width * 0.052)
+        label_right = min(image_width // 6, label_left + round(image_width * 0.095))
+        ready_grays = tuple(cv2.cvtColor(template, cv2.COLOR_BGR2GRAY) for template in scaled_ready)
+        busy_gray = cv2.cvtColor(scaled_busy, cv2.COLOR_BGR2GRAY)
+        states: dict[int, TeamRowState] = {}
+        for team in range(1, _MAX_TEAM_ROWS + 1):
+            row_top = roster_top + (team - 1) * row_height
+            row_bottom = min(image_height, row_top + row_height)
+            search = image[row_top:row_bottom, label_left:label_right]
+            if any(template.shape[1] > search.shape[1] or template.shape[0] > search.shape[0] for template in scaled_ready):
+                continue
+            search_gray = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
+            ready_score = max(
+                cv2.minMaxLoc(cv2.matchTemplate(search_gray, template, cv2.TM_CCOEFF_NORMED))[1]
+                for template in ready_grays
+            )
+            busy_score = -1.0
+            if scaled_busy.shape[1] <= search.shape[1] and scaled_busy.shape[0] <= search.shape[0]:
+                busy_score = cv2.minMaxLoc(
+                    cv2.matchTemplate(search_gray, busy_gray, cv2.TM_CCOEFF_NORMED)
+                )[1]
+            # A row is Ready only with strong positive evidence and when that
+            # evidence is decisively stronger than the observed busy label.
+            # This excludes the sidebar's repeated background which used to
+            # make every row score as `Sẵn sàng` at the old 0.66 threshold.
+            if ready_score >= 0.82 and ready_score >= busy_score + 0.08:
+                states[team] = TeamRowState.READY
+            elif busy_score >= 0.78 and busy_score >= ready_score + 0.05:
+                states[team] = TeamRowState.BUSY
+        if not states:
             return ()
-        highest_confirmed = max(ready)
+        highest_confirmed = max(states)
         return tuple(
             TeamRosterRow(
                 team=team,
-                state=TeamRowState.READY if team in ready else TeamRowState.BUSY,
-                evidence="ReadyLabel" if team in ready else "InferredPrecedingRow",
+                state=states.get(team, TeamRowState.BUSY),
+                evidence=(
+                    "ReadyLabel"
+                    if states.get(team) is TeamRowState.READY
+                    else "BusyLabel"
+                    if states.get(team) is TeamRowState.BUSY
+                    else "InferredPrecedingRow"
+                ),
             )
             for team in range(1, highest_confirmed + 1)
         )
+
+    @staticmethod
+    def _team_for_ready_label(label_top: int, roster_top: int, row_height: int) -> int | None:
+        if row_height <= 0:
+            return None
+        # A label is vertically centered within its row.  Offset half a row,
+        # then use integer division so the four visual rows stay 1→2→3→4.
+        team = ((label_top - roster_top) + row_height // 2) // row_height + 1
+        return team if 1 <= team <= _MAX_TEAM_ROWS else None
 
     def _match(self, image: object, template_id: FarmTemplateId) -> TemplateEvidence:
         spec = SPECS.get(template_id)
@@ -286,20 +438,40 @@ class BrowserCanvasMatcher:
         image_height, image_width = image.shape[:2]
         scale_x = image_width / spec.reference_width
         scale_y = scale_x if spec.uniform_width_scale else image_height / spec.reference_height
-        scaled_width = max(1, round(template.shape[1] * scale_x))
-        scaled_height = max(1, round(template.shape[0] * scale_y))
-        if scaled_width > image_width or scaled_height > image_height:
-            return TemplateEvidence(template_id, False)
-        scaled = cv2.resize(template, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
         x, y, width, height = self._region(spec.region, image_width, image_height)
         search = image[y : y + height, x : x + width]
-        if scaled.shape[1] > search.shape[1] or scaled.shape[0] > search.shape[0]:
-            return TemplateEvidence(template_id, False)
-        result = cv2.matchTemplate(search, scaled, cv2.TM_CCOEFF_NORMED)
-        _, confidence, _, location = cv2.minMaxLoc(result)
-        if confidence < spec.threshold:
-            return TemplateEvidence(template_id, False, float(confidence))
-        return TemplateEvidence(template_id, True, float(confidence), (x + int(location[0]), y + int(location[1]), scaled_width, scaled_height))
+        best_confidence = -1.0
+        best_location: tuple[int, int] | None = None
+        best_size: tuple[int, int] | None = None
+        for variant in spec.scale_variants:
+            scaled_width = max(1, round(template.shape[1] * scale_x * variant))
+            scaled_height = max(1, round(template.shape[0] * scale_y * variant))
+            if scaled_width > search.shape[1] or scaled_height > search.shape[0]:
+                continue
+            scaled = cv2.resize(template, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
+            if spec.edge:
+                match_search = cv2.Canny(cv2.cvtColor(search, cv2.COLOR_BGR2GRAY), 60, 150)
+                match_template = cv2.Canny(cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY), 60, 150)
+            elif spec.grayscale:
+                match_search = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
+                match_template = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
+            else:
+                match_search = search
+                match_template = scaled
+            result = cv2.matchTemplate(match_search, match_template, cv2.TM_CCOEFF_NORMED)
+            _, confidence, _, location = cv2.minMaxLoc(result)
+            if confidence > best_confidence:
+                best_confidence = float(confidence)
+                best_location = (int(location[0]), int(location[1]))
+                best_size = (scaled_width, scaled_height)
+        if best_confidence < spec.threshold or best_location is None or best_size is None:
+            return TemplateEvidence(template_id, False, max(0.0, best_confidence))
+        return TemplateEvidence(
+            template_id,
+            True,
+            best_confidence,
+            (x + best_location[0], y + best_location[1], best_size[0], best_size[1]),
+        )
 
     def _load(self, filename: str) -> object:
         import cv2
@@ -317,7 +489,9 @@ class BrowserCanvasMatcher:
         if name == "left": return 0, 0, width // 4, height
         if name == "lower_left": return 0, height // 2, width // 2, height - height // 2
         if name == "lower": return 0, height // 2, width, height - height // 2
+        if name == "lower_right": return width // 2, height // 2, width - width // 2, height - height // 2
         if name == "top_left": return 0, 0, width // 4, height // 5
+        if name == "toast": return width // 6, height // 15, width * 2 // 3, height // 3
         if name == "right": return width * 3 // 4, 0, width - (width * 3 // 4), height // 2
         if name == "center": return width // 4, height // 5, width // 2, height - (height * 2 // 5)
         return 0, 0, width, height

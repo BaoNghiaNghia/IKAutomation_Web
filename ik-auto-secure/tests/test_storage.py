@@ -50,3 +50,11 @@ def test_diagnostic_upscale_doubles_dimensions_without_altering_pixel_values() -
 
     assert (image.width, image.height) == (4, 2)
     assert image.pixels == bytes((10, 20, 30, 10, 20, 30, 40, 50, 60, 40, 50, 60) * 2)
+
+
+def test_diagnostic_screenshot_defaults_to_1280x720() -> None:
+    source = encode_rgb_png(2, 1, bytes((10, 20, 30, 40, 50, 60)))
+
+    image = decode_png(upscale_png_for_diagnostics(source))
+
+    assert (image.width, image.height) == (1280, 720)

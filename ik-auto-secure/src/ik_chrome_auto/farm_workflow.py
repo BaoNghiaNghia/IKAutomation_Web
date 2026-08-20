@@ -24,6 +24,7 @@ class FarmGameState(StrEnum):
 
 class FarmStep(StrEnum):
     PREFLIGHT = "preflight"
+    RETURN_TO_CITY = "return_to_city"
     ENTER_WORLD_MAP = "enter_world_map"
     CHECK_TEAMS = "check_teams"
     OPEN_SEARCH = "open_search"
@@ -38,11 +39,16 @@ class FarmStep(StrEnum):
 @dataclass(frozen=True, slots=True)
 class FarmPolicy:
     resources: tuple[str, ...] = ("iron", "stone", "wood", "food")
-    levels: tuple[int, ...] = (7, 6, 5)
-    # The browser/ADB roster contains the four sequential in-game teams. Team
-    # 1 remains excluded by the established farm policy; 2–4 may be selected.
-    allowed_teams: tuple[int, ...] = (2, 3, 4)
-    retry_delay_seconds: int = 30
+    # Only these levels have an approved World Map relocation pool. Level 5
+    # must not enter that flow because no verified area rule exists for it.
+    levels: tuple[int, ...] = (6, 7, 8)
+    # All four rows can be used. The selected team is the first verified Ready
+    # row from the World Map roster and remains locked for the whole cycle.
+    allowed_teams: tuple[int, ...] = (1, 2, 3, 4)
+    # A completed march is followed by a fresh roster scan after 15 seconds.
+    # This is deliberately short enough to pick up another ready team while
+    # still allowing the game HUD and dispatch animation to settle.
+    retry_delay_seconds: int = 15
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,9 +71,9 @@ class FarmWorkflow:
 
     def __init__(self, policy: FarmPolicy | None = None, *, resource_order: tuple[str, ...] | None = None) -> None:
         self.policy = policy or FarmPolicy()
-        # One shuffled plan is fixed for the whole cycle. This matches the ADB
-        # fallback contract: exhaust levels for one resource before moving to
-        # the next resource, rather than rerolling after every failed search.
+        # One shuffled resource order is fixed for the whole cycle. A miss
+        # changes resource first; only after all four were tried does the
+        # runner invoke the approved area-relocation flow for this level.
         self.resource_order = resource_order or tuple(SystemRandom().sample(self.policy.resources, len(self.policy.resources)))
         self.step = FarmStep.PREFLIGHT
         self.resource_index = 0
@@ -94,9 +100,18 @@ class FarmWorkflow:
                 self.step = FarmStep.ENTER_WORLD_MAP
                 return FarmDecision(self.step, "Đã nhận diện City; cần mở World Map", input_allowed=target_verified)
             if state == FarmGameState.WORLD_MAP:
-                self.step = FarmStep.CHECK_TEAMS
+                # Every browser cycle starts from City. This clears stale
+                # World Map panels and makes the City → World Map transition
+                # explicit before we inspect teams or search resources.
+                self.step = FarmStep.RETURN_TO_CITY
+                return FarmDecision(self.step, "Đang ở World Map; cần về City trước khi farm")
             else:
                 return FarmDecision(self.step, "Chờ City hoặc World Map đã được xác minh")
+        if self.step == FarmStep.RETURN_TO_CITY:
+            if state != FarmGameState.CITY:
+                return FarmDecision(self.step, "Chờ xác minh City sau thao tác quay về")
+            self.step = FarmStep.ENTER_WORLD_MAP
+            return FarmDecision(self.step, "Đã xác minh City; cần mở World Map", input_allowed=target_verified)
         if self.step == FarmStep.ENTER_WORLD_MAP:
             if state != FarmGameState.WORLD_MAP:
                 return FarmDecision(self.step, "Chờ xác minh World Map sau thao tác")
@@ -106,7 +121,12 @@ class FarmWorkflow:
             if not allowed:
                 self.step = FarmStep.WAITING
                 return FarmDecision(self.step, "Không có đội sẵn sàng; chờ lượt tiếp theo")
-            self.team = allowed[0]
+            # Do not replace a team chosen from the cycle's initial World Map
+            # scan just because an intermediate frame is reclassified. That
+            # old behaviour made the browser flow look like it defaulted to
+            # team 2. A new cycle creates a new workflow and may choose again.
+            if self.team is None:
+                self.team = allowed[0]
             self.step = FarmStep.OPEN_SEARCH
             return FarmDecision(self.step, f"Đội {self.team} sẵn sàng; mở tìm tài nguyên", team=self.team, input_allowed=target_verified)
         resource, level = self._target()
@@ -150,18 +170,25 @@ class FarmWorkflow:
         return FarmDecision(self.step, "Đang chờ lượt farm tiếp theo")
 
     def advance_search_plan(self) -> bool:
-        """Try the next level then resource; false means this cycle is exhausted."""
-        self.level_index += 1
-        if self.level_index < len(self.policy.levels):
-            self.step = FarmStep.OPEN_SEARCH
-            return True
-        self.level_index = 0
+        """Try the next resource; false means this four-resource round ended."""
         self.resource_index += 1
         if self.resource_index < len(self.resource_order):
             self.step = FarmStep.OPEN_SEARCH
             return True
+        self.resource_index = 0
+        return False
+
+    def advance_level_plan(self) -> bool:
+        """Move to the next approved level after its area point pool ends."""
+        self.level_index += 1
+        if self.level_index < len(self.policy.levels):
+            self.step = FarmStep.OPEN_SEARCH
+            return True
         self.step = FarmStep.WAITING
         return False
+
+    def current_target(self) -> tuple[str, int]:
+        return self._target()
 
     def _target(self) -> tuple[str, int]:
         return self.resource_order[self.resource_index], self.policy.levels[self.level_index]

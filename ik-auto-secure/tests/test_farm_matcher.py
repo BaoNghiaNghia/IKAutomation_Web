@@ -83,3 +83,30 @@ def test_matcher_uses_the_best_city_skin_variant(tmp_path, monkeypatch) -> None:
     assert evidence.found
     assert evidence.bounds is not None
     assert evidence.bounds[:2] == (90, 150)
+
+
+def test_city_edge_match_is_not_dependent_on_environment_colour(tmp_path, monkeypatch) -> None:
+    import ik_chrome_auto.farm_matcher as matcher_module
+
+    city = np.zeros((24, 28, 3), dtype=np.uint8)
+    cv2.circle(city, (14, 13), 10, (40, 180, 40), 2)
+    cv2.rectangle(city, (9, 6), (19, 18), (50, 210, 70), 2)
+    # Same shape, intentionally different night/snow palette.
+    night_city = np.zeros((24, 28, 3), dtype=np.uint8)
+    cv2.circle(night_city, (14, 13), 10, (190, 80, 210), 2)
+    cv2.rectangle(night_city, (9, 6), (19, 18), (225, 95, 230), 2)
+    cv2.imwrite(str(tmp_path / "city.png"), city)
+    monkeypatch.setitem(
+        matcher_module.SPECS,
+        FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON,
+        matcher_module.TemplateSpec(
+            "city.png", threshold=0.55, region="lower_left",
+            reference_width=400, reference_height=200, edge=True,
+        ),
+    )
+    canvas = np.zeros((200, 400, 3), dtype=np.uint8)
+    canvas[150:174, 90:118] = night_city
+    evidence = BrowserCanvasMatcher(tmp_path)._match(canvas, FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
+    assert evidence.found
+    assert evidence.bounds is not None
+    assert evidence.bounds[:2] == (90, 150)

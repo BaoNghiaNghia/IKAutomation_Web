@@ -53,32 +53,42 @@ def write_retained_png(path: Path, data: bytes, *, keep: int = 2) -> Path:
     return path
 
 
-def upscale_png_for_diagnostics(data: bytes, *, scale: int = 2) -> bytes:
-    """Enlarge a PNG for local inspection without changing the live frame.
+def upscale_png_for_diagnostics(
+    data: bytes,
+    *,
+    width: int = 1280,
+    height: int = 720,
+    scale: int | None = None,
+) -> bytes:
+    """Create a fixed-size local debug image without changing live Chrome.
 
-    Farm matching and click coordinates always use the original capture.  The
-    retained copy is scaled with nearest-neighbour pixels only, so UI labels
-    remain crisp when a compact Chrome profile produced a small canvas.
+    Farm matching and click coordinates always use the original GDI capture.
+    Only saved screenshots are expanded.  ``scale`` is retained for callers
+    that explicitly need the legacy integer nearest-neighbour scaling.
     """
-    if scale < 1:
-        raise ValueError("Tỷ lệ phóng ảnh phải lớn hơn hoặc bằng 1")
-    if scale == 1:
-        return data
+    if width < 1 or height < 1:
+        raise ValueError("Kích thước ảnh debug phải lớn hơn 0")
     image = decode_png(data)
+    if scale is not None:
+        if scale < 1:
+            raise ValueError("Tỷ lệ phóng ảnh phải lớn hơn hoặc bằng 1")
+        width, height = image.width * scale, image.height * scale
+    if (image.width, image.height) == (width, height):
+        return data
     source_stride = image.width * 3
-    expanded = bytearray(image.width * scale * image.height * scale * 3)
-    target_stride = image.width * scale * 3
-    target_offset = 0
-    for y in range(image.height):
-        source_row = image.pixels[y * source_stride : (y + 1) * source_stride]
-        enlarged_row = b"".join(
-            source_row[offset : offset + 3] * scale
-            for offset in range(0, source_stride, 3)
-        )
-        for _ in range(scale):
-            expanded[target_offset : target_offset + target_stride] = enlarged_row
-            target_offset += target_stride
-    return encode_rgb_png(image.width * scale, image.height * scale, bytes(expanded))
+    target_stride = width * 3
+    expanded = bytearray(target_stride * height)
+    for target_y in range(height):
+        source_y = min(image.height - 1, target_y * image.height // height)
+        source_row = image.pixels[source_y * source_stride : (source_y + 1) * source_stride]
+        target_offset = target_y * target_stride
+        for target_x in range(width):
+            source_x = min(image.width - 1, target_x * image.width // width)
+            source_offset = source_x * 3
+            expanded[target_offset + target_x * 3 : target_offset + target_x * 3 + 3] = source_row[
+                source_offset : source_offset + 3
+            ]
+    return encode_rgb_png(width, height, bytes(expanded))
 
 
 def write_retained_json(path: Path, value: Any, *, keep: int = 50) -> Path:

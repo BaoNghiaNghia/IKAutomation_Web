@@ -24,6 +24,7 @@ from ik_chrome_auto.models import (
     WorkerState,
 )
 from ik_chrome_auto.reader import redact
+from ik_chrome_auto.resource_area_points import ResourceAreaPointSelector
 from ik_chrome_auto.storage import upscale_png_for_diagnostics, write_retained_png
 from ik_chrome_auto.windows import (
     calculate_tiled_positions,
@@ -126,13 +127,21 @@ class ProfileWorker:
         self._farm: FarmWorkflow | None = None
         self._farm_next_at = 0.0
         self._farm_city_clicks = 0
+        self._farm_return_city_click_at = 0.0
         self._farm_world_map_click_at = 0.0
         self._farm_ready_teams: tuple[int, ...] = ()
         self._farm_roster: tuple[TeamRosterRow, ...] = ()
         self._farm_search_clicks = 0
         self._farm_resource_tab_clicked_at = 0.0
+        self._farm_resource_panel_verified = False
+        self._farm_resource_template_misses = 0
         self._farm_resource_selected_at = 0.0
+        self._farm_resource_selected_by_layout = False
+        self._farm_target_checkbox_click_at = 0.0
+        self._farm_target_checkbox_verified = False
+        self._farm_target_checkbox_clicks = 0
         self._farm_find_resource_clicks = 0
+        self._farm_find_resource_click_at = 0.0
         self._farm_gather_clicks = 0
         self._farm_capture_blocked_count = 0
         self._farm_team_selection_clicks = 0
@@ -141,6 +150,9 @@ class ProfileWorker:
         # the freshly resolved row as the authoritative post-tap target.
         self._farm_expected_team_row: tuple[int, int, int, int] | None = None
         self._farm_dispatch_click_at = 0.0
+        self._farm_area_selector = ResourceAreaPointSelector()
+        self._farm_area_epoch = 0
+        self._farm_run_id = ""
 
     def submit(self, command: WorkerCommand) -> None:
         self._ensure_thread()
@@ -242,18 +254,29 @@ class ProfileWorker:
                     self._farm = FarmWorkflow()
                     self._farm_next_at = 0.0
                     self._farm_city_clicks = 0
+                    self._farm_return_city_click_at = 0.0
                     self._farm_world_map_click_at = 0.0
                     self._farm_ready_teams = ()
                     self._farm_roster = ()
                     self._farm_search_clicks = 0
                     self._farm_resource_tab_clicked_at = 0.0
+                    self._farm_resource_panel_verified = False
+                    self._farm_resource_template_misses = 0
                     self._farm_resource_selected_at = 0.0
+                    self._farm_resource_selected_by_layout = False
+                    self._farm_target_checkbox_click_at = 0.0
+                    self._farm_target_checkbox_verified = False
+                    self._farm_target_checkbox_clicks = 0
                     self._farm_find_resource_clicks = 0
+                    self._farm_find_resource_click_at = 0.0
                     self._farm_gather_clicks = 0
                     self._farm_capture_blocked_count = 0
                     self._farm_team_selection_clicks = 0
                     self._farm_expected_team_row = None
                     self._farm_dispatch_click_at = 0.0
+                    self._farm_area_selector = ResourceAreaPointSelector()
+                    self._farm_area_epoch = 0
+                    self._farm_run_id = f"{self.profile.id}-{time.monotonic_ns()}"
                     self._log_farm("started", {"resource_order": self._farm.resource_order})
                     self._publish(
                         WorkerState.RUNNING,
@@ -477,6 +500,9 @@ class ProfileWorker:
             city = detected.evidence_for(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
             world = detected.evidence_for(FarmTemplateId.WORLD_MAP_ANCHOR)
             browser_canvas = detected.evidence_for(FarmTemplateId.BROWSER_CANVAS_READY_ANCHOR)
+            world_map_back = detected.evidence_for(FarmTemplateId.BROWSER_WORLD_MAP_BACK_BUTTON)
+            world_map_coordinate_pin = detected.evidence_for(FarmTemplateId.BROWSER_WORLD_MAP_COORDINATE_PIN)
+            city_continent_map = detected.evidence_for(FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON)
             search_button = detected.evidence_for(FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON)
             resource_tab = detected.evidence_for(FarmTemplateId.BROWSER_RESOURCE_TAB_BUTTON)
             resource_buttons = {
@@ -485,9 +511,30 @@ class ProfileWorker:
                 "stone": detected.evidence_for(FarmTemplateId.BROWSER_STONE_RESOURCE_BUTTON),
                 "iron": detected.evidence_for(FarmTemplateId.BROWSER_IRON_RESOURCE_BUTTON),
             }
+            resource_active_buttons = {
+                "food": detected.evidence_for(FarmTemplateId.BROWSER_FOOD_RESOURCE_ACTIVE),
+                "wood": detected.evidence_for(FarmTemplateId.BROWSER_WOOD_RESOURCE_ACTIVE),
+                "stone": detected.evidence_for(FarmTemplateId.BROWSER_STONE_RESOURCE_ACTIVE),
+                "iron": detected.evidence_for(FarmTemplateId.BROWSER_IRON_RESOURCE_ACTIVE),
+            }
             iron_resource = detected.evidence_for(FarmTemplateId.BROWSER_IRON_RESOURCE_BUTTON)
+            target_checkbox_unchecked = detected.evidence_for(
+                FarmTemplateId.BROWSER_SEARCH_TARGET_CHECKBOX_UNCHECKED
+            )
             find_resource = detected.evidence_for(FarmTemplateId.BROWSER_SEARCH_BUTTON_ENABLED)
+            search_toasts = {
+                "not_found": detected.evidence_for(FarmTemplateId.BROWSER_TOAST_NOT_FOUND),
+                "not_found_short": detected.evidence_for(FarmTemplateId.BROWSER_TOAST_NOT_FOUND_SHORT),
+                "other_region": detected.evidence_for(FarmTemplateId.BROWSER_TOAST_OTHER_REGION),
+                "level_too_low": detected.evidence_for(FarmTemplateId.BROWSER_TOAST_LEVEL_TOO_LOW),
+            }
             gather_button = detected.evidence_for(FarmTemplateId.BROWSER_GATHER_BUTTON_ENABLED)
+            target_resource_expiry_toast = detected.evidence_for(
+                FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_TOAST
+            )
+            target_resource_expiry_confirm = detected.evidence_for(
+                FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_CONFIRM
+            )
             team_panel = detected.evidence_for(FarmTemplateId.BROWSER_TEAM_SELECTION_PANEL)
             team_action = detected.evidence_for(FarmTemplateId.BROWSER_TEAM_ACTION_BUTTON)
             team_badges = {
@@ -519,6 +566,9 @@ class ProfileWorker:
                     "canvas": {"width": image_size[0], "height": image_size[1]},
                     "city": self._evidence_payload(city),
                     "world_map": self._evidence_payload(world),
+                    "world_map_back": self._evidence_payload(world_map_back),
+                    "world_map_coordinate_pin": self._evidence_payload(world_map_coordinate_pin),
+                    "city_continent_map": self._evidence_payload(city_continent_map),
                     "browser_canvas": self._evidence_payload(browser_canvas),
                     "resource_search_button": self._evidence_payload(search_button),
                     "resource_tab": self._evidence_payload(resource_tab),
@@ -526,9 +576,20 @@ class ProfileWorker:
                         resource: self._evidence_payload(button)
                         for resource, button in resource_buttons.items()
                     },
+                    "resource_active_buttons": {
+                        resource: self._evidence_payload(button)
+                        for resource, button in resource_active_buttons.items()
+                    },
                     "iron_resource": self._evidence_payload(iron_resource),
+                    "target_checkbox_unchecked": self._evidence_payload(target_checkbox_unchecked),
+                    "target_checkbox_verified": self._farm_target_checkbox_verified,
                     "find_resource": self._evidence_payload(find_resource),
+                    "search_toasts": {
+                        name: self._evidence_payload(toast) for name, toast in search_toasts.items()
+                    },
                     "gather_button": self._evidence_payload(gather_button),
+                    "target_resource_expiry_toast": self._evidence_payload(target_resource_expiry_toast),
+                    "target_resource_expiry_confirm": self._evidence_payload(target_resource_expiry_confirm),
                     "team_panel": self._evidence_payload(team_panel),
                     "team_action": self._evidence_payload(team_action),
                     "team_badges": {
@@ -545,6 +606,99 @@ class ProfileWorker:
                     "ready_teams": ready_teams,
                 },
             )
+            # Ported from ADB ResourceSearchExecutionService: probe the short
+            # toast window after each fresh Search tap. A verified negative
+            # toast advances the already-fixed level/resource plan; it is not
+            # a technical failure and must never cause a blind repeat tap.
+            if self._farm_find_resource_click_at > 0:
+                toast_elapsed = time.monotonic() - self._farm_find_resource_click_at
+                matched_toast = next(
+                    (name for name, toast in search_toasts.items() if toast.found),
+                    None,
+                )
+                if matched_toast is not None:
+                    resource, level = self._farm.current_target()
+                    screenshot = self._save_farm_debug_capture(f"search-toast-{matched_toast}")
+                    self._log_farm(
+                        "search_toast",
+                        {
+                            "variant": matched_toast,
+                            "resource": resource,
+                            "level": level,
+                            "after_tap_seconds": round(toast_elapsed, 2),
+                            "screenshot": str(screenshot) if screenshot else None,
+                        },
+                    )
+                    if matched_toast == "other_region":
+                        self._farm = None
+                        self._publish(
+                            WorkerState.ERROR,
+                            "Auto Farm dừng an toàn: toast yêu cầu tìm ở khu vực khác",
+                            f"Ảnh toast: {screenshot}" if screenshot else "",
+                        )
+                        return
+                    if self._handle_search_no_result(
+                        resource,
+                        level,
+                        reason=f"toast:{matched_toast}",
+                        delay_seconds=2.5,
+                    ):
+                        return
+                    return
+                # The popup is the positive result. Do not let the toast probe
+                # consume its normal state transition.
+                if state == FarmGameState.RESOURCE_POPUP:
+                    self._farm_find_resource_click_at = 0.0
+                elif toast_elapsed < 4.0:
+                    self._farm_next_at = time.monotonic() + 0.35
+                    self._publish(WorkerState.RUNNING, "Auto Farm: đang quan sát toast hoặc popup sau Tìm kiếm")
+                    return
+                else:
+                    # The ADB execution service treats a search panel that
+                    # remains usable after its observation window as a
+                    # bounded no-result attempt.  The website often does not
+                    # render a toast for that outcome, so do not stall on the
+                    # same Search button or classify it as a technical error.
+                    # Rotate resource first. A verified area change is allowed
+                    # only after the whole four-resource round has no result.
+                    resource, level = self._farm.current_target()
+                    self._farm_find_resource_click_at = 0.0
+                    if self._handle_search_no_result(
+                        resource,
+                        level,
+                        reason="search_button_remained_visible",
+                        delay_seconds=1.0,
+                        after_tap_seconds=toast_elapsed,
+                    ):
+                        return
+                    return
+            # A full target can expire before the selected march is sent. The
+            # game shows a confirmation dialog in that exact case. Never
+            # infer this from a red button alone: the invariant message prefix
+            # and Confirm button must both match on a fresh frame.
+            if (
+                target_resource_expiry_toast.found
+                and target_resource_expiry_confirm.actionable
+            ):
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
+                fresh_toast = fresh.evidence_for(FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_TOAST)
+                fresh_confirm = fresh.evidence_for(FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_CONFIRM)
+                if fresh_toast.found and fresh_confirm.actionable:
+                    self.session.tap_farm_template(fresh_confirm.bounds, fresh_size)  # type: ignore[arg-type]
+                    self._farm_dispatch_click_at = time.monotonic()
+                    self._farm_next_at = self._farm_dispatch_click_at + 0.9
+                    self._log_farm("confirm_target_resource_expiry", {
+                        "bounds": fresh_confirm.bounds,
+                        "team": self._farm.team,
+                    })
+                    self._publish(
+                        WorkerState.RUNNING,
+                        "Auto Farm: mục tiêu sắp biến mất; đã bấm Xác nhận, đang xác minh đoàn quân xuất phát",
+                    )
+                    return
+                self._farm_next_at = time.monotonic() + 0.4
+                self._publish(WorkerState.RUNNING, "Auto Farm: dialog mục tiêu thay đổi, đang nhận diện lại")
+                return
             # Once the team action was clicked, a normal World Map view is an
             # expected post-condition, not an unknown game state.  Require
             # both the persistent canvas anchor and disappearance of the team
@@ -552,26 +706,49 @@ class ProfileWorker:
             if self._farm_dispatch_click_at > 0:
                 elapsed_after_dispatch = time.monotonic() - self._farm_dispatch_click_at
                 dispatched = (
-                    elapsed_after_dispatch >= 1.2
+                    # The expiry confirmation can arrive shortly *after* the
+                    # team panel disappears.  Keep that short observation
+                    # window open so the dialog above is handled before a
+                    # normal World Map is recorded as a completed dispatch.
+                    elapsed_after_dispatch >= 4.0
                     and browser_canvas.found
                     and not team_panel.found
                     and not team_action.found
                 )
                 if dispatched:
-                    decision = self._farm.decide(
+                    completed_team = self._farm.team
+                    self._farm.decide(
                         FarmGameState.TEAM_SELECTION,
                         dispatch_verified=True,
                     )
                     self._log_farm(
                         "dispatch_verified",
-                        {"team": self._farm.team, "elapsed_seconds": round(elapsed_after_dispatch, 2)},
+                        {"team": completed_team, "elapsed_seconds": round(elapsed_after_dispatch, 2)},
                     )
-                    self._publish(WorkerState.RUNNING, f"Auto Farm: {decision.message}")
+                    # A completed dispatch must not leave the old workflow in
+                    # WAITING forever (nor retain its dispatch timestamp).
+                    # Start a fresh randomized cycle after the requested
+                    # 15-second delay so the roster is scanned again.
+                    self._reset_farm_cycle()
                     self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
+                    self._log_farm(
+                        "next_cycle_scheduled",
+                        {"after_seconds": self._farm.policy.retry_delay_seconds, "previous_team": completed_team},
+                    )
+                    self._publish(
+                        WorkerState.RUNNING,
+                        f"Auto Farm: đội {completed_team} đã xuất phát; chờ 15 giây rồi quét lại đội sẵn sàng",
+                    )
                     return
                 if elapsed_after_dispatch <= 8.0:
-                    self._farm_next_at = time.monotonic() + 0.8
-                    self._publish(WorkerState.RUNNING, "Auto Farm: đã bấm Thu thập, đang xác minh đoàn quân xuất phát")
+                    self._farm_next_at = time.monotonic() + 0.45
+                    if elapsed_after_dispatch < 4.0:
+                        self._publish(
+                            WorkerState.RUNNING,
+                            "Auto Farm: đang chờ xác nhận mục tiêu sắp biến mất hoặc đoàn quân xuất phát",
+                        )
+                    else:
+                        self._publish(WorkerState.RUNNING, "Auto Farm: đã bấm Thu thập, đang xác minh đoàn quân xuất phát")
                     return
                 screenshot = self._save_farm_debug_capture("dispatch-unverified")
                 self._log_farm(
@@ -586,14 +763,47 @@ class ProfileWorker:
                 )
                 return
             # The website fades the normal HUD while World Map is loading.
-            # Wait through that transition, then accept the completed canvas
-            # only after its persistent browser anchor is visible.  This avoids
-            # a second City click while the first navigation is still active.
+            # After the first City click this is a one-way transition: never
+            # click the City control again. The same control is a toggle in
+            # the portal and a second click can return the player to City.
             elapsed_after_click = time.monotonic() - self._farm_world_map_click_at
             if (
                 self._farm_world_map_click_at > 0
-                and state == FarmGameState.UNKNOWN
-                and elapsed_after_click < 3.0
+                and state == FarmGameState.CITY
+                and search_button.actionable
+            ):
+                # Some World Map skins retain the City-looking HUD icon, but
+                # expose the verified resource-search control. It is a safe
+                # post-click World Map confirmation and authorises opening the
+                # search panel without pressing the City toggle again.
+                self._farm_world_map_click_at = 0.0
+                decision = self._farm.decide(
+                    FarmGameState.WORLD_MAP,
+                    ready_teams=self._farm_ready_teams,
+                )
+                self._farm_next_at = time.monotonic() + 0.35
+                self._log_farm(
+                    "world_map_verified",
+                    {
+                        "method": "resource_search_anchor",
+                        "elapsed_seconds": round(elapsed_after_click, 2),
+                        "ready_teams": self._farm_ready_teams,
+                    },
+                )
+                self._publish(
+                    WorkerState.RUNNING,
+                    f"Auto Farm: World Map đã xác minh qua nút tìm tài nguyên; {decision.message}",
+                )
+                return
+            if (
+                self._farm_world_map_click_at > 0
+                and state != FarmGameState.WORLD_MAP
+                and elapsed_after_click <= 8.0
+                and not (
+                    state == FarmGameState.UNKNOWN
+                    and browser_canvas.found
+                    and not city.found
+                )
             ):
                 self._farm_next_at = time.monotonic() + 0.8
                 self._publish(WorkerState.RUNNING, "Auto Farm: đang chờ World Map tải xong")
@@ -630,6 +840,48 @@ class ProfileWorker:
                     f"Auto Farm: World Map đã xác minh; {roster_summary}; {decision.message}",
                 )
                 return
+            if self._farm_world_map_click_at > 0 and elapsed_after_click > 8.0:
+                screenshot = self._save_farm_debug_capture("world-map-unverified")
+                self._log_farm(
+                    "error",
+                    {"reason": "world_map_unverified_after_single_click", "screenshot": str(screenshot) if screenshot else None},
+                )
+                self._farm = None
+                self._publish(
+                    WorkerState.ERROR,
+                    "Auto Farm dừng an toàn: World Map chưa được xác minh sau một lần mở",
+                    f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                )
+                return
+            if (
+                state == FarmGameState.CITY
+                and search_button.actionable
+                and browser_canvas.found
+                and self._farm.step in {FarmStep.ENTER_WORLD_MAP, FarmStep.CHECK_TEAMS}
+            ):
+                # On this website the World Map HUD still contains the artwork
+                # used by the City template. A live canvas anchor plus the
+                # resource-search button is stronger, independent evidence of
+                # World Map; classify it before the generic City branch can
+                # wait or try the toggle again.
+                self._farm_world_map_click_at = 0.0
+                decision = self._farm.decide(
+                    FarmGameState.WORLD_MAP,
+                    ready_teams=self._farm_ready_teams or ready_teams,
+                )
+                self._farm_next_at = time.monotonic() + 0.35
+                self._log_farm(
+                    "world_map_verified",
+                    {
+                        "method": "canvas_and_resource_search",
+                        "ready_teams": self._farm_ready_teams or ready_teams,
+                    },
+                )
+                self._publish(
+                    WorkerState.RUNNING,
+                    f"Auto Farm: World Map đã xác minh; {decision.message}",
+                )
+                return
             decision = self._farm.decide(
                 state,
                 ready_teams=ready_teams,
@@ -639,7 +891,17 @@ class ProfileWorker:
             if (
                 self._farm.step == FarmStep.OPEN_SEARCH
                 and state in {FarmGameState.CITY, FarmGameState.WORLD_MAP}
-                and search_button.actionable
+                # On some portal skins the magnifier used to prove World Map
+                # is also the control that opens the resource-search panel.
+                # Its dedicated search template can score below threshold even
+                # though the World Map anchor has already been verified.
+                # Prefer the dedicated template, but allow that verified
+                # anchor as a strictly scoped fallback here only.
+                and (
+                    search_button.actionable
+                    or world.actionable
+                    or world_map_coordinate_pin.actionable
+                )
             ):
                 if self._farm_search_clicks >= 2:
                     screenshot = self._save_farm_debug_capture("resource-search-unverified")
@@ -656,33 +918,45 @@ class ProfileWorker:
                     return
                 fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                 fresh_button = fresh.evidence_for(FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON)
-                if not fresh_button.actionable:
+                fresh_world = fresh.evidence_for(FarmTemplateId.WORLD_MAP_ANCHOR)
+                fresh_coordinate_pin = fresh.evidence_for(FarmTemplateId.BROWSER_WORLD_MAP_COORDINATE_PIN)
+                if fresh_button.actionable:
+                    click_bounds = fresh_button.bounds
+                    method = "resource_search_button"
+                elif fresh_world.actionable:
+                    click_bounds = fresh_world.bounds
+                    method = "world_map_anchor_fallback"
+                elif fresh.state == DetectedGameState.WORLD_MAP and fresh_coordinate_pin.actionable:
+                    # The coordinate HUD proves World Map but is not itself a
+                    # button. The magnifier slot is safe only in this state.
+                    click_bounds = self._world_map_search_layout_bounds(fresh_size)
+                    method = "verified_world_map_layout_fallback"
+                else:
                     screenshot = self._save_farm_debug_capture("resource-search-button-lost")
                     self._farm_next_at = time.monotonic() + 0.8
-                    self._log_farm("resource_search_button_lost", {"screenshot": str(screenshot) if screenshot else None})
+                    self._log_farm(
+                        "resource_search_button_lost",
+                        {"screenshot": str(screenshot) if screenshot else None},
+                    )
                     self._publish(WorkerState.RUNNING, "Auto Farm: nút tìm tài nguyên thay đổi, đang nhận diện lại")
                     return
-                self.session.tap_farm_template(fresh_button.bounds, fresh_size)  # type: ignore[arg-type]
+                self.session.tap_farm_template(click_bounds, fresh_size)  # type: ignore[arg-type]
                 self._farm_search_clicks += 1
                 self._farm_next_at = time.monotonic() + 1.5
-                self._log_farm("tap_resource_search", {"bounds": fresh_button.bounds})
+                self._log_farm(
+                    "tap_resource_search",
+                    {"bounds": click_bounds, "method": method},
+                )
                 self._publish(WorkerState.RUNNING, "Auto Farm: đã mở tìm tài nguyên, đang xác minh panel")
                 return
             if decision.step == FarmStep.ENTER_WORLD_MAP and city.actionable:
-                if self._farm_city_clicks >= 2:
-                    screenshot = self._save_farm_debug_capture("world-map-unverified")
-                    self._log_farm(
-                        "error",
-                        {"reason": "world_map_unverified", "screenshot": str(screenshot) if screenshot else None},
-                    )
-                    self._farm = None
-                    self._publish(
-                        WorkerState.ERROR,
-                        "Auto Farm dừng: World Map chưa được xác minh sau 2 lần thử",
-                        f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
-                    )
+                if self._farm_city_clicks > 0:
+                    # The one-way guard above normally owns this state. Keep
+                    # this defensive branch so no later workflow change can
+                    # re-introduce the destructive second toggle click.
+                    self._farm_next_at = time.monotonic() + 0.8
+                    self._publish(WorkerState.RUNNING, "Auto Farm: đã gửi lệnh mở World Map, chỉ đang xác minh")
                     return
-                # Capture and rematch immediately before the one CDP touch.
                 fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                 fresh_city = fresh.evidence_for(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
                 if fresh.state != DetectedGameState.CITY or not fresh_city.actionable:
@@ -692,9 +966,15 @@ class ProfileWorker:
                 self.session.tap_farm_template(fresh_city.bounds, fresh_size)  # type: ignore[arg-type]
                 self._farm_city_clicks += 1
                 self._farm_world_map_click_at = time.monotonic()
-                self._log_farm("tap_city_to_world_map", {"bounds": fresh_city.bounds})
+                self._log_farm(
+                    "tap_city_to_world_map",
+                    {"bounds": fresh_city.bounds, "method": "touch"},
+                )
                 self._farm_next_at = time.monotonic() + 1.2
-                self._publish(WorkerState.RUNNING, "Auto Farm: đã mở World Map, đang xác minh")
+                self._publish(
+                    WorkerState.RUNNING,
+                    "Auto Farm: đã mở World Map, đang xác minh",
+                )
                 return
             if (
                 decision.step == FarmStep.OPEN_TEAM_SELECTION
@@ -810,28 +1090,179 @@ class ProfileWorker:
                 self._farm_next_at = time.monotonic() + 1.5
                 return
             if decision.step == FarmStep.FIND_RESOURCE and state == FarmGameState.RESOURCE_SEARCH:
-                target_resource_button = resource_buttons.get(decision.resource or "")
-                target_resource_template = {
-                    "food": FarmTemplateId.BROWSER_FOOD_RESOURCE_BUTTON,
-                    "wood": FarmTemplateId.BROWSER_WOOD_RESOURCE_BUTTON,
-                    "stone": FarmTemplateId.BROWSER_STONE_RESOURCE_BUTTON,
-                    "iron": FarmTemplateId.BROWSER_IRON_RESOURCE_BUTTON,
-                }.get(decision.resource or "")
+                target_resource = decision.resource or ""
+                target_resource_button = resource_buttons.get(target_resource)
+                target_resource_active = resource_active_buttons.get(target_resource)
+                # Do not skip a resource tap based only on the active-state
+                # artwork. In production the four active templates can all
+                # match the same panel background, which made the worker claim
+                # Iron/Wood/Stone was selected while Food remained active.
+                # A plan target must therefore be explicitly tapped first.
                 if self._farm_resource_selected_at <= 0 and target_resource_button and target_resource_button.actionable:
-                    fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
-                    fresh_resource = fresh.evidence_for(target_resource_template) if target_resource_template else None
-                    if fresh_resource and fresh_resource.actionable:
-                        self.session.tap_farm_template(fresh_resource.bounds, fresh_size)  # type: ignore[arg-type]
+                    # ``detected`` above is a fresh renderer capture for this
+                    # tick. Taking another CDP WebGL screenshot immediately
+                    # before this click can return a transient frame and lose
+                    # the already confirmed Wood match. Use the same fresh
+                    # evidence, then verify the next UI state after input.
+                    self.session.tap_farm_template(target_resource_button.bounds, image_size)  # type: ignore[arg-type]
+                    self._farm_resource_selected_at = time.monotonic()
+                    self._farm_resource_selected_by_layout = False
+                    self._farm_resource_template_misses = 0
+                    self._farm_next_at = self._farm_resource_selected_at + 1.2
+                    self._log_farm(
+                        "tap_resource",
+                        {"resource": decision.resource, "bounds": target_resource_button.bounds, "level": decision.level},
+                    )
+                    self._publish(WorkerState.RUNNING, f"Auto Farm: đã chọn {decision.resource} cấp {decision.level}, đang xác minh")
+                    return
+                if self._farm_resource_panel_verified and self._farm_resource_selected_at <= 0:
+                    # The resource panel is already verified, but the target
+                    # artwork may still be animating into the compact canvas.
+                    # Keep polling quickly; do not return to the 30-second
+                    # farm retry cadence or re-open the tab.
+                    self._farm_resource_template_misses += 1
+                    # Each resource button occupies a stable slot in the
+                    # already independently verified web search panel. Some
+                    # city skins recolour the icon art enough that a visual
+                    # template never reaches its threshold (Food scored 0.37
+                    # on account-3 while the panel and Search button scored
+                    # above 0.95). After three bounded observations, use the
+                    # panel-relative slot rather than waiting indefinitely.
+                    if self._farm_resource_template_misses >= 3 and find_resource.actionable:
+                        layout_bounds = self._resource_button_layout_bounds(target_resource, image_size)
+                        self.session.tap_farm_template(layout_bounds, image_size)
                         self._farm_resource_selected_at = time.monotonic()
-                        self._farm_next_at = self._farm_resource_selected_at + 1.2
+                        self._farm_resource_selected_by_layout = True
+                        self._farm_next_at = self._farm_resource_selected_at + 1.0
                         self._log_farm(
                             "tap_resource",
-                            {"resource": decision.resource, "bounds": fresh_resource.bounds, "level": decision.level},
+                            {
+                                "resource": target_resource,
+                                "level": decision.level,
+                                "bounds": layout_bounds,
+                                "method": "verified_panel_layout_fallback",
+                            },
                         )
-                        self._publish(WorkerState.RUNNING, f"Auto Farm: đã chọn {decision.resource} cấp {decision.level}, đang xác minh")
+                        self._publish(
+                            WorkerState.RUNNING,
+                            f"Auto Farm: đã chọn {target_resource} theo bố cục panel đã xác minh, đang kiểm tra lại",
+                        )
                         return
+                    self._farm_next_at = time.monotonic() + 0.5
+                    self._publish(
+                        WorkerState.RUNNING,
+                        f"Auto Farm: đang nhận diện nút {decision.resource} cấp {decision.level} "
+                        f"({self._farm_resource_template_misses})",
+                    )
+                    return
                 if self._farm_resource_selected_at > 0:
                     elapsed = time.monotonic() - self._farm_resource_selected_at
+                    # The Search button is deliberately gated by a separate
+                    # selected-state template.  Previously the worker only
+                    # waited for a timeout after tapping an inactive icon, so
+                    # it could keep waiting forever and never submit Search.
+                    active_verified = bool(target_resource_active and target_resource_active.found)
+                    # The click above is allowed only after the resource panel
+                    # and enabled Search control were both verified. On skins
+                    # where icon art differs, preserve that verified layout
+                    # post-condition rather than falsely failing a successful
+                    # selection solely because the active icon template is
+                    # from another skin.
+                    if self._farm_resource_selected_by_layout and find_resource.actionable:
+                        active_verified = True
+                    if not active_verified:
+                        if elapsed >= 5.0:
+                            screenshot = self._save_farm_debug_capture("resource-active-unverified")
+                            self._log_farm(
+                                "error",
+                                {
+                                    "reason": "resource_active_unverified",
+                                    "resource": target_resource,
+                                    "level": decision.level,
+                                    "active": self._evidence_payload(target_resource_active),
+                                    "screenshot": str(screenshot) if screenshot else None,
+                                },
+                            )
+                            self._farm = None
+                            self._publish(
+                                WorkerState.ERROR,
+                                f"Auto Farm dừng: chưa xác minh {target_resource} đang được chọn",
+                                f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                            )
+                            return
+                        self._farm_next_at = time.monotonic() + 0.45
+                        self._publish(
+                            WorkerState.RUNNING,
+                            f"Auto Farm: đang xác minh {target_resource} đã active trước khi bấm Tìm kiếm",
+                        )
+                        return
+                    # The game's search option is opt-in.  Never hit Search
+                    # until the unchecked glyph has either been changed by a
+                    # verified tap or is absent on the freshly matched panel.
+                    if not self._farm_target_checkbox_verified:
+                        if self._farm_target_checkbox_click_at > 0:
+                            checkbox_elapsed = time.monotonic() - self._farm_target_checkbox_click_at
+                            if not target_checkbox_unchecked.found and find_resource.actionable:
+                                self._farm_target_checkbox_verified = True
+                                self._log_farm(
+                                    "search_target_checkbox_verified",
+                                    {"elapsed_seconds": round(checkbox_elapsed, 2)},
+                                )
+                                self._publish(
+                                    WorkerState.RUNNING,
+                                    "Auto Farm: đã bật lọc mục tiêu tìm kiếm, đang tiếp tục tìm tài nguyên",
+                                )
+                                self._farm_next_at = time.monotonic() + 0.35
+                                return
+                            if checkbox_elapsed >= 4.0:
+                                screenshot = self._save_farm_debug_capture("search-target-checkbox-unverified")
+                                self._log_farm(
+                                    "error",
+                                    {
+                                        "reason": "search_target_checkbox_unverified",
+                                        "screenshot": str(screenshot) if screenshot else None,
+                                    },
+                                )
+                                self._farm = None
+                                self._publish(
+                                    WorkerState.ERROR,
+                                    "Auto Farm dừng: chưa xác minh được checkbox lọc mục tiêu trước Tìm kiếm",
+                                    f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                                )
+                                return
+                            self._farm_next_at = time.monotonic() + 0.5
+                            self._publish(WorkerState.RUNNING, "Auto Farm: đang xác minh checkbox lọc mục tiêu")
+                            return
+                        fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
+                        fresh_checkbox = fresh.evidence_for(
+                            FarmTemplateId.BROWSER_SEARCH_TARGET_CHECKBOX_UNCHECKED
+                        )
+                        checkbox_bounds = fresh_checkbox.bounds if fresh_checkbox.actionable else None
+                        method = "template"
+                        # A failed unchecked-template match is not proof that
+                        # the option is checked. With a live panel and enabled
+                        # Search button, tap its fixed panel-relative slot once
+                        # and verify the post-click frame before Search.
+                        if checkbox_bounds is None and find_resource.actionable:
+                            checkbox_bounds = self._search_target_checkbox_layout_bounds(fresh_size)
+                            method = "verified_panel_layout_fallback"
+                        if checkbox_bounds is not None:
+                            self.session.tap_farm_template(checkbox_bounds, fresh_size)
+                            self._farm_target_checkbox_click_at = time.monotonic()
+                            self._farm_target_checkbox_clicks += 1
+                            self._log_farm(
+                                "tap_search_target_checkbox",
+                                {"bounds": checkbox_bounds, "method": method},
+                            )
+                            self._publish(
+                                WorkerState.RUNNING,
+                                "Auto Farm: đã bật checkbox lọc mục tiêu, đang xác minh",
+                            )
+                            self._farm_next_at = self._farm_target_checkbox_click_at + 0.8
+                            return
+                        self._farm_next_at = time.monotonic() + 0.5
+                        self._publish(WorkerState.RUNNING, "Auto Farm: đang chờ checkbox lọc mục tiêu")
+                        return
                     if elapsed >= 0.8 and find_resource.actionable:
                         if self._farm_find_resource_clicks >= 2:
                             screenshot = self._save_farm_debug_capture("find-resource-unverified")
@@ -844,7 +1275,8 @@ class ProfileWorker:
                         if fresh_find_resource.actionable:
                             self.session.tap_farm_template(fresh_find_resource.bounds, fresh_size)  # type: ignore[arg-type]
                             self._farm_find_resource_clicks += 1
-                            self._farm_next_at = time.monotonic() + 1.5
+                            self._farm_find_resource_click_at = time.monotonic()
+                            self._farm_next_at = self._farm_find_resource_click_at + 0.6
                             self._log_farm("tap_find_resource", {"bounds": fresh_find_resource.bounds, "resource": decision.resource, "level": decision.level})
                             self._publish(WorkerState.RUNNING, f"Auto Farm: đang tìm {decision.resource} cấp {decision.level}, đang xác minh mục tiêu")
                             return
@@ -874,13 +1306,14 @@ class ProfileWorker:
                 if self._farm_resource_tab_clicked_at > 0:
                     elapsed = time.monotonic() - self._farm_resource_tab_clicked_at
                     if not resource_tab.found:
-                        screenshot = self._save_farm_debug_capture("resource-tab-selected")
-                        self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
-                        self._log_farm("resource_tab_verified", {"screenshot": str(screenshot) if screenshot else None})
+                        self._farm_resource_panel_verified = True
+                        self._farm_resource_tab_clicked_at = 0.0
+                        self._farm_resource_template_misses = 0
+                        self._farm_next_at = time.monotonic() + 0.35
+                        self._log_farm("resource_tab_verified", {"next": "select_resource"})
                         self._publish(
                             WorkerState.RUNNING,
-                            f"Auto Farm: tab Tài nguyên đã xác minh; chờ template chọn {decision.resource} cấp {decision.level}",
-                            f"Ảnh để port bước tiếp theo: {screenshot}" if screenshot else "",
+                            f"Auto Farm: tab Tài nguyên đã xác minh; đang chọn {decision.resource} cấp {decision.level}",
                         )
                         return
                     if elapsed >= 5.0:
@@ -980,6 +1413,335 @@ class ProfileWorker:
             )
             self._farm = None
             self._publish(WorkerState.ERROR, f"Auto Farm đã dừng an toàn: {error}")
+
+    def _reset_farm_cycle(self) -> None:
+        """Create a clean farm cycle without stopping the active worker."""
+        self._farm = FarmWorkflow()
+        self._farm_city_clicks = 0
+        self._farm_return_city_click_at = 0.0
+        self._farm_world_map_click_at = 0.0
+        self._farm_ready_teams = ()
+        self._farm_roster = ()
+        self._farm_search_clicks = 0
+        self._farm_resource_tab_clicked_at = 0.0
+        self._farm_resource_panel_verified = False
+        self._farm_resource_template_misses = 0
+        self._farm_resource_selected_at = 0.0
+        self._farm_resource_selected_by_layout = False
+        self._farm_target_checkbox_click_at = 0.0
+        self._farm_target_checkbox_verified = False
+        self._farm_target_checkbox_clicks = 0
+        self._farm_find_resource_clicks = 0
+        self._farm_find_resource_click_at = 0.0
+        self._farm_gather_clicks = 0
+        self._farm_capture_blocked_count = 0
+        self._farm_team_selection_clicks = 0
+        self._farm_expected_team_row = None
+        self._farm_dispatch_click_at = 0.0
+        self._farm_area_selector = ResourceAreaPointSelector()
+        self._farm_area_epoch = 0
+        self._farm_run_id = f"{self.profile.id}-{time.monotonic_ns()}"
+
+    def _handle_search_no_result(
+        self,
+        resource: str,
+        level: int,
+        *,
+        reason: str,
+        delay_seconds: float,
+        after_tap_seconds: float | None = None,
+    ) -> bool:
+        """Advance one bounded no-result outcome without retrying a target.
+
+        The four randomized resource types are exhausted first at the current
+        level. Only then can the browser use the verified World Map coordinate
+        workflow. This prevents an early area jump after a single missing
+        resource and preserves the ADB point-selector's three-point limit.
+        """
+        if self._farm is None:
+            return False
+        if self._farm.advance_search_plan():
+            next_resource, next_level = self._farm.current_target()
+            self._farm_resource_selected_at = 0.0
+            self._farm_resource_selected_by_layout = False
+            self._farm_resource_template_misses = 0
+            self._farm_find_resource_clicks = 0
+            self._farm_find_resource_click_at = 0.0
+            self._log_farm(
+                "search_no_result",
+                {
+                    "reason": reason,
+                    "resource": resource,
+                    "level": level,
+                    "next_resource": next_resource,
+                    "next_level": next_level,
+                    "round_complete": False,
+                    "after_tap_seconds": round(after_tap_seconds, 2) if after_tap_seconds is not None else None,
+                },
+            )
+            self._farm_next_at = time.monotonic() + delay_seconds
+            self._publish(
+                WorkerState.RUNNING,
+                f"Auto Farm: không có {resource} cấp {level}; đổi sang {next_resource} cấp {next_level}",
+            )
+            return True
+
+        # All four resource types have been tried at this level. The workflow
+        # now owns a new point selection, which is shuffled and non-repeating
+        # per run/profile/resource/level/area epoch by ResourceAreaPointSelector.
+        area_resource, area_level = self._farm.current_target()
+        relocation = self._try_resource_area_relocation(area_resource, area_level)
+        if relocation == "moved":
+            self._farm_resource_selected_at = 0.0
+            self._farm_resource_selected_by_layout = False
+            self._farm_resource_template_misses = 0
+            self._farm_target_checkbox_click_at = 0.0
+            self._farm_target_checkbox_verified = False
+            self._farm_target_checkbox_clicks = 0
+            self._farm_find_resource_clicks = 0
+            self._farm_find_resource_click_at = 0.0
+            self._log_farm(
+                "search_round_area_relocated",
+                {"reason": reason, "level": area_level, "resource": area_resource},
+            )
+            self._farm_next_at = time.monotonic() + 1.0
+            return True
+        if relocation == "unavailable":
+            # Do not skip to another level if the map/input UI cannot be
+            # verified. The coordinate method can retry later without blind
+            # interaction and without losing the selected search plan.
+            self._log_farm(
+                "search_round_area_waiting",
+                {"reason": reason, "level": area_level, "resource": area_resource},
+            )
+            self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
+            self._publish(
+                WorkerState.RUNNING,
+                f"Auto Farm: đã thử 4 tài nguyên cấp {area_level}; chờ xác minh World Map để đổi khu vực",
+            )
+            return True
+
+        # The approved three-point pool for this level is exhausted. Only now
+        # move to the next configured level; if all pools ended, finish this
+        # cycle and let the normal 15-second scheduler start a fresh one.
+        if self._farm.advance_level_plan():
+            next_resource, next_level = self._farm.current_target()
+            self._farm_resource_selected_at = 0.0
+            self._farm_resource_selected_by_layout = False
+            self._farm_resource_template_misses = 0
+            self._farm_find_resource_clicks = 0
+            self._farm_find_resource_click_at = 0.0
+            self._log_farm(
+                "search_area_pool_exhausted",
+                {"reason": reason, "level": area_level, "next_resource": next_resource, "next_level": next_level},
+            )
+            self._farm_next_at = time.monotonic() + delay_seconds
+            self._publish(
+                WorkerState.RUNNING,
+                f"Auto Farm: hết 3 điểm khu vực cho cấp {area_level}; chuyển sang {next_resource} cấp {next_level}",
+            )
+            return True
+        self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
+        self._publish(WorkerState.COMPLETED, "Auto Farm: đã thử hết tài nguyên, cấp mỏ và điểm khu vực; chờ cycle tiếp theo")
+        return True
+
+    @staticmethod
+    def _resource_button_layout_bounds(
+        resource: str, image_size: tuple[int, int]
+    ) -> tuple[int, int, int, int]:
+        """Return one resource slot inside the verified web search panel.
+
+        This is deliberately expressed as canvas proportions, never desktop
+        pixels. It is used only after the search panel *and* enabled Search
+        button have been matched; it is a bounded fallback for skins whose
+        resource artwork differs from our visual template pack.
+        """
+        centers = {
+            "food": (0.286, 0.735),
+            "wood": (0.406, 0.735),
+            "stone": (0.526, 0.735),
+            "iron": (0.646, 0.735),
+        }
+        center_x, center_y = centers.get(resource, centers["food"])
+        width, height = image_size
+        button_width = max(36, round(width * 0.095))
+        button_height = max(36, round(height * 0.18))
+        left = max(0, min(width - button_width, round(width * center_x - button_width / 2)))
+        top = max(0, min(height - button_height, round(height * center_y - button_height / 2)))
+        return (left, top, button_width, button_height)
+
+    @staticmethod
+    def _world_map_search_layout_bounds(
+        image_size: tuple[int, int]
+    ) -> tuple[int, int, int, int]:
+        """Return the magnifier slot on a verified World Map canvas.
+
+        Browser skins change the magnifier artwork, but retain its HUD slot.
+        This is deliberately used only after the World Map coordinate HUD has
+        been freshly matched, never as a blind desktop-coordinate click.
+        """
+        width, height = image_size
+        button_width = max(38, round(width * 0.058))
+        button_height = max(36, round(height * 0.104))
+        left = max(0, min(width - button_width, round(width * 0.325 - button_width / 2)))
+        top = max(0, min(height - button_height, round(height * 0.807 - button_height / 2)))
+        return (left, top, button_width, button_height)
+
+    @staticmethod
+    def _search_target_checkbox_layout_bounds(
+        image_size: tuple[int, int]
+    ) -> tuple[int, int, int, int]:
+        """Return the checkbox slot within a matcher-verified search panel."""
+        width, height = image_size
+        box_width = max(20, round(width * 0.04))
+        box_height = max(20, round(height * 0.065))
+        left = max(0, min(width - box_width, round(width * 0.717 - box_width / 2)))
+        top = max(0, min(height - box_height, round(height * 0.718 - box_height / 2)))
+        return (left, top, box_width, box_height)
+
+    def _try_resource_area_relocation(self, resource: str, level: int) -> str:
+        """Move to one verified map coordinate through the website's City UI.
+
+        All canvas interactions are guarded by a fresh template match. The
+        browser adapter returns from World Map to City, opens City's map icon,
+        then requires readable DOM coordinate inputs before it edits either
+        field. This keeps the original pair available for a rollback if the
+        destination cannot be verified.
+        """
+        if self.session is None or self._farm is None:
+            return "unavailable"
+        selection = self._farm_area_selector.next(
+            run_id=self._farm_run_id,
+            profile_id=self.profile.id,
+            resource=resource,
+            level=level,
+            area_epoch=self._farm_area_epoch,
+        )
+        if selection.exhausted:
+            self._log_farm("resource_area_exhausted", {
+                "resource": resource, "level": level, "max_attempts": selection.max_attempts,
+                "city_levels": selection.city_levels,
+            })
+            return "exhausted"
+        point = selection.point
+        assert point is not None
+        detected, _surface, size = self.session.detect_farm_state()
+        # The web game does not open Continent Map from World Map directly.
+        # First return to City using the verified blue back control, then use
+        # City's dedicated map icon. This is intentionally different from the
+        # old ADB minimap shortcut and matches the portal UI contract.
+        return_to_city = detected.evidence_for(FarmTemplateId.BROWSER_WORLD_MAP_BACK_BUTTON)
+        if not return_to_city.actionable:
+            self._log_farm("resource_area_navigation_blocked", {
+                "reason": "world_map_return_button_unavailable", "point": point,
+                "attempt": selection.attempt, "city_levels": selection.city_levels,
+            })
+            return "unavailable"
+        self.session.tap_farm_template(return_to_city.bounds, size)  # type: ignore[arg-type]
+        self._log_farm(
+            "tap_world_map_return_to_city",
+            {"bounds": return_to_city.bounds, "point": point},
+        )
+        time.sleep(0.7)
+        city, _surface, city_size = self.session.detect_farm_state()
+        city_map_button = city.evidence_for(FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON)
+        if city.state != DetectedGameState.CITY or not city_map_button.actionable:
+            self._log_farm("resource_area_navigation_blocked", {
+                "reason": "city_or_city_map_button_unverified", "point": point,
+                "attempt": selection.attempt,
+            })
+            return "unavailable"
+        self.session.tap_farm_template(city_map_button.bounds, city_size)  # type: ignore[arg-type]
+        self._log_farm(
+            "tap_city_continent_map",
+            {"bounds": city_map_button.bounds, "point": point},
+        )
+        time.sleep(0.6)
+        continent, _surface, continent_size = self.session.detect_farm_state()
+        if continent.state != DetectedGameState.CONTINENT_MAP:
+            self._log_farm("resource_area_navigation_blocked", {
+                "reason": "continent_map_unverified", "point": point, "attempt": selection.attempt,
+            })
+            return "unavailable"
+        pin = continent.evidence_for(FarmTemplateId.CONTINENT_MAP_PIN_BUTTON)
+        if not pin.actionable:
+            self._log_farm("resource_area_navigation_blocked", {
+                "reason": "continent_map_pin_unavailable", "point": point, "attempt": selection.attempt,
+            })
+            return "unavailable"
+        x_field, y_field = self._coordinate_fields_from_pin(pin.bounds, continent_size)  # type: ignore[arg-type]
+        original_x = self.session.read_focused_numeric_farm_input(x_field, continent_size)
+        original_y = self.session.read_focused_numeric_farm_input(y_field, continent_size)
+        if original_x is None or original_y is None:
+            self._log_farm("resource_area_navigation_blocked", {
+                "reason": "original_coordinates_unreadable", "point": point, "attempt": selection.attempt,
+            })
+            return "unavailable"
+        if not self.session.read_focused_numeric_farm_input(x_field, continent_size) == original_x:
+            return "unavailable"
+        if not self.session.replace_focused_farm_input(point[0]):
+            return "unavailable"
+        if not self.session.read_focused_numeric_farm_input(y_field, continent_size) == original_y or not self.session.replace_focused_farm_input(point[1]):
+            self.session.read_focused_numeric_farm_input(x_field, continent_size)
+            self.session.replace_focused_farm_input(original_x)
+            return "unavailable"
+        refreshed, _surface, refreshed_size = self.session.detect_farm_state()
+        refreshed_pin = refreshed.evidence_for(FarmTemplateId.CONTINENT_MAP_PIN_BUTTON)
+        if not refreshed_pin.actionable:
+            return "unavailable"
+        self.session.tap_farm_template(refreshed_pin.bounds, refreshed_size)  # type: ignore[arg-type]
+        time.sleep(0.45)
+        target_frame, _surface, target_size = self.session.detect_farm_state()
+        target_pin = target_frame.evidence_for(FarmTemplateId.CONTINENT_MAP_SEARCH_TARGET_PIN)
+        if not target_pin.actionable:
+            rollback_pin = target_frame.evidence_for(FarmTemplateId.CONTINENT_MAP_PIN_BUTTON)
+            if rollback_pin.actionable:
+                rollback_x, rollback_y = self._coordinate_fields_from_pin(rollback_pin.bounds, target_size)  # type: ignore[arg-type]
+                self.session.read_focused_numeric_farm_input(rollback_x, target_size)
+                self.session.replace_focused_farm_input(original_x)
+                self.session.read_focused_numeric_farm_input(rollback_y, target_size)
+                self.session.replace_focused_farm_input(original_y)
+                self.session.tap_farm_template(rollback_pin.bounds, target_size)  # type: ignore[arg-type]
+            self._log_farm("resource_area_navigation_rolled_back", {
+                "reason": "destination_pin_unverified", "point": point,
+                "original": (original_x, original_y), "attempt": selection.attempt,
+            })
+            return "unavailable"
+        self.session.tap_farm_template(target_pin.bounds, target_size)  # type: ignore[arg-type]
+        time.sleep(0.7)
+        final, _surface, _final_size = self.session.detect_farm_state()
+        world_verified = final.state == DetectedGameState.WORLD_MAP or (
+            final.evidence_for(FarmTemplateId.BROWSER_CANVAS_READY_ANCHOR).found
+            and final.evidence_for(FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON).found
+        )
+        if not world_verified:
+            self._log_farm("resource_area_navigation_blocked", {
+                "reason": "world_map_unverified_after_target_pin", "point": point,
+                "attempt": selection.attempt,
+            })
+            return "unavailable"
+        self._farm.step = FarmStep.OPEN_SEARCH
+        self._farm_area_epoch += 1
+        self._log_farm("resource_area_relocated", {
+            "resource": resource, "level": level, "point": point,
+            "attempt": selection.attempt, "max_attempts": selection.max_attempts,
+            "city_levels": selection.city_levels, "original": (original_x, original_y),
+        })
+        self._publish(WorkerState.RUNNING, f"Auto Farm: đã chuyển tới {point[0]},{point[1]}; mở lại tìm {resource} cấp {level}")
+        return "moved"
+
+    @staticmethod
+    def _coordinate_fields_from_pin(
+        pin_bounds: tuple[int, int, int, int], image_size: tuple[int, int]
+    ) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+        """Port the ADB's pin-relative X/Y input geometry to this canvas."""
+        left, top, width, height = pin_bounds
+        image_width, image_height = image_size
+        center_x = left + width // 2
+        center_y = top + height // 2
+        x_center = center_x + round(-134 * image_width / 1280)
+        y_center = center_y + round(-54 * image_height / 720)
+        return (x_center, center_y, 2, 2), (center_x, y_center, 2, 2)
 
     def _log_farm(self, event: str, payload: dict[str, object]) -> None:
         self.farm_log.write(event, {"profile_id": self.profile.id, **payload})
