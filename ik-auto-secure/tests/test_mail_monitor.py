@@ -1,0 +1,97 @@
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+from ik_chrome_auto.mail_monitor import BrowserMailMonitor
+from ik_chrome_auto.runner import (
+    MAIL_BUTTON_REFERENCE_POINT,
+    MAIL_BUTTON_REFERENCE_SIZE,
+    ProfileWorker,
+)
+
+
+def _png(image: np.ndarray) -> bytes:
+    ok, encoded = cv2.imencode(".png", image)
+    assert ok
+    return bytes(encoded)
+
+
+def _place(canvas: np.ndarray, template: np.ndarray, left: int, top: int) -> None:
+    height, width = template.shape[:2]
+    canvas[top : top + height, left : left + width] = template
+
+
+def _asset(monitor: BrowserMailMonitor, filename: str) -> np.ndarray:
+    image = cv2.imread(str(Path(monitor.asset_dir) / filename))
+    assert image is not None
+    return image
+
+
+class _TapSession:
+    def __init__(self) -> None:
+        self.taps: list[tuple[tuple[int, int, int, int], tuple[int, int]]] = []
+
+    def tap_farm_template(
+        self, bounds: tuple[int, int, int, int], image_size: tuple[int, int]
+    ) -> None:
+        self.taps.append((bounds, image_size))
+
+
+def test_mail_button_uses_the_fixed_reference_coordinate() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker.session = _TapSession()
+
+    worker._tap_monitor_reference_point(
+        MAIL_BUTTON_REFERENCE_POINT,
+        MAIL_BUTTON_REFERENCE_SIZE,
+        MAIL_BUTTON_REFERENCE_SIZE,
+    )
+
+    assert worker.session.taps == [((144, 544, 2, 2), (1259, 672))]
+
+
+def test_mail_close_is_matched_only_in_its_scoped_region() -> None:
+    monitor = BrowserMailMonitor()
+    mailbox = np.full((1080, 1920, 3), 120, dtype=np.uint8)
+    close = _asset(monitor, "mail_close.png")
+    _place(mailbox, close, 1755, 100)
+    assert monitor.is_mail_open(_png(mailbox)) is True
+
+
+def test_only_red_badge_one_beside_combat_category_is_accepted() -> None:
+    monitor = BrowserMailMonitor()
+    canvas = np.full((1080, 1920, 3), 160, dtype=np.uint8)
+    badge_one = _asset(monitor, "combat_unread_one.png")
+    _place(canvas, badge_one, 180, 286)
+    assert monitor.has_new_combat_mail(_png(canvas)) is True
+
+    outside = np.full_like(canvas, 160)
+    _place(outside, badge_one, 600, 286)
+    assert monitor.has_new_combat_mail(_png(outside)) is False
+
+    other_red_badge = np.full_like(canvas, 160)
+    cv2.circle(other_red_badge, (200, 305), 19, (20, 35, 225), thickness=-1)
+    cv2.putText(
+        other_red_badge,
+        "2",
+        (190, 316),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.9,
+        (245, 245, 245),
+        2,
+        cv2.LINE_AA,
+    )
+    assert monitor.has_new_combat_mail(_png(other_red_badge)) is False
+
+
+def test_territory_attacked_title_is_matched_in_first_mail_area() -> None:
+    monitor = BrowserMailMonitor()
+    canvas = np.full((1080, 1920, 3), 205, dtype=np.uint8)
+    title = _asset(monitor, "territory_attacked.png")
+    _place(canvas, title, 330, 178)
+    assert monitor.is_territory_attacked(_png(canvas)) is True
+
+    outside = np.full_like(canvas, 205)
+    _place(outside, title, 1200, 700)
+    assert monitor.is_territory_attacked(_png(outside)) is False

@@ -34,7 +34,7 @@ class CommandKind(StrEnum):
     SET_TOPMOST = "set_topmost"
     START_FARM = "start_farm"
     STOP_FARM = "stop_farm"
-    MONITOR_THREATS = "monitor_threats"
+    MONITOR_MAIL = "monitor_mail"
     STOP = "stop"
     SHUTDOWN = "shutdown"
 

@@ -29,7 +29,13 @@ from ik_chrome_auto.telegram import (
     save_telegram_settings,
     send_telegram_message,
 )
-from ik_chrome_auto.threat_monitor import INCOMING_ATTACK, INVESTIGATED
+from ik_chrome_auto.mail_monitor import (
+    COMBAT_MAIL_OTHER,
+    MAIL_BASELINE,
+    NO_NEW_COMBAT_MAIL,
+    SCAN_ERROR,
+    TERRITORY_ATTACKED,
+)
 from ik_chrome_auto.two_factor import TwoFactorEnrollment, TwoFactorService
 from ik_chrome_auto.windows import get_gpu_utilization_percent, get_system_memory_status
 
@@ -44,8 +50,7 @@ TAB_CLOSE_INTERVAL_SECONDS = 1.5
 TAB_CLOSE_BATCH_SIZE = 10
 TAB_CLOSE_BATCH_PAUSE_SECONDS = 8.0
 MONITOR_MAX_IN_FLIGHT = 3
-MONITOR_CYCLE_SECONDS = 2.0
-MONITOR_INVESTIGATED_EVERY = 3
+MONITOR_CYCLE_SECONDS = 4.0
 
 
 def _ui_px(value: int | float, minimum: int = 1) -> int:
@@ -151,7 +156,7 @@ class Dashboard(QWidget):
         self._monitor_in_flight: dict[str, float] = {}
         self._monitor_cycle_at = 0.0
         self._monitor_cycle_number = 0
-        self._monitor_active_events: dict[str, set[str]] = {}
+        self._monitor_initialized_profiles: set[str] = set()
         self._auto_arrange_targets: set[str] | None = None
         self._auto_arrange_states: dict[str, WorkerState] = {}
         self._auto_arrange_deadline = 0.0
@@ -645,7 +650,7 @@ class Dashboard(QWidget):
             )
 
     def _toggle_monitoring(self) -> None:
-        """Start or stop sequential threat scans over currently open profiles."""
+        """Start or stop verified Combat-mail scans over open profiles."""
         if self._monitoring_enabled:
             self._stop_monitoring()
             return
@@ -656,7 +661,7 @@ class Dashboard(QWidget):
         if self._telegram_notifier is None:
             self._warning(
                 "Chưa cấu hình Telegram",
-                "Hãy cấu hình Telegram trước để nhận cảnh báo Bị điều tra hoặc Sắp bị Công.",
+                "Hãy cấu hình Telegram trước để nhận cảnh báo Lãnh Địa bị Công.",
             )
             return
         self._monitoring_enabled = True
@@ -664,14 +669,17 @@ class Dashboard(QWidget):
         self._monitor_in_flight.clear()
         self._monitor_cycle_at = 0.0
         self._monitor_cycle_number = 0
-        self._monitor_active_events.clear()
+        self._monitor_initialized_profiles.clear()
         self.monitor_button.setText("Dừng giám sát")
         self.monitor_button.setStyleSheet(
             f"QPushButton {{ background:#ef4444; border:1px solid #ef4444; "
             f"border-radius:{_ui_px(8)}px; color:#ffffff; font-weight:600; }} "
             "QPushButton:hover { background:#dc2626; border-color:#dc2626; }"
         )
-        self._append_log(f"Đã bật giám sát tuần tự cho {len(opened)} profile đang mở")
+        self._append_log(
+            f"Đã bật giám sát thư Chiến đấu cho {len(opened)} profile; "
+            "lượt đầu chỉ tạo baseline"
+        )
         self._advance_monitoring()
 
     def _stop_monitoring(self) -> None:
@@ -680,51 +688,43 @@ class Dashboard(QWidget):
         self._monitor_in_flight.clear()
         self._monitor_cycle_at = 0.0
         self._monitor_cycle_number = 0
-        self._monitor_active_events.clear()
+        self._monitor_initialized_profiles.clear()
         self.monitor_button.setText("Giám sát")
         self.monitor_button.setStyleSheet("")
         self.monitor_button.setEnabled(self._opened_profile_count() > 0)
-        self._append_log("Đã dừng giám sát cảnh báo")
+        self._append_log("Đã dừng giám sát thư Chiến đấu")
 
     def _handle_monitor_result(self, snapshot: WorkerSnapshot) -> None:
         profile_id = snapshot.profile_id
         if profile_id not in self._monitor_in_flight:
             return
         events = set(snapshot.monitor_events or ())
-        checked = set(snapshot.monitor_checked or ())
         self._monitor_in_flight.pop(profile_id, None)
-        if "scan_error" in events:
-            self._append_log(f"[{profile_id}] Giám sát: không chụp/nhận diện được ảnh game")
+        if SCAN_ERROR in events:
+            self._append_log(f"[{profile_id}] Giám sát thư: không hoàn tất được luồng xác minh")
             return
-        events.intersection_update({INVESTIGATED, INCOMING_ATTACK})
-        previous = self._monitor_active_events.get(profile_id, set())
-        current = set(previous)
-        for event in checked:
-            if event in events:
-                current.add(event)
-            else:
-                current.discard(event)
-        newly_visible = current - previous
-        self._monitor_active_events[profile_id] = current
+        if MAIL_BASELINE in events:
+            self._monitor_initialized_profiles.add(profile_id)
+            self._append_log(f"[{profile_id}] Đã tạo baseline thư Chiến đấu; không báo thư cũ")
+            return
         try:
             profile_name = self.config.profile(profile_id).name
         except KeyError:
             profile_name = profile_id
-        if INVESTIGATED in newly_visible:
+        if TERRITORY_ATTACKED in events:
             self._notify_telegram(
-                f"⚠️ {profile_name}: Bị điều tra.",
+                f"🚨 {profile_name}: Lãnh Địa bị Công.",
                 force=True,
             )
-            self._append_log(f"[{profile_id}] Phát hiện: Bị điều tra")
-        if INCOMING_ATTACK in newly_visible:
-            self._notify_telegram(
-                f"🚨 {profile_name}: Sắp bị Công.",
-                force=True,
-            )
-            self._append_log(f"[{profile_id}] Phát hiện: Sắp bị Công")
+            self._append_log(f"[{profile_id}] Thư Chiến đấu mới: Lãnh Địa bị Công")
+        elif COMBAT_MAIL_OTHER in events:
+            self._append_log(f"[{profile_id}] Có thư Chiến đấu mới nhưng không phải Lãnh Địa bị Công")
+        elif NO_NEW_COMBAT_MAIL in events:
+            # Expected steady state; do not flood the ten-line dashboard log.
+            return
 
     def _advance_monitoring(self) -> None:
-        """Keep three cropped renderer scans in flight, targeting a ~2s round."""
+        """Keep at most three verified mailbox flows in flight."""
         if not self._monitoring_enabled:
             return
         now = time.monotonic()
@@ -750,25 +750,18 @@ class Dashboard(QWidget):
             self._monitor_queue = deque(ordered_open)
             self._monitor_cycle_number += 1
             self._monitor_cycle_at = now + MONITOR_CYCLE_SECONDS
-        profile_ordinals = {
-            profile.id: index for index, profile in enumerate(self.config.profiles)
-        }
         while (
             self._monitor_queue
             and len(self._monitor_in_flight) < MONITOR_MAX_IN_FLIGHT
         ):
             profile_id = self._monitor_queue.popleft()
             if not self.runner.has_open_session(profile_id):
-                self._monitor_active_events.pop(profile_id, None)
+                self._monitor_initialized_profiles.discard(profile_id)
                 continue
             self.runner.submit(
                 profile_id,
-                CommandKind.MONITOR_THREATS,
-                include_investigated=(
-                    profile_ordinals.get(profile_id, 0) + self._monitor_cycle_number
-                )
-                % MONITOR_INVESTIGATED_EVERY
-                == 0,
+                CommandKind.MONITOR_MAIL,
+                initial_scan=profile_id not in self._monitor_initialized_profiles,
             )
             self._monitor_in_flight[profile_id] = now + 30.0
 

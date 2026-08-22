@@ -10,7 +10,11 @@ from ik_chrome_auto.dashboard import (
     FarmProfileDialog,
 )
 from ik_chrome_auto.models import CommandKind, WorkerSnapshot
-from ik_chrome_auto.threat_monitor import INCOMING_ATTACK, INVESTIGATED
+from ik_chrome_auto.mail_monitor import (
+    COMBAT_MAIL_OTHER,
+    MAIL_BASELINE,
+    TERRITORY_ATTACKED,
+)
 
 
 class FakeLogWidget:
@@ -130,49 +134,44 @@ def test_dashboard_log_keeps_only_ten_latest_rows() -> None:
     assert dashboard.log.value.splitlines() == [f"row-{index}" for index in range(5, 15)]
 
 
-def test_monitor_alerts_once_until_the_warning_disappears() -> None:
+def test_monitor_first_pass_builds_baseline_then_alerts_only_for_attack_mail() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     dashboard.config = SimpleNamespace(
         profile=lambda _profile_id: SimpleNamespace(name="Tài khoản 01 · cuongg********")
     )
     dashboard._telegram_notifier = FakeTelegramNotifier()
     dashboard._telegram_event_at = {}
-    dashboard._monitor_active_events = {}
+    dashboard._monitor_initialized_profiles = set()
     dashboard._monitor_queue = deque()
     dashboard._monitor_in_flight = {"account-1": 1.0}
     dashboard._monitor_cycle_at = 0.0
     dashboard._log_lines = deque(maxlen=10)
     dashboard.log = FakeLogWidget()
 
-    alert = WorkerSnapshot(
+    baseline = WorkerSnapshot(
         "account-1",
-        monitor_events=(INVESTIGATED, INCOMING_ATTACK),
-        monitor_checked=(INVESTIGATED, INCOMING_ATTACK),
+        monitor_events=(MAIL_BASELINE,),
+        monitor_checked=("combat_mail",),
     )
-    dashboard._handle_monitor_result(alert)
-    first_messages = list(dashboard._telegram_notifier.messages)
-    assert len(first_messages) == 2
-    assert any("Bị điều tra" in message for message in first_messages)
-    assert any("Sắp bị Công" in message for message in first_messages)
-
-    dashboard._monitor_in_flight = {"account-1": 1.0}
-    dashboard._handle_monitor_result(alert)
-    assert dashboard._telegram_notifier.messages == first_messages
+    dashboard._handle_monitor_result(baseline)
+    assert dashboard._telegram_notifier.messages == []
+    assert dashboard._monitor_initialized_profiles == {"account-1"}
 
     dashboard._monitor_in_flight = {"account-1": 1.0}
     dashboard._handle_monitor_result(
-        WorkerSnapshot(
-            "account-1",
-            monitor_events=(),
-            monitor_checked=(INVESTIGATED, INCOMING_ATTACK),
-        )
+        WorkerSnapshot("account-1", monitor_events=(COMBAT_MAIL_OTHER,))
     )
+    assert dashboard._telegram_notifier.messages == []
+
     dashboard._monitor_in_flight = {"account-1": 1.0}
-    dashboard._handle_monitor_result(alert)
-    assert len(dashboard._telegram_notifier.messages) == 4
+    dashboard._handle_monitor_result(
+        WorkerSnapshot("account-1", monitor_events=(TERRITORY_ATTACKED,))
+    )
+    assert len(dashboard._telegram_notifier.messages) == 1
+    assert "Lãnh Địa bị Công" in dashboard._telegram_notifier.messages[0]
 
 
-def test_monitor_runs_three_profiles_concurrently_and_staggers_slow_region() -> None:
+def test_monitor_runs_three_mail_flows_concurrently_and_marks_first_pass() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     profiles = [SimpleNamespace(id=f"account-{index}") for index in range(6)]
     dashboard.config = SimpleNamespace(profiles=profiles)
@@ -182,7 +181,7 @@ def test_monitor_runs_three_profiles_concurrently_and_staggers_slow_region() -> 
     dashboard._monitor_in_flight = {}
     dashboard._monitor_cycle_at = 0.0
     dashboard._monitor_cycle_number = 0
-    dashboard._monitor_active_events = {}
+    dashboard._monitor_initialized_profiles = {"account-1"}
     dashboard._log_lines = deque(maxlen=10)
     dashboard.log = FakeLogWidget()
 
@@ -190,11 +189,16 @@ def test_monitor_runs_three_profiles_concurrently_and_staggers_slow_region() -> 
 
     assert len(dashboard.runner.commands) == 3
     assert len(dashboard._monitor_in_flight) == 3
-    assert all(command == CommandKind.MONITOR_THREATS for _, command, _ in dashboard.runner.commands)
-    assert sum(
-        bool(payload["include_investigated"])
-        for _, _, payload in dashboard.runner.commands
-    ) == 1
+    assert all(command == CommandKind.MONITOR_MAIL for _, command, _ in dashboard.runner.commands)
+    initial_by_profile = {
+        profile_id: bool(payload["initial_scan"])
+        for profile_id, _command, payload in dashboard.runner.commands
+    }
+    assert initial_by_profile == {
+        "account-0": True,
+        "account-1": False,
+        "account-2": True,
+    }
 
 
 def test_mouse_sync_section_is_collapsed_by_default_and_can_toggle() -> None:

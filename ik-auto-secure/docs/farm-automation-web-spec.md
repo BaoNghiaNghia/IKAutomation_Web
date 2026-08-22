@@ -602,3 +602,35 @@ Không chuyển toàn bộ WPF UI sang web trước khi Agent và event contract
 - [ ] Checkpoint restart không thể tạo blind input.
 - [ ] Diagnostic retention/quota/secret redaction được kiểm tra.
 - [ ] Runbook cho ADB offline, game update, template mismatch và quarantine hoàn tất.
+
+## 19. Giám sát thư Chiến đấu trên browser
+
+`Giám sát` là một state machine độc lập với Farm và chỉ thao tác trên renderer của
+đúng Chrome profile. Không chụp desktop và không dựa vào toast ngắn trên World Map.
+
+### 19.1. Lượt đầu của mỗi phiên giám sát
+
+1. Chụp renderer mới và bấm điểm cố định của nút thư: `(145, 545)` trên khung
+   chuẩn `1259×672`; tọa độ được quy đổi theo renderer của từng profile, không
+   template-match icon thư.
+2. Xác minh hộp thư đã mở bằng nút đóng `X` ở góc phải trên.
+3. Chuyển sang mục `Chiến đấu` như luồng trong video tham chiếu.
+4. Tạo baseline cho profile, không gửi Telegram từ thư đã tồn tại trước khi bật
+   giám sát.
+5. Nhận diện và bấm `X` để đóng hộp thư.
+
+### 19.2. Từ lượt thứ hai
+
+1. Mở thư và chuyển sang `Chiến đấu` bằng cùng các bước có xác minh.
+2. Chỉ kiểm tra tiếp khi vùng nhỏ cạnh mục `Chiến đấu` có badge đỏ hiển thị đúng
+   số `1`; badge số khác, badge `Hệ thống`, badge `NEW` trong danh sách và HUD bên
+   ngoài không hợp lệ.
+3. Bấm đúng dòng thư đầu tiên để trạng thái đã đọc do game quản lý.
+4. Chỉ khi dòng tiêu đề của đúng thư đầu tiên là `Lãnh Địa bị Công` mới gửi
+   Telegram, kèm tên profile tương ứng; không dùng nội dung ở dòng thứ hai hoặc
+   thư cũ phía dưới làm điều kiện.
+5. Luôn đóng hộp thư trong bước cleanup, kể cả khi không có thư mới, tiêu đề không
+   khớp hoặc một bước nhận diện thất bại.
+
+Tối đa ba profile chạy luồng thư song song. Một vòng mới nghỉ tối thiểu bốn giây;
+vì thư mới tồn tại cho đến khi được đọc nên không cần polling toast 2–3 giây.

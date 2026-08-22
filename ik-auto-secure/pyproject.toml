@@ -38,7 +38,7 @@ ik_chrome_auto = [
   "assets/*.ttf",
   "assets/*.txt",
   "assets/farm_templates/*.png",
-  "assets/threats/*.png",
+  "assets/mail_monitor/*.png",
 ]
 
 [tool.pytest.ini_options]

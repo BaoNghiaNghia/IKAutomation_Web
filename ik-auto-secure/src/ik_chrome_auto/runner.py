@@ -13,6 +13,7 @@ from ik_chrome_auto.browser import ChromeProfileSession
 from ik_chrome_auto.event_log import JsonLineLog
 from ik_chrome_auto.farm_vision import DetectedGameState, FarmTemplateId, TeamRosterRow
 from ik_chrome_auto.farm_workflow import FarmGameState, FarmStep, FarmWorkflow
+from ik_chrome_auto.image_utils import decode_png
 from ik_chrome_auto.models import (
     AppConfig,
     CommandKind,
@@ -24,10 +25,13 @@ from ik_chrome_auto.models import (
 from ik_chrome_auto.reader import redact
 from ik_chrome_auto.resource_area_points import ResourceAreaPointSelector
 from ik_chrome_auto.storage import upscale_png_for_diagnostics, write_retained_png
-from ik_chrome_auto.threat_monitor import (
-    INCOMING_ATTACK,
-    INVESTIGATED,
-    BrowserThreatMonitor,
+from ik_chrome_auto.mail_monitor import (
+    COMBAT_MAIL_OTHER,
+    MAIL_BASELINE,
+    NO_NEW_COMBAT_MAIL,
+    SCAN_ERROR,
+    TERRITORY_ATTACKED,
+    BrowserMailMonitor,
 )
 from ik_chrome_auto.windows import (
     calculate_tiled_positions,
@@ -44,6 +48,11 @@ from ik_chrome_auto.windows import (
 UpdateCallback = Callable[[WorkerSnapshot], None]
 InputCallback = Callable[[str, dict[str, object]], None]
 CoordinateCallback = Callable[[str, dict[str, object]], None]
+
+# Fixed mail-button coordinate supplied from the 1259x672 reference capture.
+# It is mapped to the current renderer size, not searched by a template.
+MAIL_BUTTON_REFERENCE_SIZE = (1259, 672)
+MAIL_BUTTON_REFERENCE_POINT = (145, 545)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +144,7 @@ class ProfileWorker:
         self._farm_area_selector = ResourceAreaPointSelector()
         self._farm_area_epoch = 0
         self._farm_run_id = ""
-        self._threat_monitor: BrowserThreatMonitor | None = None
+        self._mail_monitor: BrowserMailMonitor | None = None
 
     def submit(self, command: WorkerCommand) -> None:
         self._ensure_thread()
@@ -198,6 +207,121 @@ class ProfileWorker:
                 monitor_checked=checked,
             )
         )
+
+    def _monitor_pause(self, seconds: float) -> None:
+        """Wait briefly without starving Playwright's browser connection."""
+        deadline = time.monotonic() + max(0.0, seconds)
+        while time.monotonic() < deadline:
+            if self.session is not None:
+                self.session.pump(5)
+            time.sleep(min(0.08, max(0.0, deadline - time.monotonic())))
+
+    def _capture_mail_canvas(self) -> tuple[bytes, tuple[int, int]]:
+        if self.session is None:
+            raise RuntimeError("Profile chưa mở")
+        png, _surface = self.session.capture_game_surface_png()
+        image = decode_png(png)
+        return png, (image.width, image.height)
+
+    def _tap_monitor_point(
+        self, normalized_x: float, normalized_y: float, image_size: tuple[int, int]
+    ) -> None:
+        if self.session is None:
+            raise RuntimeError("Profile chưa mở")
+        width, height = image_size
+        x = max(1, min(width - 2, round(width * normalized_x)))
+        y = max(1, min(height - 2, round(height * normalized_y)))
+        # Browser template bounds are (left, top, width, height). A symmetric
+        # 2x2 box makes its computed center exactly the requested X/Y point.
+        self.session.tap_farm_template((x - 1, y - 1, 2, 2), image_size)
+
+    def _tap_monitor_reference_point(
+        self,
+        point: tuple[int, int],
+        reference_size: tuple[int, int],
+        image_size: tuple[int, int],
+    ) -> None:
+        reference_width, reference_height = reference_size
+        self._tap_monitor_point(
+            point[0] / reference_width,
+            point[1] / reference_height,
+            image_size,
+        )
+
+    def _check_combat_mail(self, *, initial_scan: bool) -> str:
+        """Open Combat mail, establish a baseline, or inspect one unread item.
+
+        Every transition is verified from a fresh renderer capture. The first
+        pass never alerts on historical mail. Later passes only open the first
+        message when the Combat category itself carries an unread badge.
+        """
+        if self.session is None:
+            return SCAN_ERROR
+        if self._mail_monitor is None:
+            self._mail_monitor = BrowserMailMonitor()
+        monitor = self._mail_monitor
+        mail_open = False
+        latest_png: bytes | None = None
+        latest_size: tuple[int, int] | None = None
+        try:
+            latest_png, latest_size = self._capture_mail_canvas()
+            close = monitor.find_close_button(latest_png)
+            if close is None:
+                self._tap_monitor_reference_point(
+                    MAIL_BUTTON_REFERENCE_POINT,
+                    MAIL_BUTTON_REFERENCE_SIZE,
+                    latest_size,
+                )
+                self._monitor_pause(0.65)
+                latest_png, latest_size = self._capture_mail_canvas()
+                close = monitor.find_close_button(latest_png)
+                if close is None:
+                    raise RuntimeError("Hộp thư chưa mở sau khi bấm nút thư")
+            mail_open = True
+
+            # Combat is the second category on the left. Clicking inside an
+            # already verified mailbox is safe and mirrors the reference video.
+            self._tap_monitor_point(0.066, 0.36, latest_size)
+            self._monitor_pause(0.55)
+            latest_png, latest_size = self._capture_mail_canvas()
+            if monitor.find_close_button(latest_png) is None:
+                raise RuntimeError("Hộp thư bị đóng trước khi đọc tab Chiến đấu")
+
+            if initial_scan:
+                self.event_log.write(
+                    "mail_monitor_baseline",
+                    {"profile_id": self.profile.id},
+                )
+                return MAIL_BASELINE
+            if not monitor.has_new_combat_mail(latest_png):
+                return NO_NEW_COMBAT_MAIL
+
+            # Read exactly the first row so the game's unread state becomes
+            # authoritative; no historical row below it is inspected.
+            self._tap_monitor_point(0.255, 0.165, latest_size)
+            self._monitor_pause(0.55)
+            latest_png, latest_size = self._capture_mail_canvas()
+            if monitor.find_close_button(latest_png) is None:
+                raise RuntimeError("Không xác minh được thư đầu tiên sau khi mở")
+            if monitor.is_territory_attacked(latest_png):
+                return TERRITORY_ATTACKED
+            return COMBAT_MAIL_OTHER
+        finally:
+            if mail_open:
+                try:
+                    latest_png, latest_size = self._capture_mail_canvas()
+                    close = monitor.find_close_button(latest_png)
+                    if close is not None:
+                        self.session.tap_farm_template(close.bounds, latest_size)
+                        self._monitor_pause(0.2)
+                except Exception as close_error:
+                    self.event_log.write(
+                        "mail_monitor_close_error",
+                        {
+                            "profile_id": self.profile.id,
+                            "message": f"{type(close_error).__name__}: {close_error}",
+                        },
+                    )
 
     def _loop(self) -> None:
         while True:
@@ -266,42 +390,24 @@ class ProfileWorker:
                     self._log_farm("stopped", {"reason": "user"})
                     self._publish(WorkerState.READY if self.session is not None else WorkerState.STOPPED, "Đã dừng Auto Farm")
                     continue
-                if command.kind == CommandKind.MONITOR_THREATS:
-                    checked = (INCOMING_ATTACK,)
-                    if bool(command.payload.get("include_investigated", False)):
-                        checked += (INVESTIGATED,)
+                if command.kind == CommandKind.MONITOR_MAIL:
                     if self.session is None:
-                        self._publish_monitor((), checked)
+                        self._publish_monitor((SCAN_ERROR,), ())
                         continue
                     try:
-                        if self._threat_monitor is None:
-                            self._threat_monitor = BrowserThreatMonitor()
-                        detected: list[str] = []
-                        for event in checked:
-                            png, full_size, capture_scale = (
-                                self.session.capture_game_region_png(
-                                    self._threat_monitor.region(event),
-                                    scale=0.65,
-                                )
-                            )
-                            match = self._threat_monitor.detect_region(
-                                png,
-                                event,
-                                full_size,
-                                capture_scale,
-                            )
-                            if match is not None:
-                                detected.append(match.event)
-                        self._publish_monitor(tuple(detected), checked)
+                        event = self._check_combat_mail(
+                            initial_scan=bool(command.payload.get("initial_scan", False))
+                        )
+                        self._publish_monitor((event,), ("combat_mail",))
                     except Exception as error:
                         self.event_log.write(
-                            "threat_monitor_error",
+                            "mail_monitor_error",
                             {
                                 "profile_id": self.profile.id,
                                 "message": f"{type(error).__name__}: {error}",
                             },
                         )
-                        self._publish_monitor(("scan_error",), checked)
+                        self._publish_monitor((SCAN_ERROR,), ("combat_mail",))
                     continue
                 if command.kind == CommandKind.SET_SYNC_SOURCE:
                     self._sync_source_enabled = bool(command.payload.get("enabled", False))
