@@ -94,12 +94,18 @@ class FakeFarmRunner:
     def __init__(self, opened: set[str]) -> None:
         self.opened = opened
         self.commands: list[tuple[str, CommandKind]] = []
+        self.sync_enabled = False
+        self.disable_sync_calls = 0
 
     def has_open_session(self, profile_id: str) -> bool:
         return profile_id in self.opened
 
     def submit(self, profile_id: str, command: CommandKind) -> None:
         self.commands.append((profile_id, command))
+
+    def disable_sync(self) -> None:
+        self.sync_enabled = False
+        self.disable_sync_calls += 1
 
 
 class FakeTelegramNotifier:
@@ -171,14 +177,16 @@ def test_monitor_first_pass_builds_baseline_then_alerts_only_for_attack_mail() -
     assert "Lãnh Địa bị Công" in dashboard._telegram_notifier.messages[0]
 
 
-def test_monitor_runs_three_mail_flows_concurrently_and_marks_first_pass() -> None:
+def test_monitor_finishes_each_five_profile_group_before_starting_the_next() -> None:
     dashboard = Dashboard.__new__(Dashboard)
-    profiles = [SimpleNamespace(id=f"account-{index}") for index in range(6)]
+    profiles = [SimpleNamespace(id=f"account-{index}") for index in range(7)]
     dashboard.config = SimpleNamespace(profiles=profiles)
     dashboard.runner = FakeMonitorRunner({profile.id for profile in profiles})
     dashboard._monitoring_enabled = True
     dashboard._monitor_queue = deque()
     dashboard._monitor_in_flight = {}
+    dashboard._monitor_batch_profiles = set()
+    dashboard._monitor_next_batch_at = 0.0
     dashboard._monitor_cycle_at = 0.0
     dashboard._monitor_cycle_number = 0
     dashboard._monitor_initialized_profiles = {"account-1"}
@@ -187,8 +195,8 @@ def test_monitor_runs_three_mail_flows_concurrently_and_marks_first_pass() -> No
 
     dashboard._advance_monitoring()
 
-    assert len(dashboard.runner.commands) == 3
-    assert len(dashboard._monitor_in_flight) == 3
+    assert len(dashboard.runner.commands) == 5
+    assert len(dashboard._monitor_in_flight) == 5
     assert all(command == CommandKind.MONITOR_MAIL for _, command, _ in dashboard.runner.commands)
     initial_by_profile = {
         profile_id: bool(payload["initial_scan"])
@@ -198,7 +206,28 @@ def test_monitor_runs_three_mail_flows_concurrently_and_marks_first_pass() -> No
         "account-0": True,
         "account-1": False,
         "account-2": True,
+        "account-3": True,
+        "account-4": True,
     }
+
+    # A completed member does not let the next profile leak into the current
+    # group; all five full mailbox flows must finish first.
+    dashboard._handle_monitor_result(
+        WorkerSnapshot("account-0", monitor_events=(MAIL_BASELINE,))
+    )
+    dashboard._advance_monitoring()
+    assert len(dashboard.runner.commands) == 5
+
+    for profile_id in ("account-1", "account-2", "account-3", "account-4"):
+        dashboard._handle_monitor_result(
+            WorkerSnapshot(profile_id, monitor_events=(MAIL_BASELINE,))
+        )
+    dashboard._monitor_next_batch_at = 0.0
+    dashboard._advance_monitoring()
+    assert [profile_id for profile_id, _command, _payload in dashboard.runner.commands[-2:]] == [
+        "account-5",
+        "account-6",
+    ]
 
 
 def test_mouse_sync_section_is_collapsed_by_default_and_can_toggle() -> None:
@@ -286,9 +315,12 @@ def test_bulk_farm_button_starts_and_stops_without_closing_open_tabs() -> None:
     dashboard.farm_all_button = FakeActionButton()
     dashboard._log_lines = deque(maxlen=10)
     dashboard.log = FakeLogWidget()
+    dashboard.runner.sync_enabled = True
 
     dashboard._farm_all_action()
 
+    assert dashboard.runner.sync_enabled is False
+    assert dashboard.runner.disable_sync_calls == 1
     assert dashboard._farm_all_running is True
     assert dashboard.farm_all_button.text == "Dừng Farm"
     assert set(dashboard.runner.commands) == {
@@ -308,6 +340,33 @@ def test_bulk_farm_button_starts_and_stops_without_closing_open_tabs() -> None:
     assert dashboard.runner.opened == {"account-1", "account-2"}
 
 
+def test_monitoring_disables_input_sync_before_starting() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.config = SimpleNamespace(
+        profiles=[SimpleNamespace(id="account-1")]
+    )
+    dashboard.runner = FakeFarmRunner({"account-1"})
+    dashboard.runner.sync_enabled = True
+    dashboard._telegram_notifier = FakeTelegramNotifier()
+    dashboard._monitoring_enabled = False
+    dashboard._monitor_queue = deque()
+    dashboard._monitor_in_flight = {}
+    dashboard._monitor_cycle_at = 0.0
+    dashboard._monitor_cycle_number = 0
+    dashboard._monitor_initialized_profiles = set()
+    dashboard.monitor_button = FakeActionButton()
+    dashboard._log_lines = deque(maxlen=10)
+    dashboard.log = FakeLogWidget()
+    dashboard._advance_monitoring = lambda: None
+
+    dashboard._toggle_monitoring()
+
+    assert dashboard.runner.sync_enabled is False
+    assert dashboard.runner.disable_sync_calls == 1
+    assert dashboard._monitoring_enabled is True
+    assert dashboard.monitor_button.text == "Dừng giám sát"
+
+
 def test_close_tabs_stops_individual_farm_before_serial_browser_shutdown() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     dashboard.config = SimpleNamespace(
@@ -324,16 +383,26 @@ def test_close_tabs_stops_individual_farm_before_serial_browser_shutdown() -> No
     dashboard._farm_close_queue = deque()
     dashboard._farm_close_in_flight = None
     dashboard._farm_close_deadline = 0.0
+    dashboard._farm_quiesce_farms = set()
+    dashboard._farm_quiesce_monitors = set()
     dashboard._log_lines = deque(maxlen=10)
     dashboard.log = FakeLogWidget()
 
     dashboard._farm_launcher_action()
 
     assert dashboard.runner.commands[0] == ("account-1", CommandKind.STOP_FARM)
-    assert dashboard.runner.commands[1][1] == CommandKind.STOP
+    assert len(dashboard.runner.commands) == 1
+    assert dashboard._farm_launcher_phase == "quiescing"
+    assert dashboard.farm_launcher.text == "Đang dừng tác vụ…"
+    assert dashboard.farm_all_button.enabled is False
+
+    # Chrome must not receive STOP until the worker confirms Farm has ended.
+    dashboard._farm_quiesce_farms.clear()
+    dashboard._advance_farm_quiescing()
+
+    assert dashboard.runner.commands[1] == ("account-1", CommandKind.STOP)
     assert dashboard._farm_launcher_phase == "stopping"
     assert dashboard.farm_launcher.text == "Đang đóng tab…"
-    assert dashboard.farm_all_button.enabled is False
 
     dashboard._farm_close_deadline = 0.0
     dashboard._advance_farm_stopping()

@@ -53,6 +53,14 @@ CoordinateCallback = Callable[[str, dict[str, object]], None]
 # It is mapped to the current renderer size, not searched by a template.
 MAIL_BUTTON_REFERENCE_SIZE = (1259, 672)
 MAIL_BUTTON_REFERENCE_POINT = (145, 545)
+# Fixed center of the Combat category in the supplied 1920x1080 mailbox
+# reference. It is scaled to each profile's renderer size; no template search
+# is used for this click.
+COMBAT_TAB_REFERENCE_SIZE = (1920, 1080)
+COMBAT_TAB_REFERENCE_POINT = (142, 397)
+MAILBOX_REFERENCE_SIZE = (1920, 1080)
+READ_ALL_MAIL_REFERENCE_POINT = (385, 974)
+CLOSE_MAIL_REFERENCE_POINT = (1794, 139)
 # The first mail is the yellow-highlighted card at the very top of the list.
 # Never search down the list for the first matching attack subject.
 FIRST_MAIL_ROW_POINT = (0.255, 0.165)
@@ -282,15 +290,29 @@ class ProfileWorker:
                     raise RuntimeError("Hộp thư chưa mở sau khi bấm nút thư")
             mail_open = True
 
-            # Combat is the second category on the left. Clicking inside an
-            # already verified mailbox is safe and mirrors the reference video.
-            self._tap_monitor_point(0.066, 0.36, latest_size)
+            # Combat is the second category on the left. Use the supplied
+            # fixed X/Y reference instead of spending another capture on
+            # category recognition.
+            self._tap_monitor_reference_point(
+                COMBAT_TAB_REFERENCE_POINT,
+                COMBAT_TAB_REFERENCE_SIZE,
+                latest_size,
+            )
             self._monitor_pause(0.55)
             latest_png, latest_size = self._capture_mail_canvas()
             if monitor.find_close_button(latest_png) is None:
                 raise RuntimeError("Hộp thư bị đóng trước khi đọc tab Chiến đấu")
 
             if initial_scan:
+                self._tap_monitor_reference_point(
+                    READ_ALL_MAIL_REFERENCE_POINT,
+                    MAILBOX_REFERENCE_SIZE,
+                    latest_size,
+                )
+                self._monitor_pause(0.3)
+                latest_png, latest_size = self._capture_mail_canvas()
+                if monitor.find_close_button(latest_png) is None:
+                    raise RuntimeError("Hộp thư bị đóng sau khi bấm Đọc & Nhận Tất Cả")
                 self.event_log.write(
                     "mail_monitor_baseline",
                     {"profile_id": self.profile.id},
@@ -315,7 +337,11 @@ class ProfileWorker:
                     latest_png, latest_size = self._capture_mail_canvas()
                     close = monitor.find_close_button(latest_png)
                     if close is not None:
-                        self.session.tap_farm_template(close.bounds, latest_size)
+                        self._tap_monitor_reference_point(
+                            CLOSE_MAIL_REFERENCE_POINT,
+                            MAILBOX_REFERENCE_SIZE,
+                            latest_size,
+                        )
                         self._monitor_pause(0.2)
                 except Exception as close_error:
                     self.event_log.write(

@@ -49,8 +49,9 @@ TOOL_UI_SCALE = 0.805
 TAB_CLOSE_INTERVAL_SECONDS = 1.5
 TAB_CLOSE_BATCH_SIZE = 10
 TAB_CLOSE_BATCH_PAUSE_SECONDS = 8.0
-MONITOR_MAX_IN_FLIGHT = 3
-MONITOR_CYCLE_SECONDS = 4.0
+MONITOR_GROUP_SIZE = 5
+MONITOR_GROUP_PAUSE_SECONDS = 0.15
+MONITOR_CYCLE_SECONDS = 1.0
 
 
 def _ui_px(value: int | float, minimum: int = 1) -> int:
@@ -151,9 +152,13 @@ class Dashboard(QWidget):
         self._farm_next_close_at = 0.0
         self._farm_closed_count = 0
         self._farm_close_total = 0
+        self._farm_quiesce_farms: set[str] = set()
+        self._farm_quiesce_monitors: set[str] = set()
         self._monitoring_enabled = False
         self._monitor_queue: deque[str] = deque()
         self._monitor_in_flight: dict[str, float] = {}
+        self._monitor_batch_profiles: set[str] = set()
+        self._monitor_next_batch_at = 0.0
         self._monitor_cycle_at = 0.0
         self._monitor_cycle_number = 0
         self._monitor_initialized_profiles: set[str] = set()
@@ -526,6 +531,31 @@ class Dashboard(QWidget):
         self.sync.setText("Tắt đồng bộ")
         self.sync_status.setText(f"MASTER: {self.master.currentText()} → {len(selected)} thiết bị")
         self._set_sync_status_indicator(True)
+
+    def _disable_sync_for_automation(self, task_name: str) -> None:
+        """Stop input mirroring before an autonomous task can click or type."""
+        was_enabled = bool(getattr(self.runner, "sync_enabled", False))
+        if was_enabled:
+            self.runner.disable_sync()
+            self._append_log(f"Đã tắt đồng bộ chuột - bàn phím trước khi chạy {task_name}")
+        if hasattr(self, "master"):
+            self.master.setEnabled(True)
+        if hasattr(self, "sync"):
+            self.sync.setText("Bật đồng bộ")
+            self.sync.setEnabled(False)
+        if hasattr(self, "sync_status"):
+            self.sync_status.setText("Sync đang tắt")
+        if hasattr(self, "sync_status_icon"):
+            self._set_sync_status_indicator(False)
+
+    def _refresh_sync_control(self) -> None:
+        """Allow sync only while neither Farm nor monitoring is active."""
+        blocked = bool(self.farm_profiles) or bool(
+            getattr(self, "_monitoring_enabled", False)
+        )
+        if hasattr(self, "sync"):
+            self.sync.setEnabled(not blocked)
+
     def _set_sync_status_indicator(self, enabled: bool) -> None:
         color = "#16a34a" if enabled else "#94a3b8"
         state = "bật" if enabled else "tắt"
@@ -664,9 +694,12 @@ class Dashboard(QWidget):
                 "Hãy cấu hình Telegram trước để nhận cảnh báo Lãnh Địa bị Công.",
             )
             return
+        self._disable_sync_for_automation("Giám sát")
         self._monitoring_enabled = True
         self._monitor_queue.clear()
         self._monitor_in_flight.clear()
+        self._monitor_batch_profiles = set()
+        self._monitor_next_batch_at = 0.0
         self._monitor_cycle_at = 0.0
         self._monitor_cycle_number = 0
         self._monitor_initialized_profiles.clear()
@@ -686,20 +719,36 @@ class Dashboard(QWidget):
         self._monitoring_enabled = False
         self._monitor_queue.clear()
         self._monitor_in_flight.clear()
+        self._monitor_batch_profiles = set()
+        self._monitor_next_batch_at = 0.0
         self._monitor_cycle_at = 0.0
         self._monitor_cycle_number = 0
         self._monitor_initialized_profiles.clear()
         self.monitor_button.setText("Giám sát")
         self.monitor_button.setStyleSheet("")
         self.monitor_button.setEnabled(self._opened_profile_count() > 0)
+        self._refresh_sync_control()
         self._append_log("Đã dừng giám sát thư Chiến đấu")
 
     def _handle_monitor_result(self, snapshot: WorkerSnapshot) -> None:
         profile_id = snapshot.profile_id
+        if (
+            getattr(self, "_farm_launcher_phase", None) == "quiescing"
+            and profile_id in getattr(self, "_farm_quiesce_monitors", set())
+        ):
+            self._farm_quiesce_monitors.discard(profile_id)
+            self._append_log(f"[{profile_id}] Tác vụ giám sát đã kết thúc")
+            self._advance_farm_quiescing()
+            return
         if profile_id not in self._monitor_in_flight:
             return
         events = set(snapshot.monitor_events or ())
         self._monitor_in_flight.pop(profile_id, None)
+        getattr(self, "_monitor_batch_profiles", set()).discard(profile_id)
+        if not self._monitor_in_flight:
+            self._monitor_next_batch_at = (
+                time.monotonic() + MONITOR_GROUP_PAUSE_SECONDS
+            )
         if SCAN_ERROR in events:
             self._append_log(f"[{profile_id}] Giám sát thư: không hoàn tất được luồng xác minh")
             return
@@ -724,9 +773,13 @@ class Dashboard(QWidget):
             return
 
     def _advance_monitoring(self) -> None:
-        """Keep at most three verified mailbox flows in flight."""
+        """Run complete mailbox flows in groups, with a barrier between groups."""
         if not self._monitoring_enabled:
             return
+        if not hasattr(self, "_monitor_batch_profiles"):
+            self._monitor_batch_profiles = set()
+        if not hasattr(self, "_monitor_next_batch_at"):
+            self._monitor_next_batch_at = 0.0
         now = time.monotonic()
         expired = [
             profile_id
@@ -735,7 +788,10 @@ class Dashboard(QWidget):
         ]
         for profile_id in expired:
             self._monitor_in_flight.pop(profile_id, None)
+            self._monitor_batch_profiles.discard(profile_id)
             self._append_log(f"[{profile_id}] Giám sát quá thời gian; chuyển profile kế tiếp")
+        if expired and not self._monitor_in_flight:
+            self._monitor_next_batch_at = now + MONITOR_GROUP_PAUSE_SECONDS
         if not self._monitor_queue and not self._monitor_in_flight:
             if now < self._monitor_cycle_at:
                 return
@@ -750,10 +806,13 @@ class Dashboard(QWidget):
             self._monitor_queue = deque(ordered_open)
             self._monitor_cycle_number += 1
             self._monitor_cycle_at = now + MONITOR_CYCLE_SECONDS
-        while (
-            self._monitor_queue
-            and len(self._monitor_in_flight) < MONITOR_MAX_IN_FLIGHT
-        ):
+        # Do not refill a partially completed group. Every profile in the
+        # current group must finish open -> inspect -> close before the next
+        # group begins.
+        if self._monitor_in_flight or now < self._monitor_next_batch_at:
+            return
+        submitted = 0
+        while self._monitor_queue and submitted < MONITOR_GROUP_SIZE:
             profile_id = self._monitor_queue.popleft()
             if not self.runner.has_open_session(profile_id):
                 self._monitor_initialized_profiles.discard(profile_id)
@@ -764,13 +823,22 @@ class Dashboard(QWidget):
                 initial_scan=profile_id not in self._monitor_initialized_profiles,
             )
             self._monitor_in_flight[profile_id] = now + 30.0
+            self._monitor_batch_profiles.add(profile_id)
+            submitted += 1
+        if submitted:
+            self._append_log(
+                f"Giám sát nhóm {self._monitor_cycle_number}: "
+                f"đang xử lý trọn luồng {submitted} profile"
+            )
 
     def _toggle_farm(self, pid: str) -> None:
         row = self.rows[pid]
         if pid in self.farm_profiles:
             self.farm_profiles.remove(pid); row.farm.setText("Farm"); self.runner.submit(pid, CommandKind.STOP_FARM)
+            self._refresh_sync_control()
             self._notify_telegram(f"⏹️ Đã dừng Farm: {self.config.profile(pid).name}")
         else:
+            self._disable_sync_for_automation("Farm")
             self.farm_profiles.add(pid); row.farm.setText("Dừng Farm"); self.runner.submit(pid, CommandKind.START_FARM)
             self._notify_telegram(f"🌾 Đã bắt đầu Farm: {self.config.profile(pid).name}")
 
@@ -828,6 +896,16 @@ class Dashboard(QWidget):
             # Tabs may be farming either through the bulk button or through an
             # individual profile control. Always stop every tracked Farm job
             # before beginning the serial Chrome shutdown.
+            self._farm_quiesce_farms = {
+                profile_id
+                for profile_id in self.farm_profiles
+                if self.runner.has_open_session(profile_id)
+            }
+            self._farm_quiesce_monitors = set(
+                getattr(self, "_monitor_in_flight", {})
+                if getattr(self, "_monitoring_enabled", False)
+                else ()
+            )
             if self.farm_profiles:
                 self._stop_all_farms()
             if getattr(self, "_monitoring_enabled", False):
@@ -847,15 +925,21 @@ class Dashboard(QWidget):
                 self._finish_farm_stopping()
                 return
             self.farm_launcher.setEnabled(False)
-            self.farm_launcher.setText("Đang đóng tab…")
-            self._farm_launcher_phase = "stopping"
+            self.farm_launcher.setText("Đang dừng tác vụ…")
+            self._farm_launcher_phase = "quiescing"
             self.farm_all_button.setEnabled(False)
+            if hasattr(self, "sync"):
+                self.sync.setEnabled(False)
+            if hasattr(self, "monitor_button"):
+                self.monitor_button.setEnabled(False)
             self._farm_close_in_flight = None
             self._farm_close_deadline = 0.0
             self._farm_next_close_at = 0.0
             self._farm_closed_count = 0
-            self._advance_farm_stopping()
-            self._append_log(f"Đang đóng lần lượt {len(self._farm_close_queue)} tab profile")
+            self._append_log(
+                "Đang chờ Farm và Giám sát dừng hoàn toàn trước khi đóng tabs"
+            )
+            self._advance_farm_quiescing()
 
     def _farm_all_action(self) -> None:
         """Start or stop Farm without changing the selected Chrome sessions."""
@@ -866,6 +950,7 @@ class Dashboard(QWidget):
         if len(opened) <= 1:
             self.farm_all_button.setEnabled(False)
             return
+        self._disable_sync_for_automation("Farms")
         for profile_id in opened:
             if profile_id not in self.farm_profiles:
                 self.farm_profiles.add(profile_id)
@@ -890,9 +975,10 @@ class Dashboard(QWidget):
         self.farm_all_button.setText("Farms")
         self.farm_all_button.setStyleSheet("")
         self.farm_all_button.setEnabled(
-            self._farm_launcher_phase not in {"opening", "stopping"}
+            self._farm_launcher_phase not in {"opening", "quiescing", "stopping"}
             and self._opened_profile_count() > 1
         )
+        self._refresh_sync_control()
         self._append_log("Đã gửi lệnh dừng Farm cho toàn bộ profile")
         self._notify_telegram("⏹️ Đã dừng Farm trên toàn bộ profile.")
 
@@ -1067,6 +1153,24 @@ class Dashboard(QWidget):
             return
         self._finish_farm_stopping()
 
+    def _advance_farm_quiescing(self) -> None:
+        """Wait for Farm/monitor workers to finish before closing Chrome."""
+        if self._farm_launcher_phase != "quiescing":
+            return
+        self._farm_quiesce_farms = {
+            profile_id
+            for profile_id in self._farm_quiesce_farms
+            if self.runner.has_open_session(profile_id)
+        }
+        if self._farm_quiesce_farms or self._farm_quiesce_monitors:
+            return
+        self._farm_launcher_phase = "stopping"
+        self.farm_launcher.setText("Đang đóng tab…")
+        self._append_log(
+            f"Các tác vụ đã dừng; đang đóng lần lượt {len(self._farm_close_queue)} tab profile"
+        )
+        self._advance_farm_stopping()
+
     def _schedule_next_tab_close(self, now: float) -> None:
         """Give Chrome GPU processes time to exit before closing another tab."""
         self._farm_closed_count += 1
@@ -1102,6 +1206,8 @@ class Dashboard(QWidget):
         self._farm_next_close_at = 0.0
         self._farm_closed_count = 0
         self._farm_close_total = 0
+        self._farm_quiesce_farms = set()
+        self._farm_quiesce_monitors = set()
         self._farm_launcher_phase = "launch"
         self.farm_launcher.setEnabled(True)
         self.farm_launcher.setText("Khởi động")
@@ -1210,6 +1316,17 @@ class Dashboard(QWidget):
                 if snap.monitor_events is not None:
                     self._handle_monitor_result(snap)
                     continue
+                if (
+                    self._farm_launcher_phase == "quiescing"
+                    and snap.profile_id in self._farm_quiesce_farms
+                    and (
+                        "Đã dừng Auto Farm" in snap.message
+                        or snap.state in {WorkerState.STOPPED, WorkerState.ERROR}
+                    )
+                ):
+                    self._farm_quiesce_farms.discard(snap.profile_id)
+                    self._append_log(f"[{snap.profile_id}] Tác vụ Farm đã kết thúc")
+                    self._advance_farm_quiescing()
                 self._auto_arrange_states[snap.profile_id] = snap.state
                 if self._farm_launcher_phase == "opening" and snap.profile_id in self._farm_launch_profiles:
                     self._farm_open_states[snap.profile_id] = snap.state
@@ -1226,7 +1343,8 @@ class Dashboard(QWidget):
                 if row:
                     row.status.setText(snap.message); text,bg,fg=self._state(snap.state); row.badge.setText(text); row.badge.setStyleSheet(f"background:{bg};color:{fg};border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;"); self._set_profile_card_state(row,snap.state)
                     self._set_roster_tooltip(row.card, snap.farm_roster)
-                    if snap.state in {WorkerState.STOPPED, WorkerState.ERROR} or "Đã dừng Auto Farm" in snap.message: self.farm_profiles.discard(snap.profile_id); row.farm.setText("Farm")
+                    if snap.state in {WorkerState.STOPPED, WorkerState.ERROR} or "Đã dừng Auto Farm" in snap.message:
+                        self.farm_profiles.discard(snap.profile_id); row.farm.setText("Farm"); self._refresh_sync_control()
                 try:
                     profile_name = self.config.profile(snap.profile_id).name
                 except KeyError:
@@ -1262,6 +1380,7 @@ class Dashboard(QWidget):
         self._finish_auto_arrange_if_ready()
         self._advance_farm_opening()
         self._finish_farm_opening_if_ready()
+        self._advance_farm_quiescing()
         self._advance_farm_stopping()
         self._advance_monitoring()
         now=time.monotonic()
@@ -1272,13 +1391,13 @@ class Dashboard(QWidget):
                     self.farm_all_button.setEnabled(True)
                 else:
                     self.farm_all_button.setEnabled(
-                        self._farm_launcher_phase not in {"opening", "stopping"}
+                        self._farm_launcher_phase not in {"opening", "quiescing", "stopping"}
                         and self._opened_profile_count() > 1
                     )
                 self.monitor_button.setEnabled(
                     self._monitoring_enabled
                     or (
-                        self._farm_launcher_phase not in {"opening", "stopping"}
+                        self._farm_launcher_phase not in {"opening", "quiescing", "stopping"}
                         and overview.opened_profiles > 0
                     )
                 )
