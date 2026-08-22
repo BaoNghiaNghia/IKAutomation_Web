@@ -29,6 +29,7 @@ from ik_chrome_auto.telegram import (
     save_telegram_settings,
     send_telegram_message,
 )
+from ik_chrome_auto.threat_monitor import INCOMING_ATTACK, INVESTIGATED
 from ik_chrome_auto.two_factor import TwoFactorEnrollment, TwoFactorService
 from ik_chrome_auto.windows import get_gpu_utilization_percent, get_system_memory_status
 
@@ -42,6 +43,9 @@ TOOL_UI_SCALE = 0.805
 TAB_CLOSE_INTERVAL_SECONDS = 1.5
 TAB_CLOSE_BATCH_SIZE = 10
 TAB_CLOSE_BATCH_PAUSE_SECONDS = 8.0
+MONITOR_MAX_IN_FLIGHT = 3
+MONITOR_CYCLE_SECONDS = 2.0
+MONITOR_INVESTIGATED_EVERY = 3
 
 
 def _ui_px(value: int | float, minimum: int = 1) -> int:
@@ -142,6 +146,12 @@ class Dashboard(QWidget):
         self._farm_next_close_at = 0.0
         self._farm_closed_count = 0
         self._farm_close_total = 0
+        self._monitoring_enabled = False
+        self._monitor_queue: deque[str] = deque()
+        self._monitor_in_flight: dict[str, float] = {}
+        self._monitor_cycle_at = 0.0
+        self._monitor_cycle_number = 0
+        self._monitor_active_events: dict[str, set[str]] = {}
         self._auto_arrange_targets: set[str] | None = None
         self._auto_arrange_states: dict[str, WorkerState] = {}
         self._auto_arrange_deadline = 0.0
@@ -162,7 +172,10 @@ class Dashboard(QWidget):
         self._resource_monitor.start()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll)
-        self.timer.start(200)
+        # Monitoring results refill the three capture slots through this
+        # timer. 100 ms keeps a 45-profile cropped scan near the two-second
+        # target without increasing the number of concurrent GPU captures.
+        self.timer.start(100)
 
     def _build(self) -> None:
         self.setWindowTitle("IK Auto — Browser Control")
@@ -185,7 +198,9 @@ class Dashboard(QWidget):
         manage = PushButton("Quản lý"); self._manage_button = manage; manage.setFixedHeight(self._responsive_control_height); manage.setStyleSheet(f"QPushButton {{ background:#ffffff; border:1px solid #8ad7d9; border-radius:{_ui_px(8)}px; color:#087f8c; }} QPushButton:hover {{ background:#effcfb; border-color:#0ea5a5; }}"); manage.clicked.connect(self._manage_accounts)
         self.farm_launcher = PrimaryPushButton("Khởi động"); self.farm_launcher.setFixedHeight(self._responsive_control_height); self.farm_launcher.setStyleSheet(f"QPushButton {{ background:#2563eb; border:1px solid #2563eb; border-radius:{_ui_px(8)}px; color:#ffffff; font-weight:600; }} QPushButton:hover {{ background:#1d4ed8; border-color:#1d4ed8; }} QPushButton:disabled {{ background:#93c5fd; border-color:#93c5fd; color:#eff6ff; }}"); self.farm_launcher.clicked.connect(self._farm_launcher_action)
         self.farm_all_button = PushButton("Farms"); self.farm_all_button.setFixedHeight(self._responsive_control_height); self.farm_all_button.setEnabled(False); self.farm_all_button.clicked.connect(self._farm_all_action)
-        primary_actions = QHBoxLayout(); primary_actions.setSpacing(_ui_px(7)); primary_actions.addWidget(manage, 1); primary_actions.addWidget(self.farm_launcher, 1); primary_actions.addWidget(self.farm_all_button, 1); al.addLayout(primary_actions); ll.addWidget(accounts)
+        self.monitor_button = PushButton("Giám sát"); self.monitor_button.setFixedHeight(self._responsive_control_height); self.monitor_button.setEnabled(False); self.monitor_button.clicked.connect(self._toggle_monitoring)
+        account_actions = QHBoxLayout(); account_actions.setSpacing(_ui_px(7)); account_actions.addWidget(manage, 1); account_actions.addWidget(self.farm_launcher, 1); al.addLayout(account_actions)
+        runtime_actions = QHBoxLayout(); runtime_actions.setSpacing(_ui_px(7)); runtime_actions.addWidget(self.farm_all_button, 1); runtime_actions.addWidget(self.monitor_button, 1); al.addLayout(runtime_actions); ll.addWidget(accounts)
         arrange_card = self._card(); acl = QVBoxLayout(arrange_card); acl.addWidget(StrongBodyLabel("Sắp xếp cửa sổ")); row = QHBoxLayout(); row.addWidget(QLabel("Số cửa sổ / hàng")); row.addStretch(); self.windows_per_row = ComboBox(); self.windows_per_row.addItems(["2","3","4","5","6"]); self.windows_per_row.setCurrentText(str(self.config.browser.windows_per_row)); self.windows_per_row.currentTextChanged.connect(self._apply_windows_per_row); row.addWidget(self.windows_per_row); acl.addLayout(row)
         arrange_actions = QHBoxLayout(); arrange_actions.setSpacing(_ui_px(7)); apply = PrimaryPushButton("Sắp xếp"); apply.clicked.connect(self._arrange); arrange_actions.addWidget(apply, 1); self.drag = self._icon_button(FIF.MOVE, "Hiện nút kéo"); self.drag.clicked.connect(self._toggle_drag); arrange_actions.addWidget(self.drag); self.scrollbars = self._icon_button(FIF.SCROLL, "Hiện thanh cuộn"); self.scrollbars.clicked.connect(self._toggle_scrollbars); arrange_actions.addWidget(self.scrollbars); acl.addLayout(arrange_actions)
         self.pin = FullRowCheckBox("Luôn nổi trên các cửa sổ khác"); self.pin.stateChanged.connect(lambda _s: self.runner.set_all_topmost(self.pin.isChecked())); acl.addWidget(self.pin); ll.addWidget(arrange_card)
@@ -331,6 +346,7 @@ class Dashboard(QWidget):
         self._manage_button.setFixedHeight(self._responsive_control_height)
         self.farm_launcher.setFixedHeight(self._responsive_control_height)
         self.farm_all_button.setFixedHeight(self._responsive_control_height)
+        self.monitor_button.setFixedHeight(self._responsive_control_height)
         for button in self._responsive_icon_buttons:
             button.setFixedSize(self._responsive_control_height, self._responsive_control_height)
         profile_height = max(_ui_px(26), self._responsive_control_height - _ui_px(3))
@@ -628,6 +644,134 @@ class Dashboard(QWidget):
                 cooldown_seconds=600.0,
             )
 
+    def _toggle_monitoring(self) -> None:
+        """Start or stop sequential threat scans over currently open profiles."""
+        if self._monitoring_enabled:
+            self._stop_monitoring()
+            return
+        opened = self._opened_profile_ids()
+        if not opened:
+            self._warning("Chưa có profile", "Hãy khởi động ít nhất một profile trước khi giám sát.")
+            return
+        if self._telegram_notifier is None:
+            self._warning(
+                "Chưa cấu hình Telegram",
+                "Hãy cấu hình Telegram trước để nhận cảnh báo Bị điều tra hoặc Sắp bị Công.",
+            )
+            return
+        self._monitoring_enabled = True
+        self._monitor_queue.clear()
+        self._monitor_in_flight.clear()
+        self._monitor_cycle_at = 0.0
+        self._monitor_cycle_number = 0
+        self._monitor_active_events.clear()
+        self.monitor_button.setText("Dừng giám sát")
+        self.monitor_button.setStyleSheet(
+            f"QPushButton {{ background:#ef4444; border:1px solid #ef4444; "
+            f"border-radius:{_ui_px(8)}px; color:#ffffff; font-weight:600; }} "
+            "QPushButton:hover { background:#dc2626; border-color:#dc2626; }"
+        )
+        self._append_log(f"Đã bật giám sát tuần tự cho {len(opened)} profile đang mở")
+        self._advance_monitoring()
+
+    def _stop_monitoring(self) -> None:
+        self._monitoring_enabled = False
+        self._monitor_queue.clear()
+        self._monitor_in_flight.clear()
+        self._monitor_cycle_at = 0.0
+        self._monitor_cycle_number = 0
+        self._monitor_active_events.clear()
+        self.monitor_button.setText("Giám sát")
+        self.monitor_button.setStyleSheet("")
+        self.monitor_button.setEnabled(self._opened_profile_count() > 0)
+        self._append_log("Đã dừng giám sát cảnh báo")
+
+    def _handle_monitor_result(self, snapshot: WorkerSnapshot) -> None:
+        profile_id = snapshot.profile_id
+        if profile_id not in self._monitor_in_flight:
+            return
+        events = set(snapshot.monitor_events or ())
+        checked = set(snapshot.monitor_checked or ())
+        self._monitor_in_flight.pop(profile_id, None)
+        if "scan_error" in events:
+            self._append_log(f"[{profile_id}] Giám sát: không chụp/nhận diện được ảnh game")
+            return
+        events.intersection_update({INVESTIGATED, INCOMING_ATTACK})
+        previous = self._monitor_active_events.get(profile_id, set())
+        current = set(previous)
+        for event in checked:
+            if event in events:
+                current.add(event)
+            else:
+                current.discard(event)
+        newly_visible = current - previous
+        self._monitor_active_events[profile_id] = current
+        try:
+            profile_name = self.config.profile(profile_id).name
+        except KeyError:
+            profile_name = profile_id
+        if INVESTIGATED in newly_visible:
+            self._notify_telegram(
+                f"⚠️ {profile_name}: Bị điều tra.",
+                force=True,
+            )
+            self._append_log(f"[{profile_id}] Phát hiện: Bị điều tra")
+        if INCOMING_ATTACK in newly_visible:
+            self._notify_telegram(
+                f"🚨 {profile_name}: Sắp bị Công.",
+                force=True,
+            )
+            self._append_log(f"[{profile_id}] Phát hiện: Sắp bị Công")
+
+    def _advance_monitoring(self) -> None:
+        """Keep three cropped renderer scans in flight, targeting a ~2s round."""
+        if not self._monitoring_enabled:
+            return
+        now = time.monotonic()
+        expired = [
+            profile_id
+            for profile_id, deadline in self._monitor_in_flight.items()
+            if now > deadline
+        ]
+        for profile_id in expired:
+            self._monitor_in_flight.pop(profile_id, None)
+            self._append_log(f"[{profile_id}] Giám sát quá thời gian; chuyển profile kế tiếp")
+        if not self._monitor_queue and not self._monitor_in_flight:
+            if now < self._monitor_cycle_at:
+                return
+            ordered_open = [
+                profile.id
+                for profile in self.config.profiles
+                if self.runner.has_open_session(profile.id)
+            ]
+            if not ordered_open:
+                self._stop_monitoring()
+                return
+            self._monitor_queue = deque(ordered_open)
+            self._monitor_cycle_number += 1
+            self._monitor_cycle_at = now + MONITOR_CYCLE_SECONDS
+        profile_ordinals = {
+            profile.id: index for index, profile in enumerate(self.config.profiles)
+        }
+        while (
+            self._monitor_queue
+            and len(self._monitor_in_flight) < MONITOR_MAX_IN_FLIGHT
+        ):
+            profile_id = self._monitor_queue.popleft()
+            if not self.runner.has_open_session(profile_id):
+                self._monitor_active_events.pop(profile_id, None)
+                continue
+            self.runner.submit(
+                profile_id,
+                CommandKind.MONITOR_THREATS,
+                include_investigated=(
+                    profile_ordinals.get(profile_id, 0) + self._monitor_cycle_number
+                )
+                % MONITOR_INVESTIGATED_EVERY
+                == 0,
+            )
+            self._monitor_in_flight[profile_id] = now + 30.0
+
     def _toggle_farm(self, pid: str) -> None:
         row = self.rows[pid]
         if pid in self.farm_profiles:
@@ -693,6 +837,8 @@ class Dashboard(QWidget):
             # before beginning the serial Chrome shutdown.
             if self.farm_profiles:
                 self._stop_all_farms()
+            if getattr(self, "_monitoring_enabled", False):
+                self._stop_monitoring()
             # Closing every worker at once makes Chrome race to tear down its
             # profiles. Queue an explicit STOP per selected profile instead.
             self._farm_close_queue = deque(
@@ -1067,7 +1213,11 @@ class Dashboard(QWidget):
     def _poll(self) -> None:
         try:
             while True:
-                snap=self.updates.get_nowait(); self._auto_arrange_states[snap.profile_id] = snap.state
+                snap=self.updates.get_nowait()
+                if snap.monitor_events is not None:
+                    self._handle_monitor_result(snap)
+                    continue
+                self._auto_arrange_states[snap.profile_id] = snap.state
                 if self._farm_launcher_phase == "opening" and snap.profile_id in self._farm_launch_profiles:
                     self._farm_open_states[snap.profile_id] = snap.state
                 if (
@@ -1120,6 +1270,7 @@ class Dashboard(QWidget):
         self._advance_farm_opening()
         self._finish_farm_opening_if_ready()
         self._advance_farm_stopping()
+        self._advance_monitoring()
         now=time.monotonic()
         if now-self._last_resources>=2:
             try:
@@ -1131,6 +1282,13 @@ class Dashboard(QWidget):
                         self._farm_launcher_phase not in {"opening", "stopping"}
                         and self._opened_profile_count() > 1
                     )
+                self.monitor_button.setEnabled(
+                    self._monitoring_enabled
+                    or (
+                        self._farm_launcher_phase not in {"opening", "stopping"}
+                        and overview.opened_profiles > 0
+                    )
+                )
                 for item in overview.profiles:
                     if item.profile_id in self.rows:self.rows[item.profile_id].resource.setText("—" if not item.opened else f"{item.ram_bytes/1_048_576:.0f} MB | {item.cpu_percent:.1f}%")
             except Exception as error:self._append_log(str(error))

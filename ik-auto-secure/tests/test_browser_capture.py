@@ -302,6 +302,28 @@ def test_cdp_capture_uses_exact_canvas_clip() -> None:
     assert canvas.screenshot_calls == 0
 
 
+def test_monitor_capture_uses_only_normalized_canvas_region() -> None:
+    session, _canvas, context, _page = make_session()
+
+    png, full_size, scale = session.capture_game_region_png(
+        (0.2, 0.3, 0.8, 0.7),
+        scale=0.65,
+    )
+
+    method, params = context.sessions[0].calls[0]
+    assert method == "Page.captureScreenshot"
+    assert params["clip"] == {
+        "x": 112.5,
+        "y": 124.25,
+        "width": 300.0,
+        "height": 120.0,
+        "scale": 0.65,
+    }
+    assert png == ASSET_PNG
+    assert full_size == (500, 300)
+    assert scale == 0.65
+
+
 def test_locator_screenshot_is_only_the_last_fallback() -> None:
     context = FakeContext([FakeCDP(fail_capture=True)])
     session, canvas, _context, _page = make_session(context=context)

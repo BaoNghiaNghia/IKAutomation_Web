@@ -9,7 +9,8 @@ from ik_chrome_auto.dashboard import (
     Dashboard,
     FarmProfileDialog,
 )
-from ik_chrome_auto.models import CommandKind
+from ik_chrome_auto.models import CommandKind, WorkerSnapshot
+from ik_chrome_auto.threat_monitor import INCOMING_ATTACK, INVESTIGATED
 
 
 class FakeLogWidget:
@@ -97,6 +98,27 @@ class FakeFarmRunner:
         self.commands.append((profile_id, command))
 
 
+class FakeTelegramNotifier:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def notify(self, message: str) -> bool:
+        self.messages.append(message)
+        return True
+
+
+class FakeMonitorRunner:
+    def __init__(self, opened: set[str]) -> None:
+        self.opened = opened
+        self.commands: list[tuple[str, CommandKind, dict[str, object]]] = []
+
+    def has_open_session(self, profile_id: str) -> bool:
+        return profile_id in self.opened
+
+    def submit(self, profile_id: str, command: CommandKind, **payload: object) -> None:
+        self.commands.append((profile_id, command, payload))
+
+
 def test_dashboard_log_keeps_only_ten_latest_rows() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     dashboard._log_lines = deque(maxlen=10)
@@ -106,6 +128,73 @@ def test_dashboard_log_keeps_only_ten_latest_rows() -> None:
         dashboard._append_log(f"row-{index}")
 
     assert dashboard.log.value.splitlines() == [f"row-{index}" for index in range(5, 15)]
+
+
+def test_monitor_alerts_once_until_the_warning_disappears() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.config = SimpleNamespace(
+        profile=lambda _profile_id: SimpleNamespace(name="Tài khoản 01 · cuongg********")
+    )
+    dashboard._telegram_notifier = FakeTelegramNotifier()
+    dashboard._telegram_event_at = {}
+    dashboard._monitor_active_events = {}
+    dashboard._monitor_queue = deque()
+    dashboard._monitor_in_flight = {"account-1": 1.0}
+    dashboard._monitor_cycle_at = 0.0
+    dashboard._log_lines = deque(maxlen=10)
+    dashboard.log = FakeLogWidget()
+
+    alert = WorkerSnapshot(
+        "account-1",
+        monitor_events=(INVESTIGATED, INCOMING_ATTACK),
+        monitor_checked=(INVESTIGATED, INCOMING_ATTACK),
+    )
+    dashboard._handle_monitor_result(alert)
+    first_messages = list(dashboard._telegram_notifier.messages)
+    assert len(first_messages) == 2
+    assert any("Bị điều tra" in message for message in first_messages)
+    assert any("Sắp bị Công" in message for message in first_messages)
+
+    dashboard._monitor_in_flight = {"account-1": 1.0}
+    dashboard._handle_monitor_result(alert)
+    assert dashboard._telegram_notifier.messages == first_messages
+
+    dashboard._monitor_in_flight = {"account-1": 1.0}
+    dashboard._handle_monitor_result(
+        WorkerSnapshot(
+            "account-1",
+            monitor_events=(),
+            monitor_checked=(INVESTIGATED, INCOMING_ATTACK),
+        )
+    )
+    dashboard._monitor_in_flight = {"account-1": 1.0}
+    dashboard._handle_monitor_result(alert)
+    assert len(dashboard._telegram_notifier.messages) == 4
+
+
+def test_monitor_runs_three_profiles_concurrently_and_staggers_slow_region() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    profiles = [SimpleNamespace(id=f"account-{index}") for index in range(6)]
+    dashboard.config = SimpleNamespace(profiles=profiles)
+    dashboard.runner = FakeMonitorRunner({profile.id for profile in profiles})
+    dashboard._monitoring_enabled = True
+    dashboard._monitor_queue = deque()
+    dashboard._monitor_in_flight = {}
+    dashboard._monitor_cycle_at = 0.0
+    dashboard._monitor_cycle_number = 0
+    dashboard._monitor_active_events = {}
+    dashboard._log_lines = deque(maxlen=10)
+    dashboard.log = FakeLogWidget()
+
+    dashboard._advance_monitoring()
+
+    assert len(dashboard.runner.commands) == 3
+    assert len(dashboard._monitor_in_flight) == 3
+    assert all(command == CommandKind.MONITOR_THREATS for _, command, _ in dashboard.runner.commands)
+    assert sum(
+        bool(payload["include_investigated"])
+        for _, _, payload in dashboard.runner.commands
+    ) == 1
 
 
 def test_mouse_sync_section_is_collapsed_by_default_and_can_toggle() -> None:

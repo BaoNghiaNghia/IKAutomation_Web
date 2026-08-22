@@ -677,6 +677,51 @@ class ChromeProfileSession:
                 )
         return png, box
 
+    def capture_game_region_png(
+        self,
+        region: tuple[float, float, float, float],
+        *,
+        scale: float = 0.75,
+    ) -> tuple[bytes, tuple[int, int], float]:
+        """Capture one normalized canvas ROI directly from this renderer.
+
+        Monitoring uses this instead of a full canvas screenshot. A cropped,
+        downscaled DevTools capture cuts encoded pixels substantially and lets
+        a few profiles be checked concurrently without reading desktop pixels.
+        """
+        page = self.page
+        self._ensure_page_runtime(page)
+        frame = self.find_frame()
+        _canvas, box = self._largest_canvas(frame)
+        left, top, right, bottom = region
+        if not (0.0 <= left < right <= 1.0 and 0.0 <= top < bottom <= 1.0):
+            raise ValueError("Vùng chụp giám sát không hợp lệ")
+        scale = max(0.35, min(1.0, float(scale)))
+        clip = {
+            "x": round(float(box["x"]) + float(box["width"]) * left, 4),
+            "y": round(float(box["y"]) + float(box["height"]) * top, 4),
+            "width": round(float(box["width"]) * (right - left), 4),
+            "height": round(float(box["height"]) * (bottom - top), 4),
+            "scale": scale,
+        }
+        result = self._get_page_cdp_session(page).send(
+            "Page.captureScreenshot",
+            {
+                "format": "png",
+                "fromSurface": True,
+                "captureBeyondViewport": False,
+                "clip": clip,
+            },
+        )
+        png = base64.b64decode(result["data"])
+        if not png.startswith(b"\x89PNG\r\n\x1a\n") or len(png) <= 200:
+            raise RuntimeError("CDP returned an empty monitoring screenshot")
+        return (
+            png,
+            (round(float(box["width"])), round(float(box["height"]))),
+            scale,
+        )
+
     def detect_farm_state(self) -> tuple[Any, dict[str, float], tuple[int, int]]:
         """Classify the current game canvas with the ported ADB template pack."""
         from ik_chrome_auto.farm_matcher import BrowserCanvasMatcher

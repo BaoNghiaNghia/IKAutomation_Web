@@ -34,6 +34,7 @@ class CommandKind(StrEnum):
     SET_TOPMOST = "set_topmost"
     START_FARM = "start_farm"
     STOP_FARM = "stop_farm"
+    MONITOR_THREATS = "monitor_threats"
     STOP = "stop"
     SHUTDOWN = "shutdown"
 
@@ -106,6 +107,11 @@ class WorkerSnapshot:
     # Latest World Map roster read: (team number, ready|busy). It is display
     # metadata only and never authorises an automation input by itself.
     farm_roster: tuple[tuple[int, str], ...] = ()
+    # Present only for an explicit monitoring scan. Keeping it separate from
+    # ``message`` prevents background surveillance from replacing the Farm
+    # status currently shown on the profile card.
+    monitor_events: tuple[str, ...] | None = None
+    monitor_checked: tuple[str, ...] | None = None
 
 
 @dataclass(slots=True)

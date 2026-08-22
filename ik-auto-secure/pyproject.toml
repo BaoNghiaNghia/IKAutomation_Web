@@ -32,7 +32,14 @@ ik-chrome-doctor = "ik_chrome_auto.doctor:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-ik_chrome_auto = ["assets/*.ico", "assets/*.png", "assets/*.ttf", "assets/*.txt", "assets/farm_templates/*.png"]
+ik_chrome_auto = [
+  "assets/*.ico",
+  "assets/*.png",
+  "assets/*.ttf",
+  "assets/*.txt",
+  "assets/farm_templates/*.png",
+  "assets/threats/*.png",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

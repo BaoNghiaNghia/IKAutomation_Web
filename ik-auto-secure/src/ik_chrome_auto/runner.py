@@ -24,6 +24,11 @@ from ik_chrome_auto.models import (
 from ik_chrome_auto.reader import redact
 from ik_chrome_auto.resource_area_points import ResourceAreaPointSelector
 from ik_chrome_auto.storage import upscale_png_for_diagnostics, write_retained_png
+from ik_chrome_auto.threat_monitor import (
+    INCOMING_ATTACK,
+    INVESTIGATED,
+    BrowserThreatMonitor,
+)
 from ik_chrome_auto.windows import (
     calculate_tiled_positions,
     get_monitor_work_areas,
@@ -130,6 +135,7 @@ class ProfileWorker:
         self._farm_area_selector = ResourceAreaPointSelector()
         self._farm_area_epoch = 0
         self._farm_run_id = ""
+        self._threat_monitor: BrowserThreatMonitor | None = None
 
     def submit(self, command: WorkerCommand) -> None:
         self._ensure_thread()
@@ -175,6 +181,22 @@ class ProfileWorker:
                 "message": message,
                 "detail": detail,
             },
+        )
+
+    def _publish_monitor(
+        self, events: tuple[str, ...], checked: tuple[str, ...]
+    ) -> None:
+        """Return scan data without overwriting the visible profile status."""
+        state = WorkerState.RUNNING if self._farm is not None else WorkerState.READY
+        self.on_update(
+            WorkerSnapshot(
+                profile_id=self.profile.id,
+                state=state,
+                message="Giám sát đã quét",
+                farm_roster=tuple((row.team, row.state.value) for row in self._farm_roster),
+                monitor_events=events,
+                monitor_checked=checked,
+            )
         )
 
     def _loop(self) -> None:
@@ -243,6 +265,43 @@ class ProfileWorker:
                     self._farm = None
                     self._log_farm("stopped", {"reason": "user"})
                     self._publish(WorkerState.READY if self.session is not None else WorkerState.STOPPED, "Đã dừng Auto Farm")
+                    continue
+                if command.kind == CommandKind.MONITOR_THREATS:
+                    checked = (INCOMING_ATTACK,)
+                    if bool(command.payload.get("include_investigated", False)):
+                        checked += (INVESTIGATED,)
+                    if self.session is None:
+                        self._publish_monitor((), checked)
+                        continue
+                    try:
+                        if self._threat_monitor is None:
+                            self._threat_monitor = BrowserThreatMonitor()
+                        detected: list[str] = []
+                        for event in checked:
+                            png, full_size, capture_scale = (
+                                self.session.capture_game_region_png(
+                                    self._threat_monitor.region(event),
+                                    scale=0.65,
+                                )
+                            )
+                            match = self._threat_monitor.detect_region(
+                                png,
+                                event,
+                                full_size,
+                                capture_scale,
+                            )
+                            if match is not None:
+                                detected.append(match.event)
+                        self._publish_monitor(tuple(detected), checked)
+                    except Exception as error:
+                        self.event_log.write(
+                            "threat_monitor_error",
+                            {
+                                "profile_id": self.profile.id,
+                                "message": f"{type(error).__name__}: {error}",
+                            },
+                        )
+                        self._publish_monitor(("scan_error",), checked)
                     continue
                 if command.kind == CommandKind.SET_SYNC_SOURCE:
                     self._sync_source_enabled = bool(command.payload.get("enabled", False))
