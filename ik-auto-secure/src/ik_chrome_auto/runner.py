@@ -1954,6 +1954,7 @@ class MultiProfileRunner:
         self.workers: dict[str, ProfileWorker] = {}
         self.sync_enabled = False
         self.sync_master_id: str | None = None
+        self.sync_target_ids: set[str] = set()
         self.drag_items_visible = False
         self.scrollbars_visible = False
         self.windows_topmost = False
@@ -1999,12 +2000,20 @@ class MultiProfileRunner:
             if profile.enabled:
                 self.submit(profile.id, CommandKind.RESIZE, width=width, height=height)
 
-    def enable_sync(self, master_id: str) -> None:
+    def enable_sync(self, master_id: str, target_ids: set[str] | None = None) -> None:
         if master_id not in self.workers:
             raise KeyError(f"Không tìm thấy profile master: {master_id}")
+        targets = (
+            {profile_id for profile_id in self.workers if profile_id != master_id}
+            if target_ids is None
+            else {profile_id for profile_id in target_ids if profile_id in self.workers and profile_id != master_id}
+        )
+        if not targets:
+            raise ValueError("Hãy chọn ít nhất một profile nhận đồng bộ")
         with self._sync_lock:
             self.sync_enabled = True
             self.sync_master_id = master_id
+            self.sync_target_ids = targets
         for profile_id in self.workers:
             self.submit(
                 profile_id,
@@ -2016,6 +2025,7 @@ class MultiProfileRunner:
         with self._sync_lock:
             self.sync_enabled = False
             self.sync_master_id = None
+            self.sync_target_ids.clear()
         for profile_id in self.workers:
             self.submit(profile_id, CommandKind.SET_SYNC_SOURCE, enabled=False)
 
@@ -2246,10 +2256,11 @@ class MultiProfileRunner:
         with self._sync_lock:
             enabled = self.sync_enabled
             master_id = self.sync_master_id
+            target_ids = set(self.sync_target_ids)
         if not enabled or source_profile_id != master_id:
             return
         for profile_id, worker in self.workers.items():
-            if profile_id == source_profile_id or worker.session is None:
+            if profile_id not in target_ids or worker.session is None:
                 continue
             worker.submit(WorkerCommand(CommandKind.SYNC_INPUT, {"event": event}))
 

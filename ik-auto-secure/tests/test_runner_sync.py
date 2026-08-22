@@ -24,6 +24,7 @@ def make_runner() -> MultiProfileRunner:
     runner = MultiProfileRunner.__new__(MultiProfileRunner)
     runner.sync_enabled = True
     runner.sync_master_id = "master"
+    runner.sync_target_ids = {"follower-open", "follower-closed"}
     runner._sync_lock = threading.Lock()
     runner.workers = {
         "master": FakeWorker(object()),
@@ -59,6 +60,32 @@ def test_sync_routes_keyboard_event_to_open_followers() -> None:
     command = runner.workers["follower-open"].commands[0]
     assert command.kind == CommandKind.SYNC_INPUT
     assert command.payload["event"] == event
+
+
+def test_sync_routes_input_only_to_selected_open_followers() -> None:
+    runner = make_runner()
+    runner.workers["follower-other"] = FakeWorker(object())
+    runner.sync_target_ids = {"follower-open"}
+
+    runner._on_input("master", {"type": "pointerdown"})
+
+    assert len(runner.workers["follower-open"].commands) == 1
+    assert runner.workers["follower-other"].commands == []
+
+
+def test_enable_sync_keeps_only_selected_targets_and_marks_master_as_source() -> None:
+    runner = make_runner()
+    runner.sync_enabled = False
+    runner.sync_master_id = None
+    runner.sync_target_ids.clear()
+
+    runner.enable_sync("master", {"follower-open", "missing", "master"})
+
+    assert runner.sync_enabled is True
+    assert runner.sync_master_id == "master"
+    assert runner.sync_target_ids == {"follower-open"}
+    assert runner.workers["master"].commands[-1].payload == {"enabled": True}
+    assert runner.workers["follower-open"].commands[-1].payload == {"enabled": False}
 
 
 def test_sync_ignores_non_master_event() -> None:
