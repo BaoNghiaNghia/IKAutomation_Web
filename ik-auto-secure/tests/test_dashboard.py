@@ -186,6 +186,8 @@ def test_monitor_finishes_each_five_profile_group_before_starting_the_next() -> 
     dashboard._monitor_queue = deque()
     dashboard._monitor_in_flight = {}
     dashboard._monitor_batch_profiles = set()
+    dashboard._monitor_batch_pending = deque()
+    dashboard._monitor_next_profile_at = 0.0
     dashboard._monitor_next_batch_at = 0.0
     dashboard._monitor_cycle_at = 0.0
     dashboard._monitor_cycle_number = 0
@@ -194,6 +196,17 @@ def test_monitor_finishes_each_five_profile_group_before_starting_the_next() -> 
     dashboard.log = FakeLogWidget()
 
     dashboard._advance_monitoring()
+
+    # The group is fixed at five, but commands are staggered so each worker
+    # runs its complete mailbox workflow independently instead of lockstep.
+    assert len(dashboard.runner.commands) == 1
+    assert len(dashboard._monitor_in_flight) == 1
+    assert len(dashboard._monitor_batch_pending) == 4
+    assert len(dashboard._monitor_batch_profiles) == 5
+
+    for _ in range(4):
+        dashboard._monitor_next_profile_at = 0.0
+        dashboard._advance_monitoring()
 
     assert len(dashboard.runner.commands) == 5
     assert len(dashboard._monitor_in_flight) == 5
@@ -224,9 +237,12 @@ def test_monitor_finishes_each_five_profile_group_before_starting_the_next() -> 
         )
     dashboard._monitor_next_batch_at = 0.0
     dashboard._advance_monitoring()
+    assert dashboard.runner.commands[-1][0] == "account-5"
+    assert list(dashboard._monitor_batch_pending) == ["account-6"]
+    dashboard._monitor_next_profile_at = 0.0
+    dashboard._advance_monitoring()
     assert [profile_id for profile_id, _command, _payload in dashboard.runner.commands[-2:]] == [
-        "account-5",
-        "account-6",
+        "account-5", "account-6"
     ]
 
 

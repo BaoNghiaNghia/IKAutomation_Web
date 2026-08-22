@@ -7,7 +7,6 @@ from ik_chrome_auto.mail_monitor import BrowserMailMonitor
 from ik_chrome_auto.runner import (
     CLOSE_MAIL_REFERENCE_POINT,
     COMBAT_TAB_REFERENCE_POINT,
-    COMBAT_TAB_REFERENCE_SIZE,
     MAIL_BUTTON_REFERENCE_POINT,
     MAIL_BUTTON_REFERENCE_SIZE,
     MAILBOX_REFERENCE_SIZE,
@@ -62,12 +61,11 @@ def test_combat_tab_uses_fixed_xy_and_scales_to_the_renderer() -> None:
 
     worker._tap_monitor_reference_point(
         COMBAT_TAB_REFERENCE_POINT,
-        COMBAT_TAB_REFERENCE_SIZE,
+        MAILBOX_REFERENCE_SIZE,
         (1280, 720),
     )
 
-    # (142, 397) on 1920x1080 maps to the same point on a 1280x720 canvas.
-    assert worker.session.taps == [((94, 264, 2, 2), (1280, 720))]
+    assert worker.session.taps == [((94, 260, 2, 2), (1280, 720))]
 
 
 def test_read_all_and_close_mail_use_fixed_scaled_xy() -> None:
@@ -86,8 +84,30 @@ def test_read_all_and_close_mail_use_fixed_scaled_xy() -> None:
     )
 
     assert worker.session.taps == [
-        ((256, 648, 2, 2), (1280, 720)),
-        ((1195, 92, 2, 2), (1280, 720)),
+        ((256, 651, 2, 2), (1280, 720)),
+        ((1195, 76, 2, 2), (1280, 720)),
+    ]
+
+
+def test_fixed_mail_points_scale_for_five_column_viewport() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker.session = _TapSession()
+
+    for point in (
+        COMBAT_TAB_REFERENCE_POINT,
+        READ_ALL_MAIL_REFERENCE_POINT,
+        CLOSE_MAIL_REFERENCE_POINT,
+    ):
+        worker._tap_monitor_reference_point(
+            point,
+            MAILBOX_REFERENCE_SIZE,
+            (384, 216),
+        )
+
+    assert worker.session.taps == [
+        ((27, 77, 2, 2), (384, 216)),
+        ((76, 195, 2, 2), (384, 216)),
+        ((358, 22, 2, 2), (384, 216)),
     ]
 
 

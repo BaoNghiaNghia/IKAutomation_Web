@@ -53,14 +53,12 @@ CoordinateCallback = Callable[[str, dict[str, object]], None]
 # It is mapped to the current renderer size, not searched by a template.
 MAIL_BUTTON_REFERENCE_SIZE = (1259, 672)
 MAIL_BUTTON_REFERENCE_POINT = (145, 545)
-# Fixed center of the Combat category in the supplied 1920x1080 mailbox
-# reference. It is scaled to each profile's renderer size; no template search
-# is used for this click.
-COMBAT_TAB_REFERENCE_SIZE = (1920, 1080)
-COMBAT_TAB_REFERENCE_POINT = (142, 397)
-MAILBOX_REFERENCE_SIZE = (1920, 1080)
-READ_ALL_MAIL_REFERENCE_POINT = (385, 974)
-CLOSE_MAIL_REFERENCE_POINT = (1794, 139)
+# Mailbox coordinates are canvas-local. The supplied window capture is
+# 1920x1040 with a 31px title bar, leaving a 1920x1009 game canvas.
+MAILBOX_REFERENCE_SIZE = (1920, 1009)
+COMBAT_TAB_REFERENCE_POINT = (142, 366)
+READ_ALL_MAIL_REFERENCE_POINT = (385, 914)
+CLOSE_MAIL_REFERENCE_POINT = (1794, 108)
 # The first mail is the yellow-highlighted card at the very top of the list.
 # Never search down the list for the first matching attack subject.
 FIRST_MAIL_ROW_POINT = (0.255, 0.165)
@@ -295,7 +293,7 @@ class ProfileWorker:
             # category recognition.
             self._tap_monitor_reference_point(
                 COMBAT_TAB_REFERENCE_POINT,
-                COMBAT_TAB_REFERENCE_SIZE,
+                MAILBOX_REFERENCE_SIZE,
                 latest_size,
             )
             self._monitor_pause(0.55)

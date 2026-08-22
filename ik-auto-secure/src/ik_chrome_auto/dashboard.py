@@ -50,6 +50,7 @@ TAB_CLOSE_INTERVAL_SECONDS = 1.5
 TAB_CLOSE_BATCH_SIZE = 10
 TAB_CLOSE_BATCH_PAUSE_SECONDS = 8.0
 MONITOR_GROUP_SIZE = 5
+MONITOR_PROFILE_STAGGER_SECONDS = 0.25
 MONITOR_GROUP_PAUSE_SECONDS = 0.15
 MONITOR_CYCLE_SECONDS = 1.0
 
@@ -158,6 +159,8 @@ class Dashboard(QWidget):
         self._monitor_queue: deque[str] = deque()
         self._monitor_in_flight: dict[str, float] = {}
         self._monitor_batch_profiles: set[str] = set()
+        self._monitor_batch_pending: deque[str] = deque()
+        self._monitor_next_profile_at = 0.0
         self._monitor_next_batch_at = 0.0
         self._monitor_cycle_at = 0.0
         self._monitor_cycle_number = 0
@@ -699,6 +702,8 @@ class Dashboard(QWidget):
         self._monitor_queue.clear()
         self._monitor_in_flight.clear()
         self._monitor_batch_profiles = set()
+        self._monitor_batch_pending = deque()
+        self._monitor_next_profile_at = 0.0
         self._monitor_next_batch_at = 0.0
         self._monitor_cycle_at = 0.0
         self._monitor_cycle_number = 0
@@ -720,6 +725,8 @@ class Dashboard(QWidget):
         self._monitor_queue.clear()
         self._monitor_in_flight.clear()
         self._monitor_batch_profiles = set()
+        self._monitor_batch_pending = deque()
+        self._monitor_next_profile_at = 0.0
         self._monitor_next_batch_at = 0.0
         self._monitor_cycle_at = 0.0
         self._monitor_cycle_number = 0
@@ -745,7 +752,11 @@ class Dashboard(QWidget):
         events = set(snapshot.monitor_events or ())
         self._monitor_in_flight.pop(profile_id, None)
         getattr(self, "_monitor_batch_profiles", set()).discard(profile_id)
-        if not self._monitor_in_flight:
+        if (
+            not self._monitor_in_flight
+            and not getattr(self, "_monitor_batch_pending", ())
+            and not getattr(self, "_monitor_batch_profiles", set())
+        ):
             self._monitor_next_batch_at = (
                 time.monotonic() + MONITOR_GROUP_PAUSE_SECONDS
             )
@@ -778,6 +789,10 @@ class Dashboard(QWidget):
             return
         if not hasattr(self, "_monitor_batch_profiles"):
             self._monitor_batch_profiles = set()
+        if not hasattr(self, "_monitor_batch_pending"):
+            self._monitor_batch_pending = deque()
+        if not hasattr(self, "_monitor_next_profile_at"):
+            self._monitor_next_profile_at = 0.0
         if not hasattr(self, "_monitor_next_batch_at"):
             self._monitor_next_batch_at = 0.0
         now = time.monotonic()
@@ -790,9 +805,19 @@ class Dashboard(QWidget):
             self._monitor_in_flight.pop(profile_id, None)
             self._monitor_batch_profiles.discard(profile_id)
             self._append_log(f"[{profile_id}] Giám sát quá thời gian; chuyển profile kế tiếp")
-        if expired and not self._monitor_in_flight:
+        if (
+            expired
+            and not self._monitor_in_flight
+            and not self._monitor_batch_pending
+            and not self._monitor_batch_profiles
+        ):
             self._monitor_next_batch_at = now + MONITOR_GROUP_PAUSE_SECONDS
-        if not self._monitor_queue and not self._monitor_in_flight:
+        if (
+            not self._monitor_queue
+            and not self._monitor_in_flight
+            and not self._monitor_batch_pending
+            and not self._monitor_batch_profiles
+        ):
             if now < self._monitor_cycle_at:
                 return
             ordered_open = [
@@ -806,30 +831,49 @@ class Dashboard(QWidget):
             self._monitor_queue = deque(ordered_open)
             self._monitor_cycle_number += 1
             self._monitor_cycle_at = now + MONITOR_CYCLE_SECONDS
-        # Do not refill a partially completed group. Every profile in the
-        # current group must finish open -> inspect -> close before the next
-        # group begins.
-        if self._monitor_in_flight or now < self._monitor_next_batch_at:
+        # Reserve one fixed group. It is never refilled as members finish:
+        # the next five profiles wait until this entire group has completed.
+        if (
+            not self._monitor_batch_pending
+            and not self._monitor_in_flight
+            and not self._monitor_batch_profiles
+        ):
+            if now < self._monitor_next_batch_at:
+                return
+            group: list[str] = []
+            while self._monitor_queue and len(group) < MONITOR_GROUP_SIZE:
+                profile_id = self._monitor_queue.popleft()
+                if not self.runner.has_open_session(profile_id):
+                    self._monitor_initialized_profiles.discard(profile_id)
+                    continue
+                group.append(profile_id)
+            if not group:
+                return
+            self._monitor_batch_pending = deque(group)
+            self._monitor_batch_profiles = set(group)
+            self._monitor_next_profile_at = now
+            self._append_log(
+                f"Giám sát nhóm {self._monitor_cycle_number}: "
+                f"{len(group)} profile chạy workflow độc lập"
+            )
+
+        # Dispatch at most one profile per dashboard tick. The stagger keeps
+        # workers asynchronous instead of making all five execute identical
+        # waits and UI steps in lockstep.
+        if not self._monitor_batch_pending or now < self._monitor_next_profile_at:
             return
-        submitted = 0
-        while self._monitor_queue and submitted < MONITOR_GROUP_SIZE:
-            profile_id = self._monitor_queue.popleft()
-            if not self.runner.has_open_session(profile_id):
-                self._monitor_initialized_profiles.discard(profile_id)
-                continue
+        profile_id = self._monitor_batch_pending.popleft()
+        if not self.runner.has_open_session(profile_id):
+            self._monitor_initialized_profiles.discard(profile_id)
+            self._monitor_batch_profiles.discard(profile_id)
+        else:
             self.runner.submit(
                 profile_id,
                 CommandKind.MONITOR_MAIL,
                 initial_scan=profile_id not in self._monitor_initialized_profiles,
             )
             self._monitor_in_flight[profile_id] = now + 30.0
-            self._monitor_batch_profiles.add(profile_id)
-            submitted += 1
-        if submitted:
-            self._append_log(
-                f"Giám sát nhóm {self._monitor_cycle_number}: "
-                f"đang xử lý trọn luồng {submitted} profile"
-            )
+        self._monitor_next_profile_at = now + MONITOR_PROFILE_STAGGER_SECONDS
 
     def _toggle_farm(self, pid: str) -> None:
         row = self.rows[pid]
