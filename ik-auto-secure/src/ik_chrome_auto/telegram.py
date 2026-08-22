@@ -163,7 +163,9 @@ def send_telegram_message(
 ) -> None:
     settings.validate()
     errors: list[str] = []
-    for chat_id in settings.chat_ids():
+    successful: list[str] = []
+    chat_ids = settings.chat_ids()
+    for chat_id in chat_ids:
         try:
             _send_telegram_message_to_chat(
                 settings,
@@ -172,10 +174,16 @@ def send_telegram_message(
                 timeout_seconds=timeout_seconds,
                 opener=opener,
             )
+            successful.append(chat_id)
         except TelegramError as error:
             errors.append(f"{chat_id}: {error}")
     if errors:
-        raise TelegramError("Không gửi được tới " + "; ".join(errors))
+        prefix = (
+            f"Đã gửi thành công {len(successful)}/{len(chat_ids)} nơi nhận. "
+            if successful
+            else ""
+        )
+        raise TelegramError(prefix + "Không gửi được tới " + "; ".join(errors))
 
 
 def _send_telegram_message_to_chat(

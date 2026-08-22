@@ -45,3 +45,4 @@ def test_managed_chrome_launch_keeps_chromium_sandbox_enabled(
 
     assert fake_playwright.chromium.options is not None
     assert fake_playwright.chromium.options["chromium_sandbox"] is True
+    assert "--force-device-scale-factor=1" in fake_playwright.chromium.options["args"]

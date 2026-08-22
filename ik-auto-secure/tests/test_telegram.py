@@ -217,3 +217,35 @@ def test_discover_telegram_chat_id_accepts_supergroup() -> None:
         "123456789:abcdefghijklmnopqrstuvwxyzABCDE_12345",
         opener=lambda request, timeout: GroupResponse(),
     ) == "-1001234567890"
+
+
+def test_send_reports_partial_success_and_continues_other_chats() -> None:
+    attempted = []
+
+    def opener(request, timeout):
+        chat_id = json.loads(request.data.decode("utf-8"))["chat_id"]
+        attempted.append(chat_id)
+        if chat_id == "8651837410":
+            raise urllib.error.HTTPError(
+                request.full_url,
+                400,
+                "Bad Request",
+                {},
+                BytesIO(
+                    b'{"ok":false,"error_code":400,'
+                    b'"description":"Bad Request: chat not found"}'
+                ),
+            )
+        return FakeResponse()
+
+    with pytest.raises(Exception, match="Đã gửi thành công 1/2"):
+        send_telegram_message(
+            TelegramSettings(
+                "123456789:abcdefghijklmnopqrstuvwxyzABCDE_12345",
+                "8651837410,-5171665518",
+            ),
+            "test",
+            opener=opener,
+        )
+
+    assert attempted == ["8651837410", "-5171665518"]

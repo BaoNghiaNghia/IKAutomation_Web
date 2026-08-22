@@ -57,6 +57,58 @@ LOGIN_PASSWORD_SELECTORS = (
 )
 
 
+def _low_gpu_init_script(fps_limit: int) -> str:
+    """Reduce WebGL cost while preserving real-time page/network execution."""
+    interval_ms = 1000.0 / min(60, max(10, int(fps_limit)))
+    return f"""
+    (() => {{
+      if (window.__IK_LOW_GPU_MODE) return;
+      window.__IK_LOW_GPU_MODE = true;
+      const originalGetContext = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function(type, attributes) {{
+        const kind = String(type || '').toLowerCase();
+        if (kind === 'webgl' || kind === 'webgl2' || kind === 'experimental-webgl') {{
+          attributes = Object.assign({{}}, attributes || {{}}, {{
+            antialias: false,
+            preserveDrawingBuffer: false,
+            powerPreference: 'low-power'
+          }});
+        }}
+        return originalGetContext.call(this, type, attributes);
+      }};
+
+      const nativeRequest = window.requestAnimationFrame.bind(window);
+      const nativeCancel = window.cancelAnimationFrame.bind(window);
+      const interval = {interval_ms:.4f};
+      let sequence = 1;
+      const pending = new Map();
+      window.requestAnimationFrame = callback => {{
+        const token = sequence++;
+        const state = {{ nativeId: 0, cancelled: false, startedAt: performance.now() }};
+        const tick = timestamp => {{
+          if (state.cancelled) return;
+          if (timestamp - state.startedAt + 0.1 >= interval) {{
+            pending.delete(token);
+            callback(timestamp);
+            return;
+          }}
+          state.nativeId = nativeRequest(tick);
+        }};
+        state.nativeId = nativeRequest(tick);
+        pending.set(token, state);
+        return token;
+      }};
+      window.cancelAnimationFrame = token => {{
+        const state = pending.get(token);
+        if (!state) return nativeCancel(token);
+        state.cancelled = true;
+        nativeCancel(state.nativeId);
+        pending.delete(token);
+      }};
+    }})();
+    """
+
+
 def _image_has_visible_content(image: RGBImage) -> bool:
     """Reject empty WebGL toDataURL captures (transparent/solid black)."""
     step_x = max(1, image.width // 32)
@@ -152,6 +204,15 @@ class ChromeProfileSession:
         else:
             self._start_cdp()
         self._attach_lifecycle()
+        if self.config.browser.low_gpu_mode:
+            low_gpu_script = _low_gpu_init_script(self.config.browser.render_fps_limit)
+            self.context.add_init_script(low_gpu_script)
+            for existing_page in self.context.pages:
+                for frame in existing_page.frames:
+                    try:
+                        frame.evaluate(low_gpu_script)
+                    except Exception:
+                        continue
         self.context.add_init_script(INTERACTION_PROBE)
         if self.config.browser.profile_title:
             self.context.add_init_script(self._profile_title_script())
@@ -221,6 +282,11 @@ class ChromeProfileSession:
                     "--renderer-process-limit=2",
                 ]
             )
+        if self.config.browser.low_gpu_mode:
+            # Avoid rendering a larger backing surface on high-DPI monitors.
+            # Keep hardware WebGL enabled; software rendering would move the
+            # bottleneck to CPU and destabilise large profile counts.
+            args.append("--force-device-scale-factor=1")
         if self.config.browser.auto_resize:
             args.append(
                 f"--window-size={self.config.browser.viewport_width},"
