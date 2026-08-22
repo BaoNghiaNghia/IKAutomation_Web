@@ -121,6 +121,7 @@ class Dashboard(QWidget):
         self._farm_close_queue: deque[str] = deque()
         self._farm_close_in_flight: str | None = None
         self._farm_close_deadline = 0.0
+        self._farm_next_close_at = 0.0
         self._auto_arrange_targets: set[str] | None = None
         self._auto_arrange_states: dict[str, WorkerState] = {}
         self._auto_arrange_deadline = 0.0
@@ -573,6 +574,7 @@ class Dashboard(QWidget):
             self.farm_all_button.setEnabled(False)
             self._farm_close_in_flight = None
             self._farm_close_deadline = 0.0
+            self._farm_next_close_at = 0.0
             self._advance_farm_stopping()
             self._append_log(f"Đang đóng lần lượt {len(self._farm_close_queue)} tab profile")
 
@@ -751,13 +753,24 @@ class Dashboard(QWidget):
         """Close the selected Chrome windows one at a time."""
         if self._farm_launcher_phase != "stopping":
             return
+        now = time.monotonic()
         if self._farm_close_in_flight is not None:
-            if time.monotonic() <= self._farm_close_deadline:
+            profile_id = self._farm_close_in_flight
+            if not self.runner.has_open_session(profile_id):
+                self._append_log(f"Đã đóng tab {profile_id}")
+                self._farm_close_in_flight = None
+                self._farm_next_close_at = now + 0.5
+            elif now <= self._farm_close_deadline:
                 return
-            self._append_log(
-                f"{self._farm_close_in_flight} đóng quá lâu; tiếp tục tab kế tiếp"
-            )
-            self._farm_close_in_flight = None
+            else:
+                # Never move to the next profile while this Chrome session is
+                # still alive. Reissue STOP and keep the queue strictly serial.
+                self.runner.submit(profile_id, CommandKind.STOP)
+                self._farm_close_deadline = now + 12.0
+                self._append_log(f"Tab {profile_id} chưa đóng; đang thử lại trước khi chuyển tab kế tiếp")
+                return
+        if now < self._farm_next_close_at:
+            return
         while self._farm_close_queue:
             profile_id = self._farm_close_queue.popleft()
             if not self.runner.has_open_session(profile_id):
@@ -785,6 +798,7 @@ class Dashboard(QWidget):
         self._farm_close_queue.clear()
         self._farm_close_in_flight = None
         self._farm_close_deadline = 0.0
+        self._farm_next_close_at = 0.0
         self._farm_launcher_phase = "launch"
         self.farm_launcher.setEnabled(True)
         self.farm_launcher.setText("Khởi động")
@@ -895,9 +909,11 @@ class Dashboard(QWidget):
                     self._farm_launcher_phase == "stopping"
                     and snap.profile_id == self._farm_close_in_flight
                     and snap.state == WorkerState.STOPPED
+                    and not self.runner.has_open_session(snap.profile_id)
                 ):
                     self._append_log(f"Đã đóng tab {snap.profile_id}")
                     self._farm_close_in_flight = None
+                    self._farm_next_close_at = time.monotonic() + 0.5
                 row=self.rows.get(snap.profile_id)
                 if row:
                     row.status.setText(snap.message); text,bg,fg=self._state(snap.state); row.badge.setText(text); row.badge.setStyleSheet(f"background:{bg};color:{fg};border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;"); self._set_profile_card_state(row,snap.state)

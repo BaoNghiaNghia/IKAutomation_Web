@@ -236,3 +236,9 @@ def test_close_tabs_stops_individual_farm_before_serial_browser_shutdown() -> No
     assert dashboard._farm_launcher_phase == "stopping"
     assert dashboard.farm_launcher.text == "Đang đóng tab…"
     assert dashboard.farm_all_button.enabled is False
+
+    dashboard._farm_close_deadline = 0.0
+    dashboard._advance_farm_stopping()
+
+    assert dashboard.runner.commands[-1] == ("account-1", CommandKind.STOP)
+    assert list(dashboard._farm_close_queue) == ["account-2"]
