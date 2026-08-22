@@ -3,7 +3,12 @@ from __future__ import annotations
 from collections import deque
 from types import SimpleNamespace
 
-from ik_chrome_auto.dashboard import Dashboard, FarmProfileDialog
+from ik_chrome_auto.dashboard import (
+    TAB_CLOSE_BATCH_PAUSE_SECONDS,
+    TAB_CLOSE_INTERVAL_SECONDS,
+    Dashboard,
+    FarmProfileDialog,
+)
 from ik_chrome_auto.models import CommandKind
 
 
@@ -242,3 +247,18 @@ def test_close_tabs_stops_individual_farm_before_serial_browser_shutdown() -> No
 
     assert dashboard.runner.commands[-1] == ("account-1", CommandKind.STOP)
     assert list(dashboard._farm_close_queue) == ["account-2"]
+
+
+def test_close_tabs_adds_gpu_cooldown_and_long_pause_every_five_tabs() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard._farm_close_queue = deque(["remaining"])
+    dashboard._farm_closed_count = 0
+    dashboard._log_lines = deque(maxlen=10)
+    dashboard.log = FakeLogWidget()
+
+    dashboard._schedule_next_tab_close(100.0)
+    assert dashboard._farm_next_close_at == 100.0 + TAB_CLOSE_INTERVAL_SECONDS
+
+    dashboard._farm_closed_count = 9
+    dashboard._schedule_next_tab_close(200.0)
+    assert dashboard._farm_next_close_at == 200.0 + TAB_CLOSE_BATCH_PAUSE_SECONDS

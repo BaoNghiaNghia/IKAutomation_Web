@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import threading
 import time
 from io import BytesIO
 from collections import deque
@@ -20,8 +21,16 @@ from ik_chrome_auto.farm_launch_policy import FarmLaunchPolicy
 from ik_chrome_auto.interaction import format_coordinate
 from ik_chrome_auto.models import CommandKind, ProfileConfig, ProfileMode, WorkerSnapshot, WorkerState
 from ik_chrome_auto.runner import MultiProfileRunner
+from ik_chrome_auto.telegram import (
+    TelegramNotifier,
+    TelegramSettings,
+    discover_telegram_chat_id,
+    load_telegram_settings,
+    save_telegram_settings,
+    send_telegram_message,
+)
 from ik_chrome_auto.two_factor import TwoFactorEnrollment, TwoFactorService
-from ik_chrome_auto.windows import get_system_memory_status
+from ik_chrome_auto.windows import get_gpu_utilization_percent, get_system_memory_status
 
 # Windows Hello implementation remains available in windows_auth.py, but is
 # intentionally disabled while Google Authenticator is the primary verifier.
@@ -30,6 +39,9 @@ WINDOWS_HELLO_ENABLED = False
 # Scale only the desktop controller. Chrome/game windows use their own native
 # geometry and screenshot resolution and must not inherit this factor.
 TOOL_UI_SCALE = 0.805
+TAB_CLOSE_INTERVAL_SECONDS = 1.5
+TAB_CLOSE_BATCH_SIZE = 10
+TAB_CLOSE_BATCH_PAUSE_SECONDS = 8.0
 
 
 def _ui_px(value: int | float, minimum: int = 1) -> int:
@@ -104,6 +116,12 @@ class Dashboard(QWidget):
         self.last_coordinate: tuple[str, dict[str, object]] | None = None
         self.farm_profiles: set[str] = set()
         self._sync_target_profiles: set[str] = set()
+        self._telegram_results: queue.Queue[tuple[bool, str]] = queue.Queue()
+        self._resource_alert_samples: queue.Queue[tuple[float, float | None]] = queue.Queue()
+        self._telegram_notifier: TelegramNotifier | None = None
+        self._telegram_event_at: dict[str, float] = {}
+        self._resource_high_counts = {"ram": 0, "gpu": 0}
+        self._resource_monitor_stop = threading.Event()
         self._farm_launch_profiles: set[str] = set()
         self._farm_launcher_phase = "launch"
         self._farm_all_running = False
@@ -122,6 +140,7 @@ class Dashboard(QWidget):
         self._farm_close_in_flight: str | None = None
         self._farm_close_deadline = 0.0
         self._farm_next_close_at = 0.0
+        self._farm_closed_count = 0
         self._auto_arrange_targets: set[str] | None = None
         self._auto_arrange_states: dict[str, WorkerState] = {}
         self._auto_arrange_deadline = 0.0
@@ -133,6 +152,13 @@ class Dashboard(QWidget):
         self._last_resources = self._last_trim = 0.0
         self._build()
         self._draw_rows()
+        self._load_telegram_notifier()
+        self._resource_monitor = threading.Thread(
+            target=self._monitor_resources,
+            name="resource-alert-monitor",
+            daemon=True,
+        )
+        self._resource_monitor.start()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll)
         self.timer.start(200)
@@ -146,7 +172,7 @@ class Dashboard(QWidget):
         self._apply_responsive_geometry(active_screen)
         root = QVBoxLayout(self); root.setContentsMargins(*self._responsive_margins); root.setSpacing(self._responsive_spacing)
         self._root_layout = root
-        head = QHBoxLayout(); title = SubtitleLabel("IK Auto"); self._dashboard_title = title; title.setStyleSheet(f"font-size:{self._responsive_title_font_pt}pt;font-weight:700;"); head.addWidget(title); head.addWidget(QLabel("Browser control")); head.addStretch(); secure = QLabel("●  Local & secure"); self._secure_badge = secure; secure.setStyleSheet(f"background:#d9f7e8;color:#087443;border-radius:{_ui_px(12)}px;padding:{_ui_px(5)}px {_ui_px(10)}px;font-weight:600;"); head.addWidget(secure); root.addLayout(head)
+        head = QHBoxLayout(); title = SubtitleLabel("IK Auto"); self._dashboard_title = title; title.setStyleSheet(f"font-size:{self._responsive_title_font_pt}pt;font-weight:700;"); head.addWidget(title); head.addWidget(QLabel("Browser control")); head.addStretch(); self.telegram_status = QLabel("●"); self.telegram_status.setFixedWidth(_ui_px(12)); self.telegram_status.setAlignment(Qt.AlignmentFlag.AlignCenter); head.addWidget(self.telegram_status); telegram_config = PushButton("Telegram"); telegram_config.setToolTip("Cấu hình Bot Token và Chat ID Telegram"); telegram_config.clicked.connect(self._configure_telegram); head.addWidget(telegram_config); secure = QLabel("●  Local & secure"); self._secure_badge = secure; secure.setStyleSheet(f"background:#d9f7e8;color:#087443;border-radius:{_ui_px(12)}px;padding:{_ui_px(5)}px {_ui_px(10)}px;font-weight:600;"); head.addWidget(secure); root.addLayout(head)
         body = QHBoxLayout(); root.addLayout(body, 1)
         left = QWidget(); self._left_sidebar = left; left.setMinimumWidth(self._responsive_sidebar_min); left.setMaximumWidth(self._responsive_sidebar_max); ll = QVBoxLayout(left); self._left_layout = ll; ll.setContentsMargins(0,0,0,0); ll.setSpacing(self._responsive_spacing); body.addWidget(left)
         overview = self._card(); overview.setMaximumHeight(_ui_px(108)); ol = QGridLayout(overview); ol.setContentsMargins(_ui_px(12),_ui_px(10),_ui_px(12),_ui_px(10)); ol.setHorizontalSpacing(_ui_px(12)); ol.setVerticalSpacing(_ui_px(6))
@@ -496,12 +522,119 @@ class Dashboard(QWidget):
             if self.sync_section_expanded
             else "Mở rộng Đồng bộ chuột - bàn phím"
         )
+
+    def _load_telegram_notifier(self) -> None:
+        try:
+            settings = load_telegram_settings()
+        except Exception as error:
+            self._set_telegram_status("Lỗi cấu hình")
+            self._append_log(f"Telegram: {error}")
+            return
+        if settings is None:
+            self._set_telegram_status("Chưa cấu hình")
+            return
+        self._replace_telegram_notifier(settings)
+
+    def _set_telegram_status(self, status: str) -> None:
+        colors = {
+            "Đã bật": "#16a34a",
+            "Chưa cấu hình": "#94a3b8",
+            "Lỗi cấu hình": "#ef4444",
+            "Lỗi gửi tin": "#ef4444",
+        }
+        self.telegram_status.setText("●")
+        self.telegram_status.setToolTip(f"Telegram: {status}")
+        self.telegram_status.setStyleSheet(
+            f"color:{colors.get(status, '#94a3b8')};background:transparent;font-weight:700;"
+        )
+
+    def _replace_telegram_notifier(self, settings: TelegramSettings) -> None:
+        if self._telegram_notifier is not None:
+            self._telegram_notifier.close()
+        self._telegram_notifier = TelegramNotifier(
+            settings,
+            on_result=lambda ok, message: self._telegram_results.put((ok, message)),
+        )
+        self._set_telegram_status("Đã bật")
+
+    def _configure_telegram(self) -> None:
+        try:
+            current = load_telegram_settings()
+        except Exception:
+            current = None
+        dialog = TelegramConfigDialog(self, current)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        settings = dialog.settings()
+        try:
+            save_telegram_settings(settings)
+            self._replace_telegram_notifier(settings)
+            self._notify_telegram("✅ IK Auto: kết nối Telegram thành công.", force=True)
+            self._append_log("Đã lưu cấu hình Telegram an toàn trong Windows Credential Manager")
+        except Exception as error:
+            self._error("Không lưu được Telegram", str(error))
+
+    def _notify_telegram(
+        self,
+        message: str,
+        *,
+        event_key: str | None = None,
+        cooldown_seconds: float = 0.0,
+        force: bool = False,
+    ) -> bool:
+        notifier = getattr(self, "_telegram_notifier", None)
+        if notifier is None:
+            return False
+        now = time.monotonic()
+        if event_key and not force:
+            previous = self._telegram_event_at.get(event_key, 0.0)
+            if now - previous < cooldown_seconds:
+                return False
+            self._telegram_event_at[event_key] = now
+        machine = os.environ.get("COMPUTERNAME", "Windows")
+        return notifier.notify(f"[{machine}] {message}")
+
+    def _monitor_resources(self) -> None:
+        while not self._resource_monitor_stop.wait(30.0):
+            if self._telegram_notifier is None:
+                continue
+            try:
+                memory = get_system_memory_status()
+                gpu = get_gpu_utilization_percent()
+                self._resource_alert_samples.put((memory.load_percent, gpu))
+            except Exception as error:
+                self._telegram_results.put((False, f"Không đo được tài nguyên: {error}"))
+
+    def _handle_resource_alert(self, ram_percent: float, gpu_percent: float | None) -> None:
+        self._resource_high_counts["ram"] = (
+            self._resource_high_counts["ram"] + 1 if ram_percent >= 90.0 else 0
+        )
+        if self._resource_high_counts["ram"] >= 2:
+            self._notify_telegram(
+                f"⚠️ RAM hệ thống cao: {ram_percent:.0f}%.",
+                event_key="resource:ram-high",
+                cooldown_seconds=600.0,
+            )
+        self._resource_high_counts["gpu"] = (
+            self._resource_high_counts["gpu"] + 1
+            if gpu_percent is not None and gpu_percent >= 95.0
+            else 0
+        )
+        if self._resource_high_counts["gpu"] >= 2 and gpu_percent is not None:
+            self._notify_telegram(
+                f"⚠️ GPU cao liên tục: {gpu_percent:.0f}%.",
+                event_key="resource:gpu-high",
+                cooldown_seconds=600.0,
+            )
+
     def _toggle_farm(self, pid: str) -> None:
         row = self.rows[pid]
         if pid in self.farm_profiles:
             self.farm_profiles.remove(pid); row.farm.setText("Farm"); self.runner.submit(pid, CommandKind.STOP_FARM)
+            self._notify_telegram(f"⏹️ Đã dừng Farm: {self.config.profile(pid).name}")
         else:
             self.farm_profiles.add(pid); row.farm.setText("Dừng Farm"); self.runner.submit(pid, CommandKind.START_FARM)
+            self._notify_telegram(f"🌾 Đã bắt đầu Farm: {self.config.profile(pid).name}")
 
     def _farm_launcher_action(self) -> None:
         """Open selected profile tabs, or close them when already prepared."""
@@ -575,6 +708,7 @@ class Dashboard(QWidget):
             self._farm_close_in_flight = None
             self._farm_close_deadline = 0.0
             self._farm_next_close_at = 0.0
+            self._farm_closed_count = 0
             self._advance_farm_stopping()
             self._append_log(f"Đang đóng lần lượt {len(self._farm_close_queue)} tab profile")
 
@@ -598,6 +732,7 @@ class Dashboard(QWidget):
         self.farm_all_button.setText("Dừng Farm")
         self.farm_all_button.setStyleSheet(f"QPushButton {{ background:#ef4444; border:1px solid #ef4444; border-radius:{_ui_px(8)}px; color:#ffffff; font-weight:600; }} QPushButton:hover {{ background:#dc2626; border-color:#dc2626; }}")
         self._append_log(f"Đã gửi lệnh chạy Farm cho {len(opened)} profile")
+        self._notify_telegram(f"🌾 Đã bắt đầu Farm trên {len(opened)} profile.")
 
     def _stop_all_farms(self) -> None:
         for profile_id in tuple(self.farm_profiles):
@@ -614,6 +749,7 @@ class Dashboard(QWidget):
             and self._opened_profile_count() > 1
         )
         self._append_log("Đã gửi lệnh dừng Farm cho toàn bộ profile")
+        self._notify_telegram("⏹️ Đã dừng Farm trên toàn bộ profile.")
 
     def _opened_profile_ids(self) -> set[str]:
         return {
@@ -759,7 +895,7 @@ class Dashboard(QWidget):
             if not self.runner.has_open_session(profile_id):
                 self._append_log(f"Đã đóng tab {profile_id}")
                 self._farm_close_in_flight = None
-                self._farm_next_close_at = now + 0.5
+                self._schedule_next_tab_close(now)
             elif now <= self._farm_close_deadline:
                 return
             else:
@@ -785,6 +921,24 @@ class Dashboard(QWidget):
             return
         self._finish_farm_stopping()
 
+    def _schedule_next_tab_close(self, now: float) -> None:
+        """Give Chrome GPU processes time to exit before closing another tab."""
+        self._farm_closed_count += 1
+        batch_boundary = self._farm_closed_count % TAB_CLOSE_BATCH_SIZE == 0
+        delay = (
+            TAB_CLOSE_BATCH_PAUSE_SECONDS
+            if batch_boundary and self._farm_close_queue
+            else TAB_CLOSE_INTERVAL_SECONDS
+        )
+        self._farm_next_close_at = now + delay
+        if self._farm_close_queue:
+            if batch_boundary:
+                self._append_log(
+                    f"Đã đóng {self._farm_closed_count} tab; nghỉ {delay:.0f}s để GPU ổn định"
+                )
+            else:
+                self._append_log(f"Chờ {delay:.0f}s trước khi đóng tab kế tiếp")
+
     def _finish_farm_stopping(self) -> None:
         """Restore the launcher only after the serial close queue is empty."""
         self.farm_profiles.clear()
@@ -799,6 +953,7 @@ class Dashboard(QWidget):
         self._farm_close_in_flight = None
         self._farm_close_deadline = 0.0
         self._farm_next_close_at = 0.0
+        self._farm_closed_count = 0
         self._farm_launcher_phase = "launch"
         self.farm_launcher.setEnabled(True)
         self.farm_launcher.setText("Khởi động")
@@ -913,14 +1068,52 @@ class Dashboard(QWidget):
                 ):
                     self._append_log(f"Đã đóng tab {snap.profile_id}")
                     self._farm_close_in_flight = None
-                    self._farm_next_close_at = time.monotonic() + 0.5
+                    self._schedule_next_tab_close(time.monotonic())
                 row=self.rows.get(snap.profile_id)
                 if row:
                     row.status.setText(snap.message); text,bg,fg=self._state(snap.state); row.badge.setText(text); row.badge.setStyleSheet(f"background:{bg};color:{fg};border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;"); self._set_profile_card_state(row,snap.state)
                     self._set_roster_tooltip(row.card, snap.farm_roster)
                     if snap.state in {WorkerState.STOPPED, WorkerState.ERROR} or "Đã dừng Auto Farm" in snap.message: self.farm_profiles.discard(snap.profile_id); row.farm.setText("Farm")
+                try:
+                    profile_name = self.config.profile(snap.profile_id).name
+                except KeyError:
+                    profile_name = snap.profile_id
+                if snap.message == "Chrome và trang game đã mở":
+                    self._notify_telegram(
+                        f"✅ Đã mở profile: {profile_name}",
+                        event_key=f"profile-open:{snap.profile_id}",
+                        cooldown_seconds=30.0,
+                    )
+                elif snap.message in {"Đã dừng profile", "Cửa sổ Chrome đã đóng"}:
+                    self._notify_telegram(
+                        f"⬛ Đã đóng profile: {profile_name}",
+                        event_key=f"profile-close:{snap.profile_id}",
+                        cooldown_seconds=30.0,
+                    )
+                if snap.state == WorkerState.ERROR:
+                    self._notify_telegram(
+                        f"❌ Lỗi {profile_name}: {snap.message}",
+                        event_key=f"profile-error:{snap.profile_id}:{snap.message}",
+                        cooldown_seconds=300.0,
+                    )
                 self._append_log(f"[{snap.profile_id}] {snap.message}")
         except queue.Empty: pass
+        try:
+            while True:
+                ok, message = self._telegram_results.get_nowait()
+                if not ok:
+                    self._set_telegram_status("Lỗi gửi tin")
+                    self._append_log(f"Telegram: {message}")
+                elif self._telegram_notifier is not None:
+                    self._set_telegram_status("Đã bật")
+        except queue.Empty:
+            pass
+        try:
+            while True:
+                ram_percent, gpu_percent = self._resource_alert_samples.get_nowait()
+                self._handle_resource_alert(ram_percent, gpu_percent)
+        except queue.Empty:
+            pass
         try:
             while True:
                 pid,event=self.coordinate_updates.get_nowait(); self.last_coordinate=(pid,event); self.coordinate.setText(format_coordinate(pid,event))
@@ -982,7 +1175,9 @@ class Dashboard(QWidget):
     def _warning(self,title:str,message:str)->None: QMessageBox.warning(self,title,message)
     def _error(self,title:str,message:str)->None: QMessageBox.critical(self,title,message)
     def closeEvent(self,event:QCloseEvent)->None:
-        self.timer.stop(); self.runner.shutdown(); event.accept()
+        self.timer.stop(); self._resource_monitor_stop.set()
+        if self._telegram_notifier is not None: self._telegram_notifier.close()
+        self.runner.shutdown(); event.accept()
 
 
 class TwoFactorSetupDialog(QDialog):
@@ -1070,6 +1265,94 @@ class RecoveryCodesDialog(QDialog):
         note=QLabel("Mỗi mã chỉ dùng một lần khi mất Google Authenticator. Các mã này sẽ không hiển thị lại."); note.setWordWrap(True); note.setStyleSheet("color:#b45309;background:transparent;"); layout.addWidget(note)
         values=QTextEdit(); values.setReadOnly(True); values.setPlainText("\n".join(codes)); values.setFixedHeight(_ui_px(220)); layout.addWidget(values)
         actions=QHBoxLayout(); copy=PushButton("Sao chép"); copy.clicked.connect(lambda: QApplication.clipboard().setText("\n".join(codes))); actions.addWidget(copy); actions.addStretch(); close=PrimaryPushButton("Đã lưu an toàn"); close.clicked.connect(self.accept); actions.addWidget(close); layout.addLayout(actions)
+
+
+class TelegramConfigDialog(QDialog):
+    """Configure and test one-way Telegram notifications."""
+
+    def __init__(self, parent: QWidget, current: TelegramSettings | None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Cấu hình Telegram")
+        self.setModal(True)
+        self.setFixedWidth(_ui_px(500))
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(_ui_px(24), _ui_px(22), _ui_px(24), _ui_px(22))
+        layout.setSpacing(_ui_px(10))
+        layout.addWidget(SubtitleLabel("Thông báo Telegram"))
+        note = QLabel(
+            "Chỉ gửi thông báo, không nhận lệnh điều khiển. Bot Token được lưu trong "
+            "Windows Credential Manager. Có thể nhập nhiều Chat ID, phân tách bằng dấu phẩy. "
+            "Để gửi vào group, thêm bot vào group, gửi một tin nhắn rồi bấm Tự lấy Chat ID."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#62758e;background:transparent;")
+        layout.addWidget(note)
+        self.token = PasswordLineEdit()
+        self.token.setPlaceholderText("Bot Token từ @BotFather")
+        self.chat_id = LineEdit()
+        self.chat_id.setPlaceholderText("Chat ID cá nhân hoặc group, cách nhau bằng dấu phẩy")
+        if current is not None:
+            self.token.setText(current.bot_token)
+            self.chat_id.setText(current.chat_id)
+        layout.addWidget(QLabel("Bot Token"))
+        layout.addWidget(self.token)
+        layout.addWidget(QLabel("Chat ID"))
+        chat_row = QHBoxLayout()
+        chat_row.addWidget(self.chat_id, 1)
+        discover = PushButton("Tự lấy Chat ID")
+        discover.clicked.connect(self._discover_chat_id)
+        chat_row.addWidget(discover)
+        layout.addLayout(chat_row)
+        actions = QHBoxLayout()
+        test = PushButton("Gửi thử")
+        test.clicked.connect(self._test)
+        actions.addWidget(test)
+        actions.addStretch()
+        cancel = PushButton("Hủy")
+        cancel.clicked.connect(self.reject)
+        save = PrimaryPushButton("Xác nhận")
+        save.clicked.connect(self._validate)
+        actions.addWidget(cancel)
+        actions.addWidget(save)
+        layout.addLayout(actions)
+
+    def settings(self) -> TelegramSettings:
+        return TelegramSettings(self.token.text().strip(), self.chat_id.text().strip())
+
+    def _validate(self) -> None:
+        try:
+            self.settings().validate()
+        except ValueError as error:
+            QMessageBox.warning(self, "Thông tin chưa đúng", str(error))
+            return
+        self.accept()
+
+    def _discover_chat_id(self) -> None:
+        try:
+            chat_id = discover_telegram_chat_id(self.token.text())
+        except Exception as error:
+            QMessageBox.warning(self, "Chưa lấy được Chat ID", str(error))
+            return
+        existing = list(self.settings().chat_ids()) if self.chat_id.text().strip() else []
+        if chat_id not in existing:
+            existing.append(chat_id)
+        self.chat_id.setText(", ".join(existing))
+        QMessageBox.information(
+            self,
+            "Đã lấy Chat ID",
+            "Đã thêm cuộc trò chuyện gần nhất vào danh sách nhận thông báo.",
+        )
+
+    def _test(self) -> None:
+        try:
+            send_telegram_message(
+                self.settings(),
+                "✅ IK Auto: đây là thông báo kiểm tra Telegram.",
+            )
+        except Exception as error:
+            QMessageBox.warning(self, "Gửi thử thất bại", str(error))
+            return
+        QMessageBox.information(self, "Đã gửi", "Telegram đã nhận thông báo kiểm tra.")
 
 
 class FarmProfileDialog(QDialog):

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ctypes
 import os
+import shutil
 import struct
+import subprocess
 import sys
 import uuid
 import zlib
@@ -745,6 +747,43 @@ def get_system_memory_status() -> SystemMemoryStatus:
     available = page_size * int(os.sysconf("SC_AVPHYS_PAGES"))
     load = 100.0 * (1.0 - available / max(1, total))
     return SystemMemoryStatus(total, available, load)
+
+
+def get_gpu_utilization_percent() -> float | None:
+    """Return total NVIDIA GPU utilisation when nvidia-smi is available.
+
+    This deliberately avoids expensive screen captures and Windows UI calls.
+    Other GPU vendors return ``None`` rather than blocking the dashboard with
+    a heavyweight performance-counter query.
+    """
+    executable = shutil.which("nvidia-smi")
+    if not executable:
+        return None
+    creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    try:
+        result = subprocess.run(
+            [
+                executable,
+                "--query-gpu=utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            creationflags=creation_flags,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    values: list[float] = []
+    for line in result.stdout.splitlines():
+        try:
+            values.append(float(line.strip()))
+        except ValueError:
+            continue
+    return max(values) if values else None
 
 
 def outer_size_for_client(hwnd: int, client_width: int, client_height: int) -> tuple[int, int]:
