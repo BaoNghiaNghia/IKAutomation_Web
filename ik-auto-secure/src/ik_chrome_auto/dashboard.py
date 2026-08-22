@@ -141,6 +141,7 @@ class Dashboard(QWidget):
         self._farm_close_deadline = 0.0
         self._farm_next_close_at = 0.0
         self._farm_closed_count = 0
+        self._farm_close_total = 0
         self._auto_arrange_targets: set[str] | None = None
         self._auto_arrange_states: dict[str, WorkerState] = {}
         self._auto_arrange_deadline = 0.0
@@ -698,6 +699,11 @@ class Dashboard(QWidget):
                 profile.id for profile in self.config.profiles
                 if profile.id in self._farm_launch_profiles
             )
+            self._farm_close_total = sum(
+                1
+                for profile_id in self._farm_close_queue
+                if self.runner.has_open_session(profile_id)
+            )
             if not self._farm_close_queue:
                 self._finish_farm_stopping()
                 return
@@ -799,6 +805,7 @@ class Dashboard(QWidget):
         self._append_log(
             f"Đã mở và xếp {count} tab theo {columns} cột (trái → phải, trên → dưới)"
         )
+        self._notify_telegram(f"✅ Tổng profile đang mở: {len(ready)}.")
 
     def _advance_farm_opening(self) -> None:
         """Open profiles in resource-guarded batches instead of one startup burst."""
@@ -941,6 +948,7 @@ class Dashboard(QWidget):
 
     def _finish_farm_stopping(self) -> None:
         """Restore the launcher only after the serial close queue is empty."""
+        closed_total = getattr(self, "_farm_close_total", 0)
         self.farm_profiles.clear()
         self._farm_launch_profiles.clear()
         self._farm_open_queue.clear()
@@ -954,6 +962,7 @@ class Dashboard(QWidget):
         self._farm_close_deadline = 0.0
         self._farm_next_close_at = 0.0
         self._farm_closed_count = 0
+        self._farm_close_total = 0
         self._farm_launcher_phase = "launch"
         self.farm_launcher.setEnabled(True)
         self.farm_launcher.setText("Khởi động")
@@ -963,6 +972,7 @@ class Dashboard(QWidget):
         self.farm_all_button.setEnabled(False)
         self._set_farm_launcher_launch_style()
         self._append_log("Đã đóng toàn bộ tab profile")
+        self._notify_telegram(f"⬛ Đã đóng tổng cộng {closed_total} profile.")
 
     def _set_farm_launcher_launch_style(self) -> None:
         self.farm_launcher.setStyleSheet(f"QPushButton {{ background:#2563eb; border:1px solid #2563eb; border-radius:{_ui_px(8)}px; color:#ffffff; font-weight:600; }} QPushButton:hover {{ background:#1d4ed8; border-color:#1d4ed8; }} QPushButton:disabled {{ background:#93c5fd; border-color:#93c5fd; color:#eff6ff; }}")
@@ -1078,18 +1088,6 @@ class Dashboard(QWidget):
                     profile_name = self.config.profile(snap.profile_id).name
                 except KeyError:
                     profile_name = snap.profile_id
-                if snap.message == "Chrome và trang game đã mở":
-                    self._notify_telegram(
-                        f"✅ Đã mở profile: {profile_name}",
-                        event_key=f"profile-open:{snap.profile_id}",
-                        cooldown_seconds=30.0,
-                    )
-                elif snap.message in {"Đã dừng profile", "Cửa sổ Chrome đã đóng"}:
-                    self._notify_telegram(
-                        f"⬛ Đã đóng profile: {profile_name}",
-                        event_key=f"profile-close:{snap.profile_id}",
-                        cooldown_seconds=30.0,
-                    )
                 if snap.state == WorkerState.ERROR:
                     self._notify_telegram(
                         f"❌ Lỗi {profile_name}: {snap.message}",
