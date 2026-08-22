@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 import urllib.error
 
 import pytest
@@ -112,9 +113,33 @@ def test_telegram_normalizes_common_bot_token_inputs(raw_token, expected) -> Non
 
 def test_telegram_reports_invalid_token_for_http_404() -> None:
     def opener(request, timeout):
-        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+        raise urllib.error.HTTPError(
+            request.full_url,
+            404,
+            "Not Found",
+            {},
+            BytesIO(b'{"ok":false,"error_code":404,"description":"Not Found"}'),
+        )
 
     with pytest.raises(Exception, match="không nhận diện Bot Token"):
+        send_telegram_message(
+            TelegramSettings("123456789:invalid", "987654321"),
+            "test",
+            opener=opener,
+        )
+
+
+def test_telegram_distinguishes_proxy_404_from_invalid_token() -> None:
+    def opener(request, timeout):
+        raise urllib.error.HTTPError(
+            request.full_url,
+            404,
+            "Not Found",
+            {},
+            BytesIO(b"<html>proxy not found</html>"),
+        )
+
+    with pytest.raises(Exception, match="proxy, VPN, firewall"):
         send_telegram_message(
             TelegramSettings("123456789:invalid", "987654321"),
             "test",

@@ -23,6 +23,31 @@ class TelegramError(RuntimeError):
     pass
 
 
+def _describe_http_error(error: urllib.error.HTTPError, action: str) -> TelegramError:
+    payload: dict[str, object] | None = None
+    try:
+        decoded = json.loads(error.read().decode("utf-8"))
+        if isinstance(decoded, dict):
+            payload = decoded
+    except (AttributeError, OSError, ValueError, UnicodeError):
+        pass
+    is_telegram_response = payload is not None and "error_code" in payload
+    if error.code == 404 and is_telegram_response:
+        return TelegramError(
+            "Telegram không nhận diện Bot Token đang lưu trên máy này. "
+            "Hãy dán lại đúng token đang hoạt động ở máy kia hoặc tạo token mới từ @BotFather."
+        )
+    if error.code == 404:
+        return TelegramError(
+            "Máy nhận HTTP 404 không phải phản hồi chuẩn của Telegram. "
+            "Hãy kiểm tra proxy, VPN, firewall hoặc mạng đang chặn api.telegram.org."
+        )
+    description = str(payload.get("description", "")) if payload else ""
+    return TelegramError(
+        f"Telegram từ chối {action}: {description or f'HTTP {error.code}'}"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class TelegramSettings:
     bot_token: str
@@ -111,11 +136,7 @@ def discover_telegram_chat_id(
         with opener(request, timeout=timeout_seconds) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
-        if error.code == 404:
-            raise TelegramError(
-                "Telegram không nhận diện Bot Token. Hãy lấy token mới từ @BotFather."
-            ) from error
-        raise TelegramError(f"Telegram từ chối yêu cầu lấy Chat ID: HTTP {error.code}") from error
+        raise _describe_http_error(error, "yêu cầu lấy Chat ID") from error
     except (OSError, urllib.error.URLError, TimeoutError, ValueError) as error:
         detail = str(error).replace(token, "***")
         raise TelegramError(f"Không kết nối được Telegram: {detail}") from error
@@ -183,18 +204,7 @@ def _send_telegram_message_to_chat(
         with opener(request, timeout=timeout_seconds) as response:
             result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
-        description = ""
-        try:
-            response_body = json.loads(error.read().decode("utf-8"))
-            description = str(response_body.get("description", ""))
-        except (AttributeError, OSError, ValueError, UnicodeError):
-            pass
-        if error.code == 404:
-            raise TelegramError(
-                "Telegram không nhận diện Bot Token. Hãy sao chép token mới từ @BotFather."
-            ) from error
-        detail = description or f"HTTP {error.code}"
-        raise TelegramError(f"Telegram từ chối yêu cầu: {detail}") from error
+        raise _describe_http_error(error, "yêu cầu gửi tin") from error
     except (OSError, urllib.error.URLError, TimeoutError, ValueError) as error:
         detail = str(error).replace(settings.normalized_bot_token(), "***")
         raise TelegramError(f"Không kết nối được Telegram: {detail}") from error
