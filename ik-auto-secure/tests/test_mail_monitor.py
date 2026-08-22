@@ -92,6 +92,12 @@ def test_territory_attacked_title_is_matched_in_first_mail_area() -> None:
     _place(canvas, title, 330, 178)
     assert monitor.is_territory_attacked(_png(canvas)) is True
 
-    outside = np.full_like(canvas, 205)
-    _place(outside, title, 1200, 700)
-    assert monitor.is_territory_attacked(_png(outside)) is False
+    lower_row = np.full_like(canvas, 205)
+    # A matching attack subject in row 2/3 must not authorise an alert when
+    # the yellow top card is a different message.
+    _place(lower_row, title, 330, 300)
+    assert monitor.is_territory_attacked(_png(lower_row)) is False
+
+    unrelated_region = np.full_like(canvas, 205)
+    _place(unrelated_region, title, 1200, 700)
+    assert monitor.is_territory_attacked(_png(unrelated_region)) is False

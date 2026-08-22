@@ -625,7 +625,8 @@ Không chuyển toàn bộ WPF UI sang web trước khi Agent và event contract
 2. Chỉ kiểm tra tiếp khi vùng nhỏ cạnh mục `Chiến đấu` có badge đỏ hiển thị đúng
    số `1`; badge số khác, badge `Hệ thống`, badge `NEW` trong danh sách và HUD bên
    ngoài không hợp lệ.
-3. Bấm đúng dòng thư đầu tiên để trạng thái đã đọc do game quản lý.
+3. Bấm đúng thẻ nền vàng nằm trên cùng danh sách. Đây mới là "thư đầu tiên";
+   không tìm thư `Lãnh Địa bị Công` đầu tiên ở các hàng phía dưới.
 4. Chỉ khi dòng tiêu đề của đúng thư đầu tiên là `Lãnh Địa bị Công` mới gửi
    Telegram, kèm tên profile tương ứng; không dùng nội dung ở dòng thứ hai hoặc
    thư cũ phía dưới làm điều kiện.

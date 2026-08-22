@@ -53,6 +53,9 @@ CoordinateCallback = Callable[[str, dict[str, object]], None]
 # It is mapped to the current renderer size, not searched by a template.
 MAIL_BUTTON_REFERENCE_SIZE = (1259, 672)
 MAIL_BUTTON_REFERENCE_POINT = (145, 545)
+# The first mail is the yellow-highlighted card at the very top of the list.
+# Never search down the list for the first matching attack subject.
+FIRST_MAIL_ROW_POINT = (0.255, 0.165)
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,7 +301,7 @@ class ProfileWorker:
 
             # Read exactly the first row so the game's unread state becomes
             # authoritative; no historical row below it is inspected.
-            self._tap_monitor_point(0.255, 0.165, latest_size)
+            self._tap_monitor_point(*FIRST_MAIL_ROW_POINT, latest_size)
             self._monitor_pause(0.55)
             latest_png, latest_size = self._capture_mail_canvas()
             if monitor.find_close_button(latest_png) is None:
