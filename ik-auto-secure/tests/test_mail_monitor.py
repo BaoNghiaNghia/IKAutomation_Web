@@ -43,6 +43,17 @@ class _TapSession:
         self.taps.append((bounds, image_size))
 
 
+class _MouseSession(_TapSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.mouse_clicks: list[tuple[tuple[int, int, int, int], tuple[int, int]]] = []
+
+    def click_farm_template_mouse(
+        self, bounds: tuple[int, int, int, int], image_size: tuple[int, int]
+    ) -> None:
+        self.mouse_clicks.append((bounds, image_size))
+
+
 class _BaselineMonitor:
     def find_close_button(self, _png: bytes) -> object:
         return object()
@@ -76,6 +87,18 @@ def test_video_measured_mail_points_use_direct_canvas_percentages() -> None:
         ((316, 116, 2, 2), (1260, 674)),
         ((1188, 76, 2, 2), (1260, 674)),
     ]
+
+
+def test_monitor_controls_prefer_mouse_clicks_at_the_same_relative_xy() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker.session = _MouseSession()
+
+    worker._tap_monitor_viewport_point(MAIL_BUTTON_POINT, (600, 312))
+
+    # The alternate browser input is still derived solely from the live game
+    # canvas. It is not a desktop-pixel click and therefore scales per tab.
+    assert worker.session.mouse_clicks == [((68, 251, 2, 2), (600, 312))]
+    assert worker.session.taps == []
 
 
 def test_combat_tab_uses_relative_xy_and_scales_to_the_renderer() -> None:

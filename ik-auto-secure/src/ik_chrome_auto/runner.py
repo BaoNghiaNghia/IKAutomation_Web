@@ -94,6 +94,7 @@ READ_ALL_MAIL_POINT = (0.2008, 0.9110)
 CLOSE_MAIL_POINT = (0.9437, 0.1142)
 # The top card only: never search down the Combat list for a historical match.
 FIRST_MAIL_ROW_POINT = (0.2516, 0.1736)
+MAIL_CONTROL_SETTLE_SECONDS = 0.9
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,7 +275,18 @@ class ProfileWorker:
         y = max(1, min(height - 2, round(height * normalized_y)))
         # Browser template bounds are (left, top, width, height). A symmetric
         # 2x2 box makes its computed center exactly the requested X/Y point.
-        self.session.tap_farm_template((x - 1, y - 1, 2, 2), image_size)
+        #
+        # Mail controls are HTML/canvas portal controls rather than gameplay
+        # targets. On some Chromium/GPU combinations they ignore a synthetic
+        # touch but accept a CDP mouse click. Keep the same canvas-relative
+        # point and prefer mouse for this monitoring-only path; the fallback
+        # retains compatibility with lightweight test and older sessions.
+        bounds = (x - 1, y - 1, 2, 2)
+        click_mouse = getattr(self.session, "click_farm_template_mouse", None)
+        if callable(click_mouse):
+            click_mouse(bounds, image_size)
+        else:
+            self.session.tap_farm_template(bounds, image_size)
 
     def _tap_monitor_viewport_point(
         self, point: tuple[float, float], image_size: tuple[int, int]
@@ -311,7 +323,7 @@ class ProfileWorker:
             close = monitor.find_close_button(latest_png)
             if close is None:
                 self._tap_monitor_viewport_point(MAIL_BUTTON_POINT, latest_size)
-                self._monitor_pause(0.65)
+                self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
                 latest_png, latest_size = self._capture_mail_canvas()
                 close = monitor.find_close_button(latest_png)
                 if close is None:
@@ -324,7 +336,7 @@ class ProfileWorker:
                 # notifications, so entering Combat first would leave other
                 # categories outside the requested baseline flow.
                 self._tap_monitor_viewport_point(READ_ALL_MAIL_POINT, latest_size)
-                self._monitor_pause(0.65)
+                self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
                 latest_png, latest_size = self._capture_mail_canvas()
                 if monitor.find_close_button(latest_png) is None:
                     raise RuntimeError("Hộp thư bị đóng sau khi bấm Đọc & Nhận Tất Cả")
@@ -337,7 +349,7 @@ class ProfileWorker:
             # Pass 2+: Combat is the second category on the left. Use its
             # fixed canvas-relative X/Y rather than another visual search.
             self._tap_monitor_viewport_point(COMBAT_TAB_POINT, latest_size)
-            self._monitor_pause(0.55)
+            self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
             latest_png, latest_size = self._capture_mail_canvas()
             if monitor.find_close_button(latest_png) is None:
                 raise RuntimeError("Hộp thư bị đóng trước khi đọc tab Chiến đấu")
@@ -347,7 +359,7 @@ class ProfileWorker:
             # Read exactly the first row so the game's unread state becomes
             # authoritative; no historical row below it is inspected.
             self._tap_monitor_viewport_point(FIRST_MAIL_ROW_POINT, latest_size)
-            self._monitor_pause(0.55)
+            self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
             latest_png, latest_size = self._capture_mail_canvas()
             if monitor.find_close_button(latest_png) is None:
                 raise RuntimeError("Không xác minh được thư đầu tiên sau khi mở")
@@ -361,7 +373,7 @@ class ProfileWorker:
                     close = monitor.find_close_button(latest_png)
                     if close is not None:
                         self._tap_monitor_viewport_point(CLOSE_MAIL_POINT, latest_size)
-                        self._monitor_pause(0.2)
+                        self._monitor_pause(0.35)
                 except Exception as close_error:
                     self.event_log.write(
                         "mail_monitor_close_error",
