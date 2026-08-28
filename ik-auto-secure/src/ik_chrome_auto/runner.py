@@ -61,6 +61,12 @@ MONITOR_REFERENCE_ASPECT_RATIO = 16 / 9
 # values are still applied independently to the live canvas dimensions so a
 # compact profile viewport keeps the same relative target.
 FARM_REFERENCE_ASPECT_RATIO = 16 / 9
+# A canvas below this range turns the team text and resource controls into a
+# handful of pixels.  Coordinates still scale correctly, but vision cannot
+# make a safe Ready/Busy decision at that size (as seen in 366×168 captures).
+# Farm temporarily enlarges only the active profile renderer to this minimum;
+# it does not change the saved dashboard layout preference.
+FARM_MINIMUM_CANVAS_SIZE = (640, 360)
 FARM_RESOURCE_BUTTON_CENTERS: dict[str, tuple[float, float]] = {
     "food": (0.286, 0.735),
     "wood": (0.406, 0.735),
@@ -177,6 +183,7 @@ class ProfileWorker:
         self._farm_find_resource_click_at = 0.0
         self._farm_gather_clicks = 0
         self._farm_capture_blocked_count = 0
+        self._farm_canvas_resize_attempts = 0
         self._farm_team_selection_clicks = 0
         # The numbered badge is only used to derive the row to tap.  It can
         # resemble another badge after the row's artwork changes, so retain
@@ -433,6 +440,7 @@ class ProfileWorker:
                     self._farm_find_resource_click_at = 0.0
                     self._farm_gather_clicks = 0
                     self._farm_capture_blocked_count = 0
+                    self._farm_canvas_resize_attempts = 0
                     self._farm_team_selection_clicks = 0
                     self._farm_expected_team_row = None
                     self._farm_dispatch_click_at = 0.0
@@ -616,6 +624,52 @@ class ProfileWorker:
         try:
             detected, _surface, image_size = self.session.detect_farm_state()
             self._farm_capture_blocked_count = 0
+            if not self._farm_canvas_is_usable(image_size):
+                self._farm_canvas_resize_attempts = (
+                    getattr(self, "_farm_canvas_resize_attempts", 0) + 1
+                )
+                try:
+                    resized = self.session.ensure_minimum_game_renderer(
+                        *FARM_MINIMUM_CANVAS_SIZE
+                    )
+                except Exception as error:
+                    resized = False
+                    self._log_farm(
+                        "farm_canvas_resize_error",
+                        {
+                            "canvas": {"width": image_size[0], "height": image_size[1]},
+                            "message": f"{type(error).__name__}: {error}",
+                        },
+                    )
+                self._log_farm(
+                    "farm_canvas_too_small",
+                    {
+                        "canvas": {"width": image_size[0], "height": image_size[1]},
+                        "minimum": {
+                            "width": FARM_MINIMUM_CANVAS_SIZE[0],
+                            "height": FARM_MINIMUM_CANVAS_SIZE[1],
+                        },
+                        "resize_requested": resized,
+                        "attempt": self._farm_canvas_resize_attempts,
+                    },
+                )
+                if resized and self._farm_canvas_resize_attempts <= 3:
+                    self._farm_next_at = time.monotonic() + 1.6
+                    self._publish(
+                        WorkerState.RUNNING,
+                        "Auto Farm: khung game quá nhỏ, đang nâng độ phân giải để quét đội chính xác",
+                    )
+                    return
+                # Never interpret a tiny screenshot as an empty team roster.
+                # Retrying conservatively is safer than repeatedly searching
+                # or selecting a wrong in-game target on a compact tile.
+                self._farm_next_at = time.monotonic() + 3.0
+                self._publish(
+                    WorkerState.RUNNING,
+                    "Auto Farm: chờ khung game đủ lớn để nhận diện đội và tài nguyên",
+                )
+                return
+            self._farm_canvas_resize_attempts = 0
             state = {
                 DetectedGameState.CITY: FarmGameState.CITY,
                 DetectedGameState.WORLD_MAP: FarmGameState.WORLD_MAP,
@@ -1704,6 +1758,7 @@ class ProfileWorker:
         self._farm_find_resource_click_at = 0.0
         self._farm_gather_clicks = 0
         self._farm_capture_blocked_count = 0
+        self._farm_canvas_resize_attempts = 0
         self._farm_team_selection_clicks = 0
         self._farm_expected_team_row = None
         self._farm_dispatch_click_at = 0.0
@@ -1813,6 +1868,13 @@ class ProfileWorker:
         self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
         self._publish(WorkerState.COMPLETED, "Auto Farm: đã thử hết tài nguyên, cấp mỏ và điểm khu vực; chờ cycle tiếp theo")
         return True
+
+    @staticmethod
+    def _farm_canvas_is_usable(image_size: tuple[int, int]) -> bool:
+        """Return whether a canvas retains enough pixels for Farm vision."""
+        width, height = image_size
+        minimum_width, minimum_height = FARM_MINIMUM_CANVAS_SIZE
+        return width >= minimum_width and height >= minimum_height
 
     @staticmethod
     def _canvas_ratio_bounds(

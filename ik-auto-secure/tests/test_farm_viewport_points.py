@@ -1,4 +1,8 @@
-from ik_chrome_auto.runner import FARM_REFERENCE_ASPECT_RATIO, ProfileWorker
+from ik_chrome_auto.runner import (
+    FARM_MINIMUM_CANVAS_SIZE,
+    FARM_REFERENCE_ASPECT_RATIO,
+    ProfileWorker,
+)
 
 
 def test_farm_layout_fallbacks_use_relative_canvas_positions_at_16_by_9() -> None:
@@ -14,6 +18,14 @@ def test_farm_layout_fallbacks_scale_for_a_compact_five_profile_viewport() -> No
     assert ProfileWorker._resource_button_layout_bounds("wood", (384, 216)) == (138, 139, 36, 39)
     assert ProfileWorker._world_map_search_layout_bounds((384, 216)) == (106, 156, 38, 36)
     assert ProfileWorker._search_target_checkbox_layout_bounds((384, 216)) == (265, 145, 20, 20)
+
+
+def test_farm_rejects_tiny_renderer_captures_before_team_or_resource_input() -> None:
+    """A tiny canvas cannot safely distinguish Ready from Busy labels."""
+    assert FARM_MINIMUM_CANVAS_SIZE == (640, 360)
+    assert ProfileWorker._farm_canvas_is_usable((640, 360)) is True
+    assert ProfileWorker._farm_canvas_is_usable((366, 168)) is False
+    assert ProfileWorker._farm_canvas_is_usable((186, 66)) is False
 
 
 def test_continent_coordinate_fields_use_canvas_ratio_offsets() -> None:

@@ -533,6 +533,35 @@ class ChromeProfileSession:
         self.config.browser.viewport_width = width
         self.config.browser.viewport_height = height
 
+    def ensure_minimum_game_renderer(self, width: int, height: int) -> bool:
+        """Enlarge only this live Chrome renderer when Farm needs detail.
+
+        This deliberately does not update the shared configured viewport.
+        The window arranger is allowed to keep compact monitoring tiles, but
+        template-driven Farm cannot safely identify a team roster or resource
+        controls after a renderer has been shrunk below its visual minimum.
+        """
+        width, height = validate_viewport(int(width), int(height))
+        if sys.platform != "win32" or self.config.browser.headless:
+            return False
+        hwnd = self.window_handle or self._bind_native_window(retries=10)
+        if hwnd is None:
+            raise RuntimeError(f"Không tìm thấy cửa sổ Chrome của {self.profile.name}")
+        current = get_renderer_rect(hwnd)
+        if current.width >= width and current.height >= height:
+            return False
+        outer = get_window_rect(hwnd)
+        move_window_renderer(
+            hwnd,
+            outer.left,
+            outer.top,
+            width,
+            height,
+            topmost=self._topmost,
+        )
+        self.pump(120)
+        return True
+
     def read_world_position(self) -> tuple[int, int] | None:
         """Read a visible X/Y label if the portal exposes it as DOM text."""
         pattern = re.compile(
