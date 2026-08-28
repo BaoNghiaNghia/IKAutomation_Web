@@ -226,6 +226,21 @@ def test_monitor_finishes_each_five_profile_group_before_starting_the_next() -> 
         "account-4": True,
     }
 
+    # A delayed profile must keep its slot in the group.  Previously the
+    # 30-second advisory deadline removed it from the barrier and the next
+    # group was queued while this worker was still running.
+    dashboard._monitor_in_flight = {
+        profile_id: 0.0 for profile_id in ("account-0", "account-1", "account-2", "account-3", "account-4")
+    }
+    dashboard._advance_monitoring()
+    assert len(dashboard.runner.commands) == 5
+    assert set(dashboard._monitor_in_flight) == {
+        "account-0", "account-1", "account-2", "account-3", "account-4"
+    }
+    assert dashboard._monitor_batch_profiles == {
+        "account-0", "account-1", "account-2", "account-3", "account-4"
+    }
+
     # A completed member does not let the next profile leak into the current
     # group; all five full mailbox flows must finish first.
     dashboard._handle_monitor_result(

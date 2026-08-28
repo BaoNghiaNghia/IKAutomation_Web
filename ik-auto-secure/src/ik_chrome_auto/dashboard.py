@@ -803,16 +803,16 @@ class Dashboard(QWidget):
             if now > deadline
         ]
         for profile_id in expired:
-            self._monitor_in_flight.pop(profile_id, None)
-            self._monitor_batch_profiles.discard(profile_id)
-            self._append_log(f"[{profile_id}] Giám sát quá thời gian; chuyển profile kế tiếp")
-        if (
-            expired
-            and not self._monitor_in_flight
-            and not self._monitor_batch_pending
-            and not self._monitor_batch_profiles
-        ):
-            self._monitor_next_batch_at = now + MONITOR_GROUP_PAUSE_SECONDS
+            # A worker can still be completing a full mailbox flow after the
+            # advisory deadline, especially while Chrome is busy rendering.
+            # Never treat that deadline as a completed result: doing so freed
+            # a group slot and allowed every later profile to be queued at
+            # once.  Refresh the advisory deadline and retain the profile in
+            # this group until its WorkerSnapshot actually arrives.
+            self._monitor_in_flight[profile_id] = now + 30.0
+            self._append_log(
+                f"[{profile_id}] Giám sát đang chậm; chờ hoàn tất nhóm hiện tại"
+            )
         if (
             not self._monitor_queue
             and not self._monitor_in_flight
