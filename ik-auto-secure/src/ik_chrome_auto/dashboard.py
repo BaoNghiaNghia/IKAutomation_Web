@@ -143,6 +143,7 @@ class Dashboard(QWidget):
         self._farm_launch_policy = FarmLaunchPolicy.for_total_memory(32 * 1_073_741_824)
         self._farm_batch_profiles: set[str] = set()
         self._farm_batch_submitted = 0
+        self._farm_batch_limit = self._farm_launch_policy.batch_size
         self._farm_batch_resume_at = 0.0
         self._farm_resource_pause_started = 0.0
         self._farm_resource_pause_reason: str | None = None
@@ -911,6 +912,7 @@ class Dashboard(QWidget):
             self._farm_next_open_at = 0.0
             self._farm_batch_profiles.clear()
             self._farm_batch_submitted = 0
+            self._farm_batch_limit = self._farm_launch_policy.batch_size
             self._farm_batch_resume_at = 0.0
             self._farm_resource_pause_started = 0.0
             self._farm_resource_pause_reason = None
@@ -1093,7 +1095,7 @@ class Dashboard(QWidget):
             )
             return
         policy = self._farm_launch_policy
-        if self._farm_batch_submitted >= policy.batch_size:
+        if self._farm_batch_submitted >= self._farm_batch_limit:
             terminal_states = {WorkerState.READY, WorkerState.COMPLETED, WorkerState.ERROR}
             if any(self._farm_open_states.get(profile_id) not in terminal_states for profile_id in self._farm_batch_profiles):
                 return
@@ -1102,6 +1104,7 @@ class Dashboard(QWidget):
             self._append_log(f"Đợt {len(self._farm_batch_profiles)} tab đã ổn định; bắt đầu đợt tiếp theo")
             self._farm_batch_profiles.clear()
             self._farm_batch_submitted = 0
+            self._farm_batch_limit = policy.batch_size
         if now < self._farm_next_open_at:
             return
         reason: str | None = None
@@ -1118,29 +1121,42 @@ class Dashboard(QWidget):
             if not self._farm_resource_pause_started:
                 self._farm_resource_pause_started = now
                 self._farm_resource_pause_reason = reason
-                self.farm_launcher.setText("Tạm dừng do tải cao…")
-                self._append_log(f"Tạm dừng mở tab: {reason}")
-            if now - self._farm_resource_pause_started >= policy.resource_pause_timeout_seconds:
-                self._abort_farm_opening(
-                    "Đã dừng mở thêm profile",
-                    f"Tài nguyên không hồi phục sau {policy.resource_pause_timeout_seconds:.0f} giây: {reason}",
-                )
-            return
+                self._append_log(f"Tải cao ({reason}); chuyển sang mở tuần tự an toàn")
+            elif self._farm_resource_pause_reason != reason:
+                self._farm_resource_pause_reason = reason
+                self._append_log(f"Tải hệ thống thay đổi: {reason}; tiếp tục mở tuần tự")
+            # Never leave every selected profile in the queue solely because
+            # the machine is already busy.  A hard resource gate here used to
+            # expire without sending even the first OPEN command.  Instead,
+            # finish one profile at a time with a longer interval; this makes
+            # progress while avoiding the Chrome/WebGL startup burst.
+            if self._farm_batch_submitted == 0:
+                self._farm_batch_limit = 1
+            self.farm_launcher.setText("Đang mở chậm do tải cao…")
         if self._farm_resource_pause_started:
-            self._append_log(f"Tài nguyên đã ổn định; tiếp tục mở tab (trước đó: {self._farm_resource_pause_reason})")
-            self._farm_resource_pause_started = 0.0
-            self._farm_resource_pause_reason = None
-            self.farm_launcher.setText("Đang mở...")
+            if not reason:
+                self._append_log(f"Tài nguyên đã ổn định; tiếp tục mở tab (trước đó: {self._farm_resource_pause_reason})")
+                self._farm_resource_pause_started = 0.0
+                self._farm_resource_pause_reason = None
+                self.farm_launcher.setText("Đang mở...")
         profile_id = self._farm_open_queue.popleft()
         self.runner.submit(profile_id, CommandKind.OPEN)
         self._farm_batch_profiles.add(profile_id)
         self._farm_batch_submitted += 1
-        self._farm_next_open_at = now + policy.profile_interval_seconds
-        if self._farm_batch_submitted >= policy.batch_size and self._farm_open_queue:
-            self._farm_batch_resume_at = now + policy.batch_pause_seconds
+        constrained = reason is not None
+        interval = (
+            max(policy.profile_interval_seconds, policy.resource_constrained_interval_seconds)
+            if constrained
+            else policy.profile_interval_seconds
+        )
+        self._farm_next_open_at = now + interval
+        if self._farm_batch_submitted >= self._farm_batch_limit and self._farm_open_queue:
+            self._farm_batch_resume_at = now + (
+                interval if constrained else policy.batch_pause_seconds
+            )
         self._append_log(
             f"Đang mở tab {profile_id} "
-            f"({self._farm_batch_submitted}/{policy.batch_size} trong đợt); "
+            f"({self._farm_batch_submitted}/{self._farm_batch_limit} trong đợt); "
             f"còn {len(self._farm_open_queue)} tab"
         )
 
@@ -1151,6 +1167,7 @@ class Dashboard(QWidget):
         self._farm_open_queue.clear()
         self._farm_batch_profiles.clear()
         self._farm_batch_submitted = 0
+        self._farm_batch_limit = self._farm_launch_policy.batch_size
         self._farm_batch_resume_at = 0.0
         self._farm_resource_pause_started = 0.0
         self._farm_resource_pause_reason = None

@@ -16,6 +16,7 @@ class FarmLaunchPolicy:
     max_memory_load_percent: float = 82.0
     max_profile_cpu_percent: float = 80.0
     resource_pause_timeout_seconds: float = 60.0
+    resource_constrained_interval_seconds: float = 4.0
 
     @classmethod
     def for_total_memory(cls, total_memory_bytes: int) -> "FarmLaunchPolicy":

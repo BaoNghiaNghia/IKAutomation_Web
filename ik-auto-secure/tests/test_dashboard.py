@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from collections import deque
 from types import SimpleNamespace
+import time
 
+import ik_chrome_auto.dashboard as dashboard_module
 from ik_chrome_auto.dashboard import (
     TAB_CLOSE_BATCH_PAUSE_SECONDS,
     TAB_CLOSE_INTERVAL_SECONDS,
     Dashboard,
     FarmProfileDialog,
 )
+from ik_chrome_auto.farm_launch_policy import FarmLaunchPolicy
 from ik_chrome_auto.models import CommandKind, WorkerSnapshot
 from ik_chrome_auto.mail_monitor import (
     COMBAT_MAIL_OTHER,
@@ -440,3 +443,42 @@ def test_close_tabs_adds_gpu_cooldown_and_long_pause_every_five_tabs() -> None:
     dashboard._farm_closed_count = 9
     dashboard._schedule_next_tab_close(200.0)
     assert dashboard._farm_next_close_at == 200.0 + TAB_CLOSE_BATCH_PAUSE_SECONDS
+
+
+def test_profile_launch_sends_an_open_command_even_when_memory_is_constrained(monkeypatch) -> None:
+    """A full RAM guard must throttle opening, not leave every selection queued."""
+    dashboard = Dashboard.__new__(Dashboard)
+    policy = FarmLaunchPolicy.for_total_memory(32 * 1_073_741_824)
+    dashboard.config = SimpleNamespace(profiles=[SimpleNamespace(id="account-1")])
+    dashboard.runner = FakeFarmRunner(set())
+    dashboard._farm_launcher_phase = "opening"
+    dashboard._farm_launch_profiles = {"account-1"}
+    dashboard._farm_open_queue = deque(["account-1"])
+    dashboard._farm_open_states = {}
+    dashboard._farm_open_deadline = time.monotonic() + 60.0
+    dashboard._farm_launch_policy = policy
+    dashboard._farm_batch_profiles = set()
+    dashboard._farm_batch_submitted = 0
+    dashboard._farm_batch_limit = policy.batch_size
+    dashboard._farm_batch_resume_at = 0.0
+    dashboard._farm_next_open_at = 0.0
+    dashboard._farm_resource_pause_started = 0.0
+    dashboard._farm_resource_pause_reason = None
+    dashboard._latest_profile_cpu_percent = 0.0
+    dashboard.farm_launcher = FakeActionButton()
+    dashboard._log_lines = deque(maxlen=10)
+    dashboard.log = FakeLogWidget()
+    monkeypatch.setattr(
+        dashboard_module,
+        "get_system_memory_status",
+        lambda: SimpleNamespace(
+            available_bytes=1 * 1_073_741_824,
+            load_percent=94.0,
+        ),
+    )
+
+    dashboard._advance_farm_opening()
+
+    assert dashboard.runner.commands == [("account-1", CommandKind.OPEN)]
+    assert dashboard._farm_batch_limit == 1
+    assert dashboard.farm_launcher.text == "Đang mở chậm do tải cao…"
