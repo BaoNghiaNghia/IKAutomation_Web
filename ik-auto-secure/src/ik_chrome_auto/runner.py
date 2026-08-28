@@ -82,22 +82,18 @@ FARM_TEAM_ROW_STRIDE_RATIO = 0.205
 FARM_COORDINATE_X_FIELD_OFFSET_X_RATIO = -134 / 1280
 FARM_COORDINATE_Y_FIELD_OFFSET_Y_RATIO = -54 / 720
 
-
-def _viewport_ratio(point: tuple[int, int], reference_size: tuple[int, int]) -> tuple[float, float]:
-    """Convert a historical pixel coordinate into a canvas-relative X/Y."""
-    reference_width, reference_height = reference_size
-    return point[0] / reference_width, point[1] / reference_height
-
-
-# Original measured points are retained here only to derive their relative
-# locations. New fixed controls must be declared as ratios directly.
-MAIL_BUTTON_POINT = _viewport_ratio((145, 545), (1259, 672))
-COMBAT_TAB_POINT = _viewport_ratio((142, 366), (1920, 1009))
-READ_ALL_MAIL_POINT = _viewport_ratio((385, 914), (1920, 1009))
-CLOSE_MAIL_POINT = _viewport_ratio((1794, 108), (1920, 1009))
-# The first mail is the yellow-highlighted card at the very top of the list.
-# Never search down the list for the first matching attack subject.
-FIRST_MAIL_ROW_POINT = (0.255, 0.165)
+# Measured from the 1260×674 video supplied on 2026-08-28.  They are declared
+# as direct X/Y canvas percentages (rather than retained pixel references), so
+# each profile maps them against its own live CDP game-surface capture.
+#
+# The intended 16:9 canvas is the default. Width and height are mapped
+# independently so a compact or slightly cropped browser canvas remains safe.
+MAIL_BUTTON_POINT = (0.1151, 0.8086)
+COMBAT_TAB_POINT = (0.0635, 0.3650)
+READ_ALL_MAIL_POINT = (0.2008, 0.9110)
+CLOSE_MAIL_POINT = (0.9437, 0.1142)
+# The top card only: never search down the Combat list for a historical match.
+FIRST_MAIL_ROW_POINT = (0.2516, 0.1736)
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,11 +291,12 @@ class ProfileWorker:
         self._tap_monitor_point(normalized_x, normalized_y, image_size)
 
     def _check_combat_mail(self, *, initial_scan: bool) -> str:
-        """Open Combat mail, establish a baseline, or inspect one unread item.
+        """Run the two-pass mailbox workflow for one profile.
 
-        Every transition is verified from a fresh renderer capture. The first
-        pass never alerts on historical mail. Later passes only open the first
-        message when the Combat category itself carries an unread badge.
+        Pass 1 opens Mail and uses ``Đọc & Nhận Tất Cả`` across all mail
+        categories to establish a clean baseline. Pass 2+ opens Combat and
+        reads only the top item when that category carries an unread badge.
+        Every transition is verified from a fresh renderer capture.
         """
         if self.session is None:
             return SCAN_ERROR
@@ -321,18 +318,13 @@ class ProfileWorker:
                     raise RuntimeError("Hộp thư chưa mở sau khi bấm nút thư")
             mail_open = True
 
-            # Combat is the second category on the left. Use the supplied
-            # fixed X/Y reference instead of spending another capture on
-            # category recognition.
-            self._tap_monitor_viewport_point(COMBAT_TAB_POINT, latest_size)
-            self._monitor_pause(0.55)
-            latest_png, latest_size = self._capture_mail_canvas()
-            if monitor.find_close_button(latest_png) is None:
-                raise RuntimeError("Hộp thư bị đóng trước khi đọc tab Chiến đấu")
-
             if initial_scan:
+                # Pass 1 intentionally stays on the initially opened mailbox
+                # category. The game's Read All action applies to all
+                # notifications, so entering Combat first would leave other
+                # categories outside the requested baseline flow.
                 self._tap_monitor_viewport_point(READ_ALL_MAIL_POINT, latest_size)
-                self._monitor_pause(0.3)
+                self._monitor_pause(0.65)
                 latest_png, latest_size = self._capture_mail_canvas()
                 if monitor.find_close_button(latest_png) is None:
                     raise RuntimeError("Hộp thư bị đóng sau khi bấm Đọc & Nhận Tất Cả")
@@ -341,6 +333,14 @@ class ProfileWorker:
                     {"profile_id": self.profile.id},
                 )
                 return MAIL_BASELINE
+
+            # Pass 2+: Combat is the second category on the left. Use its
+            # fixed canvas-relative X/Y rather than another visual search.
+            self._tap_monitor_viewport_point(COMBAT_TAB_POINT, latest_size)
+            self._monitor_pause(0.55)
+            latest_png, latest_size = self._capture_mail_canvas()
+            if monitor.find_close_button(latest_png) is None:
+                raise RuntimeError("Hộp thư bị đóng trước khi đọc tab Chiến đấu")
             if not monitor.has_new_combat_mail(latest_png):
                 return NO_NEW_COMBAT_MAIL
 

@@ -161,6 +161,11 @@ class Dashboard(QWidget):
         self._monitor_in_flight: dict[str, float] = {}
         self._monitor_batch_profiles: set[str] = set()
         self._monitor_batch_pending: deque[str] = deque()
+        # A batch has two barriers during the initial setup: all members must
+        # finish the baseline pass, then those same members must finish the
+        # Combat check.  Retain the ordered membership across both phases.
+        self._monitor_batch_members: tuple[str, ...] = ()
+        self._monitor_batch_phase = ""
         self._monitor_next_profile_at = 0.0
         self._monitor_next_batch_at = 0.0
         self._monitor_cycle_at = 0.0
@@ -704,6 +709,8 @@ class Dashboard(QWidget):
         self._monitor_in_flight.clear()
         self._monitor_batch_profiles = set()
         self._monitor_batch_pending = deque()
+        self._monitor_batch_members = ()
+        self._monitor_batch_phase = ""
         self._monitor_next_profile_at = 0.0
         self._monitor_next_batch_at = 0.0
         self._monitor_cycle_at = 0.0
@@ -727,6 +734,8 @@ class Dashboard(QWidget):
         self._monitor_in_flight.clear()
         self._monitor_batch_profiles = set()
         self._monitor_batch_pending = deque()
+        self._monitor_batch_members = ()
+        self._monitor_batch_phase = ""
         self._monitor_next_profile_at = 0.0
         self._monitor_next_batch_at = 0.0
         self._monitor_cycle_at = 0.0
@@ -751,6 +760,10 @@ class Dashboard(QWidget):
         if profile_id not in self._monitor_in_flight:
             return
         events = set(snapshot.monitor_events or ())
+        # Record a successful baseline before evaluating the batch barrier so
+        # the final profile in a five-member group is included in pass 2.
+        if MAIL_BASELINE in events:
+            self._monitor_initialized_profiles.add(profile_id)
         self._monitor_in_flight.pop(profile_id, None)
         getattr(self, "_monitor_batch_profiles", set()).discard(profile_id)
         if (
@@ -758,14 +771,44 @@ class Dashboard(QWidget):
             and not getattr(self, "_monitor_batch_pending", ())
             and not getattr(self, "_monitor_batch_profiles", set())
         ):
-            self._monitor_next_batch_at = (
-                time.monotonic() + MONITOR_GROUP_PAUSE_SECONDS
-            )
+            # The first monitor pass only establishes a clean mailbox. Do
+            # not release this group yet: immediately run the usual Combat
+            # pass for these exact members before admitting the next five.
+            if getattr(self, "_monitor_batch_phase", "") == "baseline":
+                members = getattr(self, "_monitor_batch_members", ())
+                follow_up = [
+                    member
+                    for member in members
+                    if member in self._monitor_initialized_profiles
+                    and self.runner.has_open_session(member)
+                ]
+                if follow_up:
+                    self._monitor_batch_phase = "combat"
+                    self._monitor_batch_pending = deque(follow_up)
+                    self._monitor_batch_profiles = set(follow_up)
+                    self._monitor_next_profile_at = (
+                        time.monotonic() + MONITOR_GROUP_PAUSE_SECONDS
+                    )
+                    self._append_log(
+                        f"Giám sát nhóm {self._monitor_cycle_number}: "
+                        f"đã xong lượt 1, chạy lượt 2 cho {len(follow_up)} profile"
+                    )
+                else:
+                    self._monitor_batch_members = ()
+                    self._monitor_batch_phase = ""
+                    self._monitor_next_batch_at = (
+                        time.monotonic() + MONITOR_GROUP_PAUSE_SECONDS
+                    )
+            else:
+                self._monitor_batch_members = ()
+                self._monitor_batch_phase = ""
+                self._monitor_next_batch_at = (
+                    time.monotonic() + MONITOR_GROUP_PAUSE_SECONDS
+                )
         if SCAN_ERROR in events:
             self._append_log(f"[{profile_id}] Giám sát thư: không hoàn tất được luồng xác minh")
             return
         if MAIL_BASELINE in events:
-            self._monitor_initialized_profiles.add(profile_id)
             self._append_log(f"[{profile_id}] Đã tạo baseline thư Chiến đấu; không báo thư cũ")
             return
         try:
@@ -792,6 +835,10 @@ class Dashboard(QWidget):
             self._monitor_batch_profiles = set()
         if not hasattr(self, "_monitor_batch_pending"):
             self._monitor_batch_pending = deque()
+        if not hasattr(self, "_monitor_batch_members"):
+            self._monitor_batch_members = ()
+        if not hasattr(self, "_monitor_batch_phase"):
+            self._monitor_batch_phase = ""
         if not hasattr(self, "_monitor_next_profile_at"):
             self._monitor_next_profile_at = 0.0
         if not hasattr(self, "_monitor_next_batch_at"):
@@ -818,6 +865,7 @@ class Dashboard(QWidget):
             and not self._monitor_in_flight
             and not self._monitor_batch_pending
             and not self._monitor_batch_profiles
+            and not self._monitor_batch_members
         ):
             if now < self._monitor_cycle_at:
                 return
@@ -838,6 +886,7 @@ class Dashboard(QWidget):
             not self._monitor_batch_pending
             and not self._monitor_in_flight
             and not self._monitor_batch_profiles
+            and not self._monitor_batch_members
         ):
             if now < self._monitor_next_batch_at:
                 return
@@ -852,10 +901,16 @@ class Dashboard(QWidget):
                 return
             self._monitor_batch_pending = deque(group)
             self._monitor_batch_profiles = set(group)
+            self._monitor_batch_members = tuple(group)
+            self._monitor_batch_phase = (
+                "baseline"
+                if any(profile_id not in self._monitor_initialized_profiles for profile_id in group)
+                else "combat"
+            )
             self._monitor_next_profile_at = now
             self._append_log(
                 f"Giám sát nhóm {self._monitor_cycle_number}: "
-                f"{len(group)} profile chạy workflow độc lập"
+                f"{len(group)} profile chạy đủ lượt 1 và lượt 2"
             )
 
         # Dispatch at most one profile per dashboard tick. The stagger keeps
@@ -871,7 +926,7 @@ class Dashboard(QWidget):
             self.runner.submit(
                 profile_id,
                 CommandKind.MONITOR_MAIL,
-                initial_scan=profile_id not in self._monitor_initialized_profiles,
+                initial_scan=self._monitor_batch_phase == "baseline",
             )
             self._monitor_in_flight[profile_id] = now + 30.0
         self._monitor_next_profile_at = now + MONITOR_PROFILE_STAGGER_SECONDS

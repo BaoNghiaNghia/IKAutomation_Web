@@ -16,6 +16,7 @@ from ik_chrome_auto.models import CommandKind, WorkerSnapshot
 from ik_chrome_auto.mail_monitor import (
     COMBAT_MAIL_OTHER,
     MAIL_BASELINE,
+    NO_NEW_COMBAT_MAIL,
     TERRITORY_ATTACKED,
 )
 
@@ -183,25 +184,30 @@ def test_monitor_first_pass_builds_baseline_then_alerts_only_for_attack_mail() -
 def test_monitor_finishes_each_five_profile_group_before_starting_the_next() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     profiles = [SimpleNamespace(id=f"account-{index}") for index in range(7)]
-    dashboard.config = SimpleNamespace(profiles=profiles)
+    dashboard.config = SimpleNamespace(
+        profiles=profiles,
+        profile=lambda profile_id: SimpleNamespace(name=profile_id),
+    )
     dashboard.runner = FakeMonitorRunner({profile.id for profile in profiles})
     dashboard._monitoring_enabled = True
     dashboard._monitor_queue = deque()
     dashboard._monitor_in_flight = {}
     dashboard._monitor_batch_profiles = set()
     dashboard._monitor_batch_pending = deque()
+    dashboard._monitor_batch_members = ()
+    dashboard._monitor_batch_phase = ""
     dashboard._monitor_next_profile_at = 0.0
     dashboard._monitor_next_batch_at = 0.0
     dashboard._monitor_cycle_at = 0.0
     dashboard._monitor_cycle_number = 0
-    dashboard._monitor_initialized_profiles = {"account-1"}
+    dashboard._monitor_initialized_profiles = set()
     dashboard._log_lines = deque(maxlen=10)
     dashboard.log = FakeLogWidget()
 
     dashboard._advance_monitoring()
 
-    # The group is fixed at five, but commands are staggered so each worker
-    # runs its complete mailbox workflow independently instead of lockstep.
+    # The group is fixed at five. Its first pass is staggered so workers do
+    # not execute the same UI step in lockstep.
     assert len(dashboard.runner.commands) == 1
     assert len(dashboard._monitor_in_flight) == 1
     assert len(dashboard._monitor_batch_pending) == 4
@@ -220,7 +226,7 @@ def test_monitor_finishes_each_five_profile_group_before_starting_the_next() -> 
     }
     assert initial_by_profile == {
         "account-0": True,
-        "account-1": False,
+        "account-1": True,
         "account-2": True,
         "account-3": True,
         "account-4": True,
@@ -242,7 +248,7 @@ def test_monitor_finishes_each_five_profile_group_before_starting_the_next() -> 
     }
 
     # A completed member does not let the next profile leak into the current
-    # group; all five full mailbox flows must finish first.
+    # group; all five baseline flows must finish first.
     dashboard._handle_monitor_result(
         WorkerSnapshot("account-0", monitor_events=(MAIL_BASELINE,))
     )
@@ -253,15 +259,34 @@ def test_monitor_finishes_each_five_profile_group_before_starting_the_next() -> 
         dashboard._handle_monitor_result(
             WorkerSnapshot(profile_id, monitor_events=(MAIL_BASELINE,))
         )
+    assert dashboard._monitor_batch_phase == "combat"
+    assert list(dashboard._monitor_batch_pending) == [
+        "account-0", "account-1", "account-2", "account-3", "account-4"
+    ]
+    # The same members now complete pass 2 before account-5 is eligible.
+    dashboard._monitor_next_profile_at = 0.0
+    dashboard._advance_monitoring()
+    assert dashboard.runner.commands[-1] == (
+        "account-0", CommandKind.MONITOR_MAIL, {"initial_scan": False}
+    )
+    for _ in range(4):
+        dashboard._monitor_next_profile_at = 0.0
+        dashboard._advance_monitoring()
+    assert [payload["initial_scan"] for _, _, payload in dashboard.runner.commands[-5:]] == [
+        False,
+        False,
+        False,
+        False,
+        False,
+    ]
+    for profile_id in ("account-0", "account-1", "account-2", "account-3", "account-4"):
+        dashboard._handle_monitor_result(
+            WorkerSnapshot(profile_id, monitor_events=(NO_NEW_COMBAT_MAIL,))
+        )
     dashboard._monitor_next_batch_at = 0.0
     dashboard._advance_monitoring()
     assert dashboard.runner.commands[-1][0] == "account-5"
     assert list(dashboard._monitor_batch_pending) == ["account-6"]
-    dashboard._monitor_next_profile_at = 0.0
-    dashboard._advance_monitoring()
-    assert [profile_id for profile_id, _command, _payload in dashboard.runner.commands[-2:]] == [
-        "account-5", "account-6"
-    ]
 
 
 def test_mouse_sync_section_is_collapsed_by_default_and_can_toggle() -> None:
