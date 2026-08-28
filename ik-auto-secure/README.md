@@ -56,8 +56,24 @@ file credential.
 
 Sau khi chạy `run.cmd` một lần, double-click [`build.cmd`](build.cmd). Script sẽ
 kiểm thử, tạo ứng dụng không có cửa sổ Terminal tại `release\IK Auto\IK Auto.exe`
-và tạo shortcut **IK Auto** có icon trên Desktop. Icon xuất hiện ở file `.exe`,
-shortcut, tiêu đề cửa sổ và taskbar.
+và tạo shortcut **IK Auto** có icon trên Desktop. Build đã loại Qt multimedia,
+PDF, QML/WebEngine không dùng và codec video OpenCV; các thành phần bắt buộc như
+Chrome CDP/Playwright, OpenCV nhận diện ảnh và Qt UI vẫn được giữ nguyên.
+
+Với bản build mới, cài đặt lần đầu lưu `config.json`, profile Chrome, ảnh và log
+tại `%LOCALAPPDATA%\IK Auto`, không nằm trong thư mục `release`. Vì vậy có thể
+thay thư mục release khi nâng cấp mà không đóng gói cookie/profile vào bản phát
+hành. Bản portable cũ có `config.json` đặt cạnh `.exe` vẫn tiếp tục dùng dữ liệu
+cũ để không mất profile.
+
+Để tạo thêm một file nén thuận tiện gửi cho máy khác, chạy:
+
+```powershell
+.\build.cmd -Archive
+```
+
+File phát hành sẽ là `release\IK-Auto-portable.zip`; người nhận giải nén toàn bộ
+thư mục trước khi chạy `IK Auto.exe`.
 
 This project is intended for authorised automation only. Review the target
 service's terms and use separate profiles for separate accounts.
