@@ -49,16 +49,52 @@ UpdateCallback = Callable[[WorkerSnapshot], None]
 InputCallback = Callable[[str, dict[str, object]], None]
 CoordinateCallback = Callable[[str, dict[str, object]], None]
 
-# Fixed mail-button coordinate supplied from the 1259x672 reference capture.
-# It is mapped to the current renderer size, not searched by a template.
-MAIL_BUTTON_REFERENCE_SIZE = (1259, 672)
-MAIL_BUTTON_REFERENCE_POINT = (145, 545)
-# Mailbox coordinates are canvas-local. The supplied window capture is
-# 1920x1040 with a 31px title bar, leaving a 1920x1009 game canvas.
-MAILBOX_REFERENCE_SIZE = (1920, 1009)
-COMBAT_TAB_REFERENCE_POINT = (142, 366)
-READ_ALL_MAIL_REFERENCE_POINT = (385, 914)
-CLOSE_MAIL_REFERENCE_POINT = (1794, 108)
+# Fixed monitor controls are expressed as X/Y ratios of the game canvas, not
+# desktop or Chrome-window pixels.  The canonical capture is 16:9, but width
+# and height are intentionally scaled independently: a compact 5-window row
+# and a 1280x720 screenshot therefore receive the same relative tap.
+MONITOR_REFERENCE_ASPECT_RATIO = 16 / 9
+
+# Farm UI fallbacks use the same canvas-relative coordinate contract as the
+# monitor.  These are screen controls inside the game canvas, not World Map
+# coordinates.  The 16:9 aspect ratio is the authored default; the X and Y
+# values are still applied independently to the live canvas dimensions so a
+# compact profile viewport keeps the same relative target.
+FARM_REFERENCE_ASPECT_RATIO = 16 / 9
+FARM_RESOURCE_BUTTON_CENTERS: dict[str, tuple[float, float]] = {
+    "food": (0.286, 0.735),
+    "wood": (0.406, 0.735),
+    "stone": (0.526, 0.735),
+    "iron": (0.646, 0.735),
+}
+FARM_RESOURCE_BUTTON_SIZE = (0.095, 0.18)
+FARM_WORLD_MAP_SEARCH_CENTER = (0.325, 0.807)
+FARM_WORLD_MAP_SEARCH_SIZE = (0.058, 0.104)
+FARM_SEARCH_TARGET_CHECKBOX_CENTER = (0.717, 0.718)
+FARM_SEARCH_TARGET_CHECKBOX_SIZE = (0.04, 0.065)
+FARM_TEAM_ROW_WIDTH_RATIO = 0.172
+FARM_TEAM_ROW_HEIGHT_RATIO = 0.19
+FARM_TEAM_ROW_FIRST_TOP_RATIO = 0.002
+FARM_TEAM_ROW_STRIDE_RATIO = 0.205
+# The coordinate fields sit a fixed *relative canvas distance* from the
+# freshly matched Continent Map pin.  Keeping these as ratios avoids treating
+# the old 1280x720 capture as a desktop pixel coordinate system.
+FARM_COORDINATE_X_FIELD_OFFSET_X_RATIO = -134 / 1280
+FARM_COORDINATE_Y_FIELD_OFFSET_Y_RATIO = -54 / 720
+
+
+def _viewport_ratio(point: tuple[int, int], reference_size: tuple[int, int]) -> tuple[float, float]:
+    """Convert a historical pixel coordinate into a canvas-relative X/Y."""
+    reference_width, reference_height = reference_size
+    return point[0] / reference_width, point[1] / reference_height
+
+
+# Original measured points are retained here only to derive their relative
+# locations. New fixed controls must be declared as ratios directly.
+MAIL_BUTTON_POINT = _viewport_ratio((145, 545), (1259, 672))
+COMBAT_TAB_POINT = _viewport_ratio((142, 366), (1920, 1009))
+READ_ALL_MAIL_POINT = _viewport_ratio((385, 914), (1920, 1009))
+CLOSE_MAIL_POINT = _viewport_ratio((1794, 108), (1920, 1009))
 # The first mail is the yellow-highlighted card at the very top of the list.
 # Never search down the list for the first matching attack subject.
 FIRST_MAIL_ROW_POINT = (0.255, 0.165)
@@ -244,18 +280,19 @@ class ProfileWorker:
         # 2x2 box makes its computed center exactly the requested X/Y point.
         self.session.tap_farm_template((x - 1, y - 1, 2, 2), image_size)
 
-    def _tap_monitor_reference_point(
-        self,
-        point: tuple[int, int],
-        reference_size: tuple[int, int],
-        image_size: tuple[int, int],
+    def _tap_monitor_viewport_point(
+        self, point: tuple[float, float], image_size: tuple[int, int]
     ) -> None:
-        reference_width, reference_height = reference_size
-        self._tap_monitor_point(
-            point[0] / reference_width,
-            point[1] / reference_height,
-            image_size,
-        )
+        """Tap a point normalized to the live game canvas.
+
+        ``image_size`` comes from the fresh CDP canvas capture of this exact
+        profile. It is consequently correct for any viewport size, DPI and
+        number of Chrome windows per row, without relying on desktop geometry.
+        """
+        normalized_x, normalized_y = point
+        if not (0.0 < normalized_x < 1.0 and 0.0 < normalized_y < 1.0):
+            raise ValueError("Tọa độ giám sát phải là tỉ lệ X/Y trong khoảng 0..1")
+        self._tap_monitor_point(normalized_x, normalized_y, image_size)
 
     def _check_combat_mail(self, *, initial_scan: bool) -> str:
         """Open Combat mail, establish a baseline, or inspect one unread item.
@@ -276,11 +313,7 @@ class ProfileWorker:
             latest_png, latest_size = self._capture_mail_canvas()
             close = monitor.find_close_button(latest_png)
             if close is None:
-                self._tap_monitor_reference_point(
-                    MAIL_BUTTON_REFERENCE_POINT,
-                    MAIL_BUTTON_REFERENCE_SIZE,
-                    latest_size,
-                )
+                self._tap_monitor_viewport_point(MAIL_BUTTON_POINT, latest_size)
                 self._monitor_pause(0.65)
                 latest_png, latest_size = self._capture_mail_canvas()
                 close = monitor.find_close_button(latest_png)
@@ -291,22 +324,14 @@ class ProfileWorker:
             # Combat is the second category on the left. Use the supplied
             # fixed X/Y reference instead of spending another capture on
             # category recognition.
-            self._tap_monitor_reference_point(
-                COMBAT_TAB_REFERENCE_POINT,
-                MAILBOX_REFERENCE_SIZE,
-                latest_size,
-            )
+            self._tap_monitor_viewport_point(COMBAT_TAB_POINT, latest_size)
             self._monitor_pause(0.55)
             latest_png, latest_size = self._capture_mail_canvas()
             if monitor.find_close_button(latest_png) is None:
                 raise RuntimeError("Hộp thư bị đóng trước khi đọc tab Chiến đấu")
 
             if initial_scan:
-                self._tap_monitor_reference_point(
-                    READ_ALL_MAIL_REFERENCE_POINT,
-                    MAILBOX_REFERENCE_SIZE,
-                    latest_size,
-                )
+                self._tap_monitor_viewport_point(READ_ALL_MAIL_POINT, latest_size)
                 self._monitor_pause(0.3)
                 latest_png, latest_size = self._capture_mail_canvas()
                 if monitor.find_close_button(latest_png) is None:
@@ -321,7 +346,7 @@ class ProfileWorker:
 
             # Read exactly the first row so the game's unread state becomes
             # authoritative; no historical row below it is inspected.
-            self._tap_monitor_point(*FIRST_MAIL_ROW_POINT, latest_size)
+            self._tap_monitor_viewport_point(FIRST_MAIL_ROW_POINT, latest_size)
             self._monitor_pause(0.55)
             latest_png, latest_size = self._capture_mail_canvas()
             if monitor.find_close_button(latest_png) is None:
@@ -335,11 +360,7 @@ class ProfileWorker:
                     latest_png, latest_size = self._capture_mail_canvas()
                     close = monitor.find_close_button(latest_png)
                     if close is not None:
-                        self._tap_monitor_reference_point(
-                            CLOSE_MAIL_REFERENCE_POINT,
-                            MAILBOX_REFERENCE_SIZE,
-                            latest_size,
-                        )
+                        self._tap_monitor_viewport_point(CLOSE_MAIL_POINT, latest_size)
                         self._monitor_pause(0.2)
                 except Exception as close_error:
                     self.event_log.write(
@@ -1782,6 +1803,34 @@ class ProfileWorker:
         return True
 
     @staticmethod
+    def _canvas_ratio_bounds(
+        image_size: tuple[int, int],
+        *,
+        center: tuple[float, float],
+        size: tuple[float, float],
+        minimum_size: tuple[int, int],
+    ) -> tuple[int, int, int, int]:
+        """Build screenshot bounds from canvas-relative X/Y ratios.
+
+        The input image is always the latest capture of the current profile's
+        game canvas.  No desktop, browser-window, or previous-profile pixels
+        participate in the calculation.
+        """
+        center_x, center_y = center
+        width_ratio, height_ratio = size
+        if not (0.0 < center_x < 1.0 and 0.0 < center_y < 1.0):
+            raise ValueError("Tâm điểm Farm phải là tỉ lệ X/Y trong khoảng 0..1")
+        if not (0.0 < width_ratio <= 1.0 and 0.0 < height_ratio <= 1.0):
+            raise ValueError("Kích thước vùng Farm phải là tỉ lệ X/Y trong khoảng 0..1")
+        image_width, image_height = image_size
+        minimum_width, minimum_height = minimum_size
+        box_width = min(image_width, max(minimum_width, round(image_width * width_ratio)))
+        box_height = min(image_height, max(minimum_height, round(image_height * height_ratio)))
+        left = max(0, min(image_width - box_width, round(image_width * center_x - box_width / 2)))
+        top = max(0, min(image_height - box_height, round(image_height * center_y - box_height / 2)))
+        return (left, top, box_width, box_height)
+
+    @staticmethod
     def _resource_button_layout_bounds(
         resource: str, image_size: tuple[int, int]
     ) -> tuple[int, int, int, int]:
@@ -1792,19 +1841,12 @@ class ProfileWorker:
         button have been matched; it is a bounded fallback for skins whose
         resource artwork differs from our visual template pack.
         """
-        centers = {
-            "food": (0.286, 0.735),
-            "wood": (0.406, 0.735),
-            "stone": (0.526, 0.735),
-            "iron": (0.646, 0.735),
-        }
-        center_x, center_y = centers.get(resource, centers["food"])
-        width, height = image_size
-        button_width = max(36, round(width * 0.095))
-        button_height = max(36, round(height * 0.18))
-        left = max(0, min(width - button_width, round(width * center_x - button_width / 2)))
-        top = max(0, min(height - button_height, round(height * center_y - button_height / 2)))
-        return (left, top, button_width, button_height)
+        return ProfileWorker._canvas_ratio_bounds(
+            image_size,
+            center=FARM_RESOURCE_BUTTON_CENTERS.get(resource, FARM_RESOURCE_BUTTON_CENTERS["food"]),
+            size=FARM_RESOURCE_BUTTON_SIZE,
+            minimum_size=(36, 36),
+        )
 
     @staticmethod
     def _is_dispatch_postcondition_verified(
@@ -1846,24 +1888,24 @@ class ProfileWorker:
         This is deliberately used only after the World Map coordinate HUD has
         been freshly matched, never as a blind desktop-coordinate click.
         """
-        width, height = image_size
-        button_width = max(38, round(width * 0.058))
-        button_height = max(36, round(height * 0.104))
-        left = max(0, min(width - button_width, round(width * 0.325 - button_width / 2)))
-        top = max(0, min(height - button_height, round(height * 0.807 - button_height / 2)))
-        return (left, top, button_width, button_height)
+        return ProfileWorker._canvas_ratio_bounds(
+            image_size,
+            center=FARM_WORLD_MAP_SEARCH_CENTER,
+            size=FARM_WORLD_MAP_SEARCH_SIZE,
+            minimum_size=(38, 36),
+        )
 
     @staticmethod
     def _search_target_checkbox_layout_bounds(
         image_size: tuple[int, int]
     ) -> tuple[int, int, int, int]:
         """Return the checkbox slot within a matcher-verified search panel."""
-        width, height = image_size
-        box_width = max(20, round(width * 0.04))
-        box_height = max(20, round(height * 0.065))
-        left = max(0, min(width - box_width, round(width * 0.717 - box_width / 2)))
-        top = max(0, min(height - box_height, round(height * 0.718 - box_height / 2)))
-        return (left, top, box_width, box_height)
+        return ProfileWorker._canvas_ratio_bounds(
+            image_size,
+            center=FARM_SEARCH_TARGET_CHECKBOX_CENTER,
+            size=FARM_SEARCH_TARGET_CHECKBOX_SIZE,
+            minimum_size=(20, 20),
+        )
 
     def _try_resource_area_relocation(self, resource: str, level: int) -> str:
         """Move to one verified map coordinate through the website's City UI.
@@ -2005,8 +2047,8 @@ class ProfileWorker:
         image_width, image_height = image_size
         center_x = left + width // 2
         center_y = top + height // 2
-        x_center = center_x + round(-134 * image_width / 1280)
-        y_center = center_y + round(-54 * image_height / 720)
+        x_center = center_x + round(image_width * FARM_COORDINATE_X_FIELD_OFFSET_X_RATIO)
+        y_center = center_y + round(image_height * FARM_COORDINATE_Y_FIELD_OFFSET_Y_RATIO)
         return (x_center, center_y, 2, 2), (center_x, y_center, 2, 2)
 
     def _log_farm(self, event: str, payload: dict[str, object]) -> None:
@@ -2092,10 +2134,10 @@ class ProfileWorker:
             return None
         image_width, image_height = image_size
         row_left = 0
-        row_width = min(image_width, max(48, round(image_width * 0.172)))
-        row_height = max(48, round(image_height * 0.19))
-        first_top = max(0, round(image_height * 0.002))
-        row_stride = max(row_height + 1, round(image_height * 0.205))
+        row_width = min(image_width, max(48, round(image_width * FARM_TEAM_ROW_WIDTH_RATIO)))
+        row_height = min(image_height, max(48, round(image_height * FARM_TEAM_ROW_HEIGHT_RATIO)))
+        first_top = max(0, round(image_height * FARM_TEAM_ROW_FIRST_TOP_RATIO))
+        row_stride = max(row_height + 1, round(image_height * FARM_TEAM_ROW_STRIDE_RATIO))
         row_top = min(
             max(0, image_height - row_height),
             first_top + (team - 1) * row_stride,

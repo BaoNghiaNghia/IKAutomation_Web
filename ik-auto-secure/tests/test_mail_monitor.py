@@ -5,13 +5,12 @@ import numpy as np
 
 from ik_chrome_auto.mail_monitor import BrowserMailMonitor
 from ik_chrome_auto.runner import (
-    CLOSE_MAIL_REFERENCE_POINT,
-    COMBAT_TAB_REFERENCE_POINT,
-    MAIL_BUTTON_REFERENCE_POINT,
-    MAIL_BUTTON_REFERENCE_SIZE,
-    MAILBOX_REFERENCE_SIZE,
+    CLOSE_MAIL_POINT,
+    COMBAT_TAB_POINT,
+    MAIL_BUTTON_POINT,
+    MONITOR_REFERENCE_ASPECT_RATIO,
     ProfileWorker,
-    READ_ALL_MAIL_REFERENCE_POINT,
+    READ_ALL_MAIL_POINT,
 )
 
 
@@ -42,46 +41,30 @@ class _TapSession:
         self.taps.append((bounds, image_size))
 
 
-def test_mail_button_uses_the_fixed_reference_coordinate() -> None:
+def test_mail_button_uses_a_normalized_viewport_coordinate() -> None:
     worker = ProfileWorker.__new__(ProfileWorker)
     worker.session = _TapSession()
 
-    worker._tap_monitor_reference_point(
-        MAIL_BUTTON_REFERENCE_POINT,
-        MAIL_BUTTON_REFERENCE_SIZE,
-        MAIL_BUTTON_REFERENCE_SIZE,
-    )
+    worker._tap_monitor_viewport_point(MAIL_BUTTON_POINT, (1259, 672))
 
     assert worker.session.taps == [((144, 544, 2, 2), (1259, 672))]
 
 
-def test_combat_tab_uses_fixed_xy_and_scales_to_the_renderer() -> None:
+def test_combat_tab_uses_relative_xy_and_scales_to_the_renderer() -> None:
     worker = ProfileWorker.__new__(ProfileWorker)
     worker.session = _TapSession()
 
-    worker._tap_monitor_reference_point(
-        COMBAT_TAB_REFERENCE_POINT,
-        MAILBOX_REFERENCE_SIZE,
-        (1280, 720),
-    )
+    worker._tap_monitor_viewport_point(COMBAT_TAB_POINT, (1280, 720))
 
     assert worker.session.taps == [((94, 260, 2, 2), (1280, 720))]
 
 
-def test_read_all_and_close_mail_use_fixed_scaled_xy() -> None:
+def test_read_all_and_close_mail_use_relative_scaled_xy() -> None:
     worker = ProfileWorker.__new__(ProfileWorker)
     worker.session = _TapSession()
 
-    worker._tap_monitor_reference_point(
-        READ_ALL_MAIL_REFERENCE_POINT,
-        MAILBOX_REFERENCE_SIZE,
-        (1280, 720),
-    )
-    worker._tap_monitor_reference_point(
-        CLOSE_MAIL_REFERENCE_POINT,
-        MAILBOX_REFERENCE_SIZE,
-        (1280, 720),
-    )
+    worker._tap_monitor_viewport_point(READ_ALL_MAIL_POINT, (1280, 720))
+    worker._tap_monitor_viewport_point(CLOSE_MAIL_POINT, (1280, 720))
 
     assert worker.session.taps == [
         ((256, 651, 2, 2), (1280, 720)),
@@ -89,26 +72,30 @@ def test_read_all_and_close_mail_use_fixed_scaled_xy() -> None:
     ]
 
 
-def test_fixed_mail_points_scale_for_five_column_viewport() -> None:
+def test_mail_points_scale_for_five_column_viewport() -> None:
     worker = ProfileWorker.__new__(ProfileWorker)
     worker.session = _TapSession()
 
-    for point in (
-        COMBAT_TAB_REFERENCE_POINT,
-        READ_ALL_MAIL_REFERENCE_POINT,
-        CLOSE_MAIL_REFERENCE_POINT,
-    ):
-        worker._tap_monitor_reference_point(
-            point,
-            MAILBOX_REFERENCE_SIZE,
-            (384, 216),
-        )
+    for point in (COMBAT_TAB_POINT, READ_ALL_MAIL_POINT, CLOSE_MAIL_POINT):
+        worker._tap_monitor_viewport_point(point, (384, 216))
 
     assert worker.session.taps == [
         ((27, 77, 2, 2), (384, 216)),
         ((76, 195, 2, 2), (384, 216)),
         ((358, 22, 2, 2), (384, 216)),
     ]
+
+
+def test_monitor_points_use_a_sixteen_by_nine_reference_but_scale_each_axis() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker.session = _TapSession()
+
+    # 21:9 is intentionally scaled by its live canvas dimensions. This keeps
+    # the X/Y percentage stable even when a user has not used the 16:9 default.
+    worker._tap_monitor_viewport_point(COMBAT_TAB_POINT, (840, 360))
+
+    assert MONITOR_REFERENCE_ASPECT_RATIO == 16 / 9
+    assert worker.session.taps == [((61, 130, 2, 2), (840, 360))]
 
 
 def test_mail_close_is_matched_only_in_its_scoped_region() -> None:
