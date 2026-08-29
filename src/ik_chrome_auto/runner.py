@@ -11,7 +11,7 @@ from typing import Any
 
 from ik_chrome_auto.actions import ActionCancelled, AutomationFunctions
 from ik_chrome_auto.browser import ChromeProfileSession
-from ik_chrome_auto.event_log import JsonLineLog
+from ik_chrome_auto.event_log import JsonLineLog, migrate_legacy_profile_log, profile_log_path
 from ik_chrome_auto.farm_vision import DetectedGameState, FarmTemplateId, TeamRosterRow
 from ik_chrome_auto.farm_workflow import FarmGameState, FarmStep, FarmWorkflow
 from ik_chrome_auto.image_utils import decode_png
@@ -163,13 +163,14 @@ class ProfileWorker:
         self.on_update = on_update
         self.on_input = on_input
         self.on_coordinate = on_coordinate
-        self.coordinate_log = JsonLineLog(
-            config.data_dir / "logs" / f"coordinates-{profile.id}.jsonl"
-        )
+        logs_dir = config.data_dir / "logs"
+        self.coordinate_log = JsonLineLog(logs_dir / f"coordinates-{profile.id}.jsonl")
         # Farm diagnostics stay separate from general dashboard events so a
         # failed template can be investigated without sifting through UI logs.
+        farm_log_path = profile_log_path(logs_dir, "farm", profile.name, profile.id)
+        migrate_legacy_profile_log(logs_dir / f"farm-{profile.id}.jsonl", farm_log_path)
         self.farm_log = JsonLineLog(
-            config.data_dir / "logs" / f"farm-{profile.id}.jsonl",
+            farm_log_path,
             max_bytes=2_000_000,
             backups=2,
         )

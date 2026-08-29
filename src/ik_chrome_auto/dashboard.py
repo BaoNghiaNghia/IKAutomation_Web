@@ -16,6 +16,7 @@ from PySide6.QtGui import QAction, QCloseEvent, QColor, QCursor, QGuiApplication
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
 from qfluentwidgets import CardWidget, CheckBox, ComboBox, FluentIcon as FIF, LineEdit, PasswordLineEdit, PrimaryPushButton, PrimaryToolButton, PushButton, StrongBodyLabel, SubtitleLabel, ToolButton
 
+from ik_chrome_auto.build_info import release_build_label
 from ik_chrome_auto.config import ensure_data_dirs, load_config, save_config, unique_profile_id
 from ik_chrome_auto.credential_store import escape_account_export_field, parse_account_export_line
 from ik_chrome_auto.farm_launch_policy import FarmLaunchPolicy
@@ -205,7 +206,14 @@ class Dashboard(QWidget):
         self._apply_responsive_geometry(active_screen)
         root = QVBoxLayout(self); root.setContentsMargins(*self._responsive_margins); root.setSpacing(self._responsive_spacing)
         self._root_layout = root
-        head = QHBoxLayout(); title = SubtitleLabel("IK Auto"); self._dashboard_title = title; title.setStyleSheet(f"font-size:{self._responsive_title_font_pt}pt;font-weight:700;"); head.addWidget(title); head.addWidget(QLabel("Browser control")); head.addStretch(); self.telegram_status = QLabel("●"); self.telegram_status.setFixedWidth(_ui_px(12)); self.telegram_status.setAlignment(Qt.AlignmentFlag.AlignCenter); head.addWidget(self.telegram_status); telegram_config = PushButton("Telegram"); telegram_config.setToolTip("Cấu hình Bot Token và Chat ID Telegram"); telegram_config.clicked.connect(self._configure_telegram); head.addWidget(telegram_config); secure = QLabel("●  Local & secure"); self._secure_badge = secure; secure.setStyleSheet(f"background:#d9f7e8;color:#087443;border-radius:{_ui_px(12)}px;padding:{_ui_px(5)}px {_ui_px(10)}px;font-weight:600;"); head.addWidget(secure); root.addLayout(head)
+        head = QHBoxLayout(); title = SubtitleLabel("IK Auto"); self._dashboard_title = title; title.setStyleSheet(f"font-size:{self._responsive_title_font_pt}pt;font-weight:700;"); head.addWidget(title); head.addWidget(QLabel("Browser control")); head.addStretch(); self.telegram_status = QLabel("●"); self.telegram_status.setFixedWidth(_ui_px(12)); self.telegram_status.setAlignment(Qt.AlignmentFlag.AlignCenter); head.addWidget(self.telegram_status); telegram_config = PushButton("Telegram"); telegram_config.setToolTip("Cấu hình Bot Token và Chat ID Telegram"); telegram_config.clicked.connect(self._configure_telegram); head.addWidget(telegram_config)
+        build_label = release_build_label()
+        if build_label:
+            build_time = QLabel(build_label)
+            build_time.setToolTip("Thời điểm tạo bản build này")
+            build_time.setStyleSheet(f"color:#62758e;font-size:{self._responsive_caption_font_pt}pt;padding:0 {_ui_px(3)}px;")
+            head.addWidget(build_time)
+        secure = QLabel("●  Local & secure"); self._secure_badge = secure; secure.setStyleSheet(f"background:#d9f7e8;color:#087443;border-radius:{_ui_px(12)}px;padding:{_ui_px(5)}px {_ui_px(10)}px;font-weight:600;"); head.addWidget(secure); root.addLayout(head)
         body = QHBoxLayout(); root.addLayout(body, 1)
         left = QWidget(); self._left_sidebar = left; left.setMinimumWidth(self._responsive_sidebar_min); left.setMaximumWidth(self._responsive_sidebar_max); ll = QVBoxLayout(left); self._left_layout = ll; ll.setContentsMargins(0,0,0,0); ll.setSpacing(self._responsive_spacing); body.addWidget(left)
         overview = self._card(); overview.setMaximumHeight(_ui_px(108)); ol = QGridLayout(overview); ol.setContentsMargins(_ui_px(12),_ui_px(10),_ui_px(12),_ui_px(10)); ol.setHorizontalSpacing(_ui_px(12)); ol.setVerticalSpacing(_ui_px(6))

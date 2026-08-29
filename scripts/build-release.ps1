@@ -151,6 +151,14 @@ try {
 
     Copy-DevProfilesToRelease -Destination $applicationDir
 
+    $buildInfoPath = Join-Path $applicationDir 'build-info.json'
+    $buildInfo = @{ built_at = (Get-Date -Format 'dd/MM/yyyy HH:mm') } | ConvertTo-Json -Compress
+    [System.IO.File]::WriteAllText(
+        $buildInfoPath,
+        $buildInfo,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+
     # Farm matching uses still images only. OpenCV's bundled FFmpeg bridge is
     # only required for VideoCapture/VideoWriter and otherwise costs ~30 MB.
     $opencvDirectory = Join-Path $applicationDir '_internal\cv2'
@@ -165,6 +173,7 @@ try {
     Set-Content -LiteralPath (Join-Path $applicationDir 'BUILD-SIZE.txt') -Value @(
         'IK Auto compact Windows release',
         $sizeText,
+        "Built at: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))",
         'Excluded: unused Qt multimedia/PDF/QML/WebEngine modules and OpenCV FFmpeg video codec.',
         'Includes config.json and Chrome profile state copied from the development build.',
         'Regenerable Chrome caches and debug logs are excluded from the copied profiles.'
