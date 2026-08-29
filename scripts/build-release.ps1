@@ -258,7 +258,10 @@ try {
     Sync-DevProfilesToRelease -Destination $applicationDir
 
     $buildInfoPath = Join-Path $applicationDir 'build-info.json'
-    $buildInfo = @{ built_at = (Get-Date -Format 'dd/MM/yyyy HH:mm') } | ConvertTo-Json -Compress
+    $buildInfo = @{
+        built_at = (Get-Date -Format 'dd/MM/yyyy HH:mm')
+        diagnostic_screenshots_dir = (Join-Path $projectRoot 'data\screenshots')
+    } | ConvertTo-Json -Compress
     [System.IO.File]::WriteAllText(
         $buildInfoPath,
         $buildInfo,

@@ -534,4 +534,4 @@ def test_profile_launch_sends_an_open_command_even_when_memory_is_constrained(mo
 
     assert dashboard.runner.commands == [("account-1", CommandKind.OPEN)]
     assert dashboard._farm_batch_limit == 1
-    assert dashboard.farm_launcher.text == "Đang mở chậm do tải cao…"
+    assert dashboard.farm_launcher.text == "Đang mở chậm"

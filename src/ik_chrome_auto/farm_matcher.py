@@ -57,7 +57,15 @@ class TemplateSpec:
 
 
 SPECS: dict[FarmTemplateId, TemplateSpec] = {
-    FarmTemplateId.WORLD_MAP_ANCHOR: TemplateSpec("world_map_anchor.png", region="lower_left"),
+    FarmTemplateId.WORLD_MAP_ANCHOR: TemplateSpec(
+        "world_map_anchor.png",
+        # The green World Map skin in the latest captured profile scores
+        # 0.72 against this anchor, while the City screenshot is below 0.45.
+        # 0.70 therefore admits the verified map state without allowing the
+        # City control to be confused for a World Map transition.
+        threshold=0.70,
+        region="lower_left",
+    ),
     # In City, the bottom-left parchment/compass control opens World Map.
     FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON: TemplateSpec(
         "browser_map_to_city_tight.png",

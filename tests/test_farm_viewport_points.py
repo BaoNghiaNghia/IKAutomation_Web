@@ -4,6 +4,7 @@ from ik_chrome_auto.runner import (
     AUTOMATION_RENDERER_WINDOW_SIZE,
     FARM_MINIMUM_CANVAS_SIZE,
     FARM_MAX_RECOVERY_ATTEMPTS,
+    FARM_RENDERER_IDLE_RELEASE_SECONDS,
     FARM_REFERENCE_ASPECT_RATIO,
     FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS,
     ProfileWorker,
@@ -41,6 +42,11 @@ def test_farm_rejects_tiny_renderer_captures_before_team_or_resource_input() -> 
 def test_farm_allows_a_slow_world_map_portal_transition() -> None:
     """A blank loading canvas is normal and must not fail after eight seconds."""
     assert FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS >= 30.0
+
+
+def test_farm_yields_the_high_resolution_renderer_between_settling_steps() -> None:
+    """One stuck profile must not starve the remaining selected profiles."""
+    assert FARM_RENDERER_IDLE_RELEASE_SECONDS < 1.0
 
 
 def test_farm_retries_transient_failures_before_stopping(monkeypatch) -> None:

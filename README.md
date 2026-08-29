@@ -99,6 +99,12 @@ nhất/profile; log Auto Farm tự xoay vòng ở 2 MB với 2 bản sao lưu. K
 trợ, gửi file log cùng ảnh debug mới nhất; không gửi thư mục profile Chrome hay
 file credential.
 
+Khi chạy **bản build** được tạo từ source này, mỗi ảnh lỗi còn được sao chép
+thêm vào `D:\Bot_Tool_Auto_Game\IKAutomation_Web\data\screenshots\<profile-id>\farm-debug`
+để kiểm tra nhanh lỗi theo từng thiết bị. Nếu thư mục source đã bị di chuyển
+hoặc không có quyền ghi, bản release vẫn lưu ảnh tại thư mục `data\screenshots`
+của chính nó và Auto Farm không bị dừng.
+
 ## Build ứng dụng Windows
 
 Sau khi chạy `IKAutomation_dev.cmd` một lần, double-click [`build.cmd`](build.cmd). Script sẽ

@@ -11,6 +11,7 @@ from typing import Any
 
 from ik_chrome_auto.actions import ActionCancelled, AutomationFunctions
 from ik_chrome_auto.browser import ChromeProfileSession
+from ik_chrome_auto.build_info import release_diagnostic_screenshot_directory
 from ik_chrome_auto.event_log import JsonLineLog, migrate_legacy_profile_log, profile_log_path
 from ik_chrome_auto.farm_vision import DetectedGameState, FarmTemplateId, TeamRosterRow
 from ik_chrome_auto.farm_workflow import FarmGameState, FarmStep, FarmWorkflow
@@ -86,7 +87,11 @@ FARM_MINIMUM_CANVAS_SIZE = AUTOMATION_RENDERER_SIZE
 # short internal workflow steps and is released for long waits; monitoring
 # holds the same lease only for its bounded mailbox flow.
 AUTOMATION_RENDERER_WAIT_SECONDS = 30.0
-FARM_RENDERER_IDLE_RELEASE_SECONDS = 4.0
+# A Farm state that takes a second or more to settle (map loading, an unknown
+# frame, a search result) must yield the one true 1280×720 renderer.  Keeping
+# the old four-second lease made the first profile monopolise it indefinitely
+# while another profile was waiting for its initial scan.
+FARM_RENDERER_IDLE_RELEASE_SECONDS = 0.9
 # World Map can show a blank, fading canvas for well over eight seconds while
 # the portal loads.  The transition has already been clicked exactly once, so
 # wait for an explicit map control instead of aborting mid-load.
@@ -2331,8 +2336,32 @@ class ProfileWorker:
         if not png:
             return None
         folder = self.config.data_dir / "screenshots" / self.profile.id / "farm-debug"
-        path = folder / f"{reason}-{time.strftime('%Y%m%d-%H%M%S')}.png"
-        return write_retained_png(path, upscale_png_for_diagnostics(png), keep=10)
+        filename = f"{reason}-{time.strftime('%Y%m%d-%H%M%S')}.png"
+        capture = upscale_png_for_diagnostics(png)
+        path = write_retained_png(folder / filename, capture, keep=10)
+
+        mirror_root = release_diagnostic_screenshot_directory(self.config.root)
+        if mirror_root is not None and mirror_root != self.config.data_dir / "screenshots":
+            try:
+                mirror_path = write_retained_png(
+                    mirror_root / self.profile.id / "farm-debug" / filename,
+                    capture,
+                    keep=10,
+                )
+                self._log_farm(
+                    "debug_screenshot_mirrored",
+                    {"reason": reason, "path": str(mirror_path)},
+                )
+            except OSError as error:
+                # A moved release may no longer have access to its build
+                # source.  The regular runtime capture above must still be
+                # available and Farm must not fail merely because mirroring
+                # is unavailable.
+                self._log_farm(
+                    "debug_screenshot_mirror_error",
+                    {"reason": reason, "path": str(mirror_root), "error": str(error)},
+                )
+        return path
 
     def _close_session(self) -> None:
         self._farm = None

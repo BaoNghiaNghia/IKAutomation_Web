@@ -212,7 +212,10 @@ class Dashboard(QWidget):
         if build_label:
             build_time = QLabel(build_label)
             build_time.setToolTip("Thời điểm tạo bản build này")
-            build_time.setStyleSheet(f"color:#62758e;font-size:{self._responsive_caption_font_pt}pt;padding:0 {_ui_px(3)}px;")
+            build_time.setStyleSheet(
+                f"color:#62758e;font-size:{max(_ui_pt(11.0), self._responsive_value_font_pt)}pt;"
+                f"font-weight:600;padding:0 {_ui_px(3)}px;"
+            )
             head.addWidget(build_time)
         secure = QLabel("●  Local & secure"); self._secure_badge = secure; secure.setStyleSheet(f"background:#d9f7e8;color:#087443;border-radius:{_ui_px(12)}px;padding:{_ui_px(5)}px {_ui_px(10)}px;font-weight:600;"); head.addWidget(secure); root.addLayout(head)
         body = QHBoxLayout(); root.addLayout(body, 1)
@@ -1220,7 +1223,7 @@ class Dashboard(QWidget):
             # progress while avoiding the Chrome/WebGL startup burst.
             if self._farm_batch_submitted == 0:
                 self._farm_batch_limit = 1
-            self.farm_launcher.setText("Đang mở chậm do tải cao…")
+            self.farm_launcher.setText("Đang mở chậm")
         if self._farm_resource_pause_started:
             if not reason:
                 self._append_log(f"Tài nguyên đã ổn định; tiếp tục mở tab (trước đó: {self._farm_resource_pause_reason})")
