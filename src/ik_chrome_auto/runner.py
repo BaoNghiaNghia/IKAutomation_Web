@@ -91,6 +91,8 @@ FARM_RENDERER_IDLE_RELEASE_SECONDS = 4.0
 # the portal loads.  The transition has already been clicked exactly once, so
 # wait for an explicit map control instead of aborting mid-load.
 FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS = 35.0
+FARM_MAX_RECOVERY_ATTEMPTS = 3
+FARM_RECOVERY_BASE_DELAY_SECONDS = 3.0
 FARM_RESOURCE_BUTTON_CENTERS: dict[str, tuple[float, float]] = {
     "food": (0.286, 0.735),
     "wood": (0.406, 0.735),
@@ -223,6 +225,7 @@ class ProfileWorker:
         self._farm_area_selector = ResourceAreaPointSelector()
         self._farm_area_epoch = 0
         self._farm_run_id = ""
+        self._farm_recovery_attempts = 0
         self._mail_monitor: BrowserMailMonitor | None = None
 
     def submit(self, command: WorkerCommand) -> None:
@@ -535,6 +538,7 @@ class ProfileWorker:
                     self._farm_area_selector = ResourceAreaPointSelector()
                     self._farm_area_epoch = 0
                     self._farm_run_id = f"{self.profile.id}-{time.monotonic_ns()}"
+                    self._farm_recovery_attempts = 0
                     self._log_farm("started", {"resource_order": self._farm.resource_order})
                     self._publish(
                         WorkerState.RUNNING,
@@ -921,11 +925,10 @@ class ProfileWorker:
                         },
                     )
                     if matched_toast == "other_region":
-                        self._farm = None
-                        self._publish(
-                            WorkerState.ERROR,
-                            "Auto Farm dừng an toàn: toast yêu cầu tìm ở khu vực khác",
-                            f"Ảnh toast: {screenshot}" if screenshot else "",
+                        self._retry_farm_or_stop(
+                            "search_other_region",
+                            "toast yêu cầu tìm ở khu vực khác",
+                            screenshot,
                         )
                         return
                     if self._handle_search_no_result(
@@ -1050,15 +1053,11 @@ class ProfileWorker:
                         self._publish(WorkerState.RUNNING, "Auto Farm: đã bấm Thu thập, đang xác minh đoàn quân xuất phát")
                     return
                 screenshot = self._save_farm_debug_capture("dispatch-unverified")
-                self._log_farm(
-                    "error",
-                    {"reason": "dispatch_unverified", "team": self._farm.team, "screenshot": str(screenshot) if screenshot else None},
-                )
-                self._farm = None
-                self._publish(
-                    WorkerState.ERROR,
-                    "Auto Farm dừng: không xác minh được đoàn quân xuất phát sau khi bấm Thu thập",
-                    f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                self._retry_farm_or_stop(
+                    "dispatch_unverified",
+                    "không xác minh được đoàn quân xuất phát sau khi bấm Thu thập",
+                    screenshot,
+                    team=self._farm.team,
                 )
                 return
             # The website fades the normal HUD while World Map is loading.
@@ -1173,20 +1172,12 @@ class ProfileWorker:
                 and elapsed_after_click > FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS
             ):
                 screenshot = self._save_farm_debug_capture("world-map-unverified")
-                self._log_farm(
-                    "error",
-                    {
-                        "reason": "world_map_unverified_after_single_click",
-                        "elapsed_seconds": round(elapsed_after_click, 2),
-                        "timeout_seconds": FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS,
-                        "screenshot": str(screenshot) if screenshot else None,
-                    },
-                )
-                self._farm = None
-                self._publish(
-                    WorkerState.ERROR,
-                    "Auto Farm dừng an toàn: World Map chưa được xác minh sau một lần mở",
-                    f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                self._retry_farm_or_stop(
+                    "world_map_unverified_after_single_click",
+                    "World Map chưa được xác minh sau khi tải",
+                    screenshot,
+                    elapsed_seconds=round(elapsed_after_click, 2),
+                    timeout_seconds=FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS,
                 )
                 return
             if (
@@ -1274,15 +1265,10 @@ class ProfileWorker:
                         self._publish(WorkerState.RUNNING, "Auto Farm: đang thử quay về City lần 2")
                         return
                     screenshot = self._save_farm_debug_capture("city-unverified")
-                    self._log_farm(
-                        "error",
-                        {"reason": "city_unverified_before_cycle", "screenshot": str(screenshot) if screenshot else None},
-                    )
-                    self._farm = None
-                    self._publish(
-                        WorkerState.ERROR,
-                        "Auto Farm dừng an toàn: chưa xác minh được City trước cycle mới",
-                        f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                    self._retry_farm_or_stop(
+                        "city_unverified_before_cycle",
+                        "chưa xác minh được City trước cycle mới",
+                        screenshot,
                     )
                     return
             if decision.step == FarmStep.RETURN_TO_CITY and state == FarmGameState.WORLD_MAP:
@@ -1328,15 +1314,10 @@ class ProfileWorker:
             ):
                 if self._farm_search_clicks >= 2:
                     screenshot = self._save_farm_debug_capture("resource-search-unverified")
-                    self._log_farm(
-                        "error",
-                        {"reason": "resource_search_unverified", "screenshot": str(screenshot) if screenshot else None},
-                    )
-                    self._farm = None
-                    self._publish(
-                        WorkerState.ERROR,
-                        "Auto Farm dừng: panel tìm tài nguyên chưa được xác minh sau 2 lần thử",
-                        f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                    self._retry_farm_or_stop(
+                        "resource_search_unverified",
+                        "panel tìm tài nguyên chưa được xác minh sau 2 lần thử",
+                        screenshot,
                     )
                     return
                 fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
@@ -1406,15 +1387,10 @@ class ProfileWorker:
             ):
                 if self._farm_gather_clicks >= 2:
                     screenshot = self._save_farm_debug_capture("gather-unverified")
-                    self._log_farm(
-                        "error",
-                        {"reason": "gather_unverified", "screenshot": str(screenshot) if screenshot else None},
-                    )
-                    self._farm = None
-                    self._publish(
-                        WorkerState.ERROR,
-                        "Auto Farm dừng: không xác minh được panel chọn đội sau 2 lần Thu thập",
-                        f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                    self._retry_farm_or_stop(
+                        "gather_unverified",
+                        "không xác minh được panel chọn đội sau 2 lần Thu thập",
+                        screenshot,
                     )
                     return
                 fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
@@ -1452,19 +1428,11 @@ class ProfileWorker:
                     return
                 if self._farm_team_selection_clicks >= 2:
                     screenshot = self._save_farm_debug_capture("team-selection-unverified")
-                    self._log_farm(
-                        "error",
-                        {
-                            "reason": "team_selection_unverified",
-                            "team": decision.team,
-                            "screenshot": str(screenshot) if screenshot else None,
-                        },
-                    )
-                    self._farm = None
-                    self._publish(
-                        WorkerState.ERROR,
-                        f"Auto Farm dừng: không xác minh được đội {decision.team} sau 2 lần chọn",
-                        f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                    self._retry_farm_or_stop(
+                        "team_selection_unverified",
+                        f"không xác minh được đội {decision.team} sau 2 lần chọn",
+                        screenshot,
+                        team=decision.team,
                     )
                     return
                 fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
@@ -1607,21 +1575,13 @@ class ProfileWorker:
                     if not active_verified:
                         if elapsed >= 5.0:
                             screenshot = self._save_farm_debug_capture("resource-active-unverified")
-                            self._log_farm(
-                                "error",
-                                {
-                                    "reason": "resource_active_unverified",
-                                    "resource": target_resource,
-                                    "level": decision.level,
-                                    "active": self._evidence_payload(target_resource_active),
-                                    "screenshot": str(screenshot) if screenshot else None,
-                                },
-                            )
-                            self._farm = None
-                            self._publish(
-                                WorkerState.ERROR,
-                                f"Auto Farm dừng: chưa xác minh {target_resource} đang được chọn",
-                                f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                            self._retry_farm_or_stop(
+                                "resource_active_unverified",
+                                f"chưa xác minh {target_resource} đang được chọn",
+                                screenshot,
+                                resource=target_resource,
+                                level=decision.level,
+                                active=self._evidence_payload(target_resource_active),
                             )
                             return
                         self._farm_next_at = time.monotonic() + 0.45
@@ -1650,18 +1610,10 @@ class ProfileWorker:
                                 return
                             if checkbox_elapsed >= 4.0:
                                 screenshot = self._save_farm_debug_capture("search-target-checkbox-unverified")
-                                self._log_farm(
-                                    "error",
-                                    {
-                                        "reason": "search_target_checkbox_unverified",
-                                        "screenshot": str(screenshot) if screenshot else None,
-                                    },
-                                )
-                                self._farm = None
-                                self._publish(
-                                    WorkerState.ERROR,
-                                    "Auto Farm dừng: chưa xác minh được checkbox lọc mục tiêu trước Tìm kiếm",
-                                    f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                                self._retry_farm_or_stop(
+                                    "search_target_checkbox_unverified",
+                                    "chưa xác minh được checkbox lọc mục tiêu trước Tìm kiếm",
+                                    screenshot,
                                 )
                                 return
                             self._farm_next_at = time.monotonic() + 0.5
@@ -1700,9 +1652,11 @@ class ProfileWorker:
                     if elapsed >= 0.8 and find_resource.actionable:
                         if self._farm_find_resource_clicks >= 2:
                             screenshot = self._save_farm_debug_capture("find-resource-unverified")
-                            self._log_farm("error", {"reason": "find_resource_unverified", "screenshot": str(screenshot) if screenshot else None})
-                            self._farm = None
-                            self._publish(WorkerState.ERROR, "Auto Farm dừng: không xác minh được tài nguyên sau khi tìm 2 lần", f"Ảnh trước khi dừng: {screenshot}" if screenshot else "")
+                            self._retry_farm_or_stop(
+                                "find_resource_unverified",
+                                "không xác minh được tài nguyên sau khi tìm 2 lần",
+                                screenshot,
+                            )
                             return
                         fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                         fresh_find_resource = fresh.evidence_for(FarmTemplateId.BROWSER_SEARCH_BUTTON_ENABLED)
@@ -1716,12 +1670,11 @@ class ProfileWorker:
                             return
                     if elapsed >= 5.0:
                         screenshot = self._save_farm_debug_capture("resource-unverified")
-                        self._log_farm("error", {"reason": "resource_unverified", "resource": decision.resource, "screenshot": str(screenshot) if screenshot else None})
-                        self._farm = None
-                        self._publish(
-                            WorkerState.ERROR,
-                            f"Auto Farm dừng: lựa chọn {decision.resource} chưa được xác minh",
-                            f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                        self._retry_farm_or_stop(
+                            "resource_unverified",
+                            f"lựa chọn {decision.resource} chưa được xác minh",
+                            screenshot,
+                            resource=decision.resource,
                         )
                         return
                     self._farm_next_at = time.monotonic() + 0.8
@@ -1752,12 +1705,10 @@ class ProfileWorker:
                         return
                     if elapsed >= 5.0:
                         screenshot = self._save_farm_debug_capture("resource-tab-unverified")
-                        self._log_farm("error", {"reason": "resource_tab_unverified", "screenshot": str(screenshot) if screenshot else None})
-                        self._farm = None
-                        self._publish(
-                            WorkerState.ERROR,
-                            "Auto Farm dừng: tab Tài nguyên chưa được xác minh",
-                            f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+                        self._retry_farm_or_stop(
+                            "resource_tab_unverified",
+                            "tab Tài nguyên chưa được xác minh",
+                            screenshot,
                         )
                         return
                     self._farm_next_at = time.monotonic() + 0.8
@@ -1833,26 +1784,67 @@ class ProfileWorker:
                     )
                     return
             screenshot = self._save_farm_debug_capture("error")
-            self._log_farm(
-                "error",
-                {"type": type(error).__name__, "message": str(error), "screenshot": str(screenshot) if screenshot else None},
+            self._retry_farm_or_stop(
+                "runtime_error",
+                str(error),
+                screenshot,
+                error_type=type(error).__name__,
             )
-            self._farm = None
-            self._publish(WorkerState.ERROR, f"Auto Farm đã dừng an toàn: {error}")
         except Exception as error:
             screenshot = self._save_farm_debug_capture("error")
-            self._log_farm(
-                "error",
-                {"type": type(error).__name__, "message": str(error), "screenshot": str(screenshot) if screenshot else None},
+            self._retry_farm_or_stop(
+                "unexpected_error",
+                str(error),
+                screenshot,
+                error_type=type(error).__name__,
             )
-            self._farm = None
-            self._publish(WorkerState.ERROR, f"Auto Farm đã dừng an toàn: {error}")
         finally:
             self._release_farm_renderer_when_idle()
 
-    def _reset_farm_cycle(self) -> None:
+    def _retry_farm_or_stop(
+        self,
+        reason: str,
+        message: str,
+        screenshot: Path | None = None,
+        **details: object,
+    ) -> bool:
+        """Restart a transient Farm cycle before eventually failing safely."""
+        self._farm_recovery_attempts += 1
+        attempt = self._farm_recovery_attempts
+        payload = {
+            "reason": reason,
+            "attempt": attempt,
+            "max_attempts": FARM_MAX_RECOVERY_ATTEMPTS,
+            "screenshot": str(screenshot) if screenshot else None,
+            **details,
+        }
+        if attempt <= FARM_MAX_RECOVERY_ATTEMPTS:
+            delay_seconds = FARM_RECOVERY_BASE_DELAY_SECONDS * attempt
+            self._log_farm("retry", {**payload, "delay_seconds": delay_seconds})
+            self._reset_farm_cycle(preserve_recovery_attempts=True)
+            self._farm_next_at = time.monotonic() + delay_seconds
+            self._publish(
+                WorkerState.RUNNING,
+                f"Auto Farm: {message}; đang thử lại ({attempt}/{FARM_MAX_RECOVERY_ATTEMPTS})",
+                f"Thử lại sau {delay_seconds:.0f}s"
+                + (f" | Ảnh debug: {screenshot}" if screenshot else ""),
+            )
+            return True
+
+        self._log_farm("error", {**payload, "retries_exhausted": True})
+        self._farm = None
+        self._publish(
+            WorkerState.ERROR,
+            f"Auto Farm dừng sau {FARM_MAX_RECOVERY_ATTEMPTS} lần thử lại: {message}",
+            f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+        )
+        return False
+
+    def _reset_farm_cycle(self, *, preserve_recovery_attempts: bool = False) -> None:
         """Create a clean farm cycle without stopping the active worker."""
         self._farm = FarmWorkflow()
+        if not preserve_recovery_attempts:
+            self._farm_recovery_attempts = 0
         self._farm_city_clicks = 0
         self._farm_return_city_click_at = 0.0
         self._farm_return_city_clicks = 0

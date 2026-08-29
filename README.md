@@ -110,8 +110,10 @@ lượng. Bản build đã loại Qt multimedia, PDF, QML/WebEngine không dùng
 video OpenCV; các thành phần bắt buộc như Chrome CDP/Playwright, OpenCV nhận
 diện ảnh và giao diện Qt vẫn được giữ nguyên.
 
-Build giữ PyInstaller cache tại `.build-cache` nên những lần build sau nhanh
-hơn. Khi cần tạo lại hoàn toàn, chạy `build.cmd -CleanCache`.
+Build giữ PyInstaller cache và snapshot profile tại `.build-cache`: lần build
+sau giữ nguyên `release\IK Auto\data`, chỉ thay file ứng dụng và chỉ đồng bộ
+lại profile khi `config.json` hoặc dữ liệu profile bản dev thực sự thay đổi.
+Khi cần tạo lại hoàn toàn, chạy `build.cmd -CleanCache`.
 
 Build là một ảnh chụp profile ở thời điểm build. Password không nằm trong
 `config.json`: chúng ở Windows Credential Manager và chỉ dùng được với cùng tài

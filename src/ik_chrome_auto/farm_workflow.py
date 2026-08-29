@@ -94,9 +94,14 @@ class FarmWorkflow:
         dispatch_verified: bool = False,
     ) -> FarmDecision:
         if state == FarmGameState.UNKNOWN:
-            self.step = FarmStep.PREFLIGHT
-            self.waiting_for_ready_team = False
-            return FarmDecision(self.step, "Chưa nhận diện được game; không thao tác")
+            # A browser canvas may produce one low-confidence frame while a
+            # HUD animation settles. Do not discard a verified workflow
+            # stage: resetting to PREFLIGHT here makes a running Farm try to
+            # return to City forever after a transient missed template.
+            return FarmDecision(
+                self.step,
+                "Chưa nhận diện được game; giữ tiến trình và chờ frame kế tiếp",
+            )
         if state in {FarmGameState.STORAGE_LIMIT, FarmGameState.RESOURCE_EXPIRY}:
             self.step = FarmStep.WAITING
             self.waiting_for_ready_team = False

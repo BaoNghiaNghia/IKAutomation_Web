@@ -9,6 +9,18 @@ def test_unknown_state_never_allows_input() -> None:
     assert decision.input_allowed is False
 
 
+def test_temporary_unknown_frame_keeps_the_verified_farm_stage() -> None:
+    farm = FarmWorkflow()
+    farm.decide(FarmGameState.CITY)
+    farm.decide(FarmGameState.WORLD_MAP, ready_teams=(3, 4))
+
+    decision = farm.decide(FarmGameState.UNKNOWN)
+
+    assert decision.step == FarmStep.OPEN_SEARCH
+    assert decision.input_allowed is False
+    assert farm.step == FarmStep.OPEN_SEARCH
+
+
 def test_new_cycle_entering_on_world_map_must_verify_city_first() -> None:
     farm = FarmWorkflow()
 

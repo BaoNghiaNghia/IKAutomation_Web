@@ -3,10 +3,12 @@ from ik_chrome_auto.runner import (
     AUTOMATION_RENDERER_SIZE,
     AUTOMATION_RENDERER_WINDOW_SIZE,
     FARM_MINIMUM_CANVAS_SIZE,
+    FARM_MAX_RECOVERY_ATTEMPTS,
     FARM_REFERENCE_ASPECT_RATIO,
     FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS,
     ProfileWorker,
 )
+from ik_chrome_auto.models import WorkerState
 
 
 def test_farm_layout_fallbacks_use_relative_canvas_positions_at_16_by_9() -> None:
@@ -39,6 +41,31 @@ def test_farm_rejects_tiny_renderer_captures_before_team_or_resource_input() -> 
 def test_farm_allows_a_slow_world_map_portal_transition() -> None:
     """A blank loading canvas is normal and must not fail after eight seconds."""
     assert FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS >= 30.0
+
+
+def test_farm_retries_transient_failures_before_stopping(monkeypatch) -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker._farm_recovery_attempts = 0
+    worker._farm = object()
+    worker._farm_next_at = 0.0
+    logs = []
+    updates = []
+    worker._log_farm = lambda event, payload: logs.append((event, payload))
+    worker._publish = lambda state, message, detail="": updates.append((state, message, detail))
+    worker._reset_farm_cycle = lambda **_kwargs: setattr(worker, "_farm", object())
+    monkeypatch.setattr("ik_chrome_auto.runner.time.monotonic", lambda: 100.0)
+
+    for attempt in range(1, FARM_MAX_RECOVERY_ATTEMPTS + 1):
+        assert worker._retry_farm_or_stop("world_map", "World Map đang tải") is True
+        assert logs[-1][0] == "retry"
+        assert logs[-1][1]["attempt"] == attempt
+        assert updates[-1][0] == WorkerState.RUNNING
+
+    assert worker._retry_farm_or_stop("world_map", "World Map đang tải") is False
+    assert worker._farm is None
+    assert logs[-1][0] == "error"
+    assert logs[-1][1]["retries_exhausted"] is True
+    assert updates[-1][0] == WorkerState.ERROR
 
 
 def test_continent_coordinate_fields_use_canvas_ratio_offsets() -> None:

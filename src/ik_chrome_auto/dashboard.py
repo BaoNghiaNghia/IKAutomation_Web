@@ -110,6 +110,7 @@ def minimize_launch_console() -> None:
 @dataclass(slots=True)
 class ProfileRow:
     status: QLabel
+    roster: QLabel
     resource: QLabel
     badge: QLabel
     card: CardWidget
@@ -425,7 +426,33 @@ class Dashboard(QWidget):
                 profile.id,
             )
         for account_number, profile in enumerate(self.config.profiles, start=1):
-            card=self._card(); self._set_roster_tooltip(card, ()); layout=QVBoxLayout(card); top=QHBoxLayout(); top.addWidget(StrongBodyLabel(self._profile_display_name(profile, account_number))); top.addStretch(); badge=QLabel("Đã dừng"); badge.setStyleSheet(f"background:#f1f5f9;color:#475569;border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;"); top.addWidget(badge); layout.addLayout(top); status=self._muted("Đã dừng"); resource=self._muted("—"); details=QHBoxLayout(); details.addWidget(status,1); details.addWidget(resource); layout.addLayout(details); index=len(self.rows); self.table_layout.addWidget(card, index // 2, index % 2); self.rows[profile.id]=ProfileRow(status,resource,badge,card)
+            card = self._card()
+            self._set_roster_tooltip(card, ())
+            layout = QVBoxLayout(card)
+            top = QHBoxLayout()
+            top.addWidget(StrongBodyLabel(self._profile_display_name(profile, account_number)))
+            top.addStretch()
+            badge = QLabel("Đã dừng")
+            badge.setStyleSheet(f"background:#f1f5f9;color:#475569;border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;")
+            top.addWidget(badge)
+            layout.addLayout(top)
+            status = self._muted("Đã dừng")
+            roster = QLabel()
+            roster.setTextFormat(Qt.TextFormat.RichText)
+            roster.setVisible(False)
+            resource = self._muted("—")
+            details = QHBoxLayout()
+            status_column = QVBoxLayout()
+            status_column.setContentsMargins(0, 0, 0, 0)
+            status_column.setSpacing(_ui_px(1))
+            status_column.addWidget(status)
+            status_column.addWidget(roster)
+            details.addLayout(status_column, 1)
+            details.addWidget(resource)
+            layout.addLayout(details)
+            index = len(self.rows)
+            self.table_layout.addWidget(card, index // 2, index % 2)
+            self.rows[profile.id] = ProfileRow(status, roster, resource, badge, card)
         self.table_layout.setRowStretch((len(self.rows) + 1) // 2, 1)
 
     @staticmethod
@@ -1465,6 +1492,7 @@ class Dashboard(QWidget):
                 if row:
                     row.status.setText(snap.message); text,bg,fg=self._state(snap.state); row.badge.setText(text); row.badge.setStyleSheet(f"background:{bg};color:{fg};border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;"); self._set_profile_card_state(row,snap.state)
                     self._set_roster_tooltip(row.card, snap.farm_roster)
+                    self._set_roster_dots(row.roster, snap.farm_roster)
                     if snap.state in {WorkerState.STOPPED, WorkerState.ERROR} or "Đã dừng Auto Farm" in snap.message:
                         self.farm_profiles.discard(snap.profile_id); self._refresh_sync_control()
                 try:
@@ -1562,6 +1590,19 @@ class Dashboard(QWidget):
         card.setToolTip(tooltip)
         for label in card.findChildren(QLabel):
             label.setToolTip(tooltip)
+
+    @staticmethod
+    def _roster_dot_html(roster: tuple[tuple[int, str], ...]) -> str:
+        colors = {"ready": "#16a34a", "busy": "#f59e0b"}
+        return " ".join(
+            f"<span style='color:{colors.get(state, '#94a3b8')};font-size:15px'>&#9679;</span>"
+            for _team, state in roster
+        )
+
+    @classmethod
+    def _set_roster_dots(cls, label: QLabel, roster: tuple[tuple[int, str], ...]) -> None:
+        label.setText(cls._roster_dot_html(roster))
+        label.setVisible(bool(roster))
     def _warning(self,title:str,message:str)->None: QMessageBox.warning(self,title,message)
     def _error(self,title:str,message:str)->None: QMessageBox.critical(self,title,message)
     def closeEvent(self,event:QCloseEvent)->None:

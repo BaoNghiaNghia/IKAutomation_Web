@@ -7,6 +7,16 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# `build.cmd` normally sets code page 65001, but keep direct PowerShell runs
+# readable too. Both the console and PowerShell pipeline must agree on UTF-8
+# before Vietnamese progress messages are written.
+& "$env:SystemRoot\System32\chcp.com" 65001 > $null
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8NoBom
+[Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
+
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
 $icon = Join-Path $projectRoot 'src\ik_chrome_auto\assets\ik_auto.ico'
@@ -16,6 +26,9 @@ $releaseRoot = Join-Path $projectRoot 'release'
 $buildCacheRoot = Join-Path $projectRoot '.build-cache'
 $pyInstallerWorkRoot = Join-Path $buildCacheRoot 'pyinstaller-work'
 $pyInstallerSpecRoot = Join-Path $buildCacheRoot 'pyinstaller-spec'
+$pyInstallerDistRoot = Join-Path $buildCacheRoot 'pyinstaller-dist'
+$profileSnapshotRoot = Join-Path $buildCacheRoot 'profile-snapshot'
+$profileSnapshotManifest = Join-Path $profileSnapshotRoot 'snapshot.sha256'
 $applicationName = 'IK Auto'
 $devConfig = Join-Path $projectRoot 'config.json'
 $devProfiles = Join-Path $projectRoot 'data\profiles'
@@ -44,36 +57,126 @@ $excludedModules = @(
 if (-not (Test-Path -LiteralPath $python)) { throw 'Missing .venv. Run IKAutomation_dev.cmd once before building.' }
 if (-not (Test-Path -LiteralPath $icon)) { throw "Missing icon: $icon" }
 
-function Copy-DevProfilesToRelease {
-    param([string]$Destination)
+function Invoke-ProfileRobocopy {
+    param(
+        [string]$Source,
+        [string]$Destination,
+        [switch]$Mirror
+    )
 
-    # A release is a portable snapshot of the current development setup. Keep
-    # config and Chrome profile state, but omit regenerable cache/debug files
-    # so 45 profiles do not unnecessarily inflate the build.
-    if (Test-Path -LiteralPath $devConfig) {
-        Copy-Item -LiteralPath $devConfig -Destination (Join-Path $Destination 'config.json') -Force
-    } else {
-        Write-Warning 'Không tìm thấy config.json của bản dev; release sẽ tạo config mẫu ở lần chạy đầu.'
-        return
-    }
-    if (-not (Test-Path -LiteralPath $devProfiles)) {
-        Write-Warning 'Không tìm thấy data\profiles của bản dev; chỉ đã sao chép config profile.'
-        return
-    }
-
-    $releaseProfiles = Join-Path $Destination 'data\profiles'
-    New-Item -ItemType Directory -Path $releaseProfiles -Force | Out-Null
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
     $robocopyArgs = @(
-        $devProfiles, $releaseProfiles, '/E', '/COPY:DAT', '/DCOPY:DAT',
-        '/R:2', '/W:1', '/XJ',
+        $Source, $Destination, $(if ($Mirror) { '/MIR' } else { '/E' }),
+        '/COPY:DAT', '/DCOPY:DAT', '/R:2', '/W:1', '/XJ',
         '/XD', 'Cache', 'Code Cache', 'GPUCache', 'GrShaderCache',
         'DawnCache', 'ShaderCache', 'Crashpad',
         '/XF', '*.log', '*.tmp', 'LOCK', 'LOCKfile'
     )
     & robocopy @robocopyArgs | Out-Host
-    # Robocopy uses 0-7 for successful copies, including skipped cache files.
     if ($LASTEXITCODE -gt 7) {
         throw "Could not copy development profiles (robocopy exit code $LASTEXITCODE). Close Chrome and build again."
+    }
+}
+
+function Get-DevelopmentProfileSignature {
+    $records = [System.Collections.Generic.List[string]]::new()
+    $configItem = Get-Item -LiteralPath $devConfig
+    $files = Get-ChildItem -LiteralPath $devProfiles -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -notin @('LOCK', 'LOCKfile') -and
+            $_.Extension -notin @('.log', '.tmp') -and
+            $_.FullName -notmatch '\\(Cache|Code Cache|GPUCache|GrShaderCache|DawnCache|ShaderCache|Crashpad)\\'
+        } |
+        Sort-Object FullName
+    foreach ($item in @($configItem) + @($files)) {
+        $relativePath = if ($item.FullName -eq $configItem.FullName) {
+            'config.json'
+        } else {
+            $item.FullName.Substring($devProfiles.Length).TrimStart('\\')
+        }
+        $records.Add("$relativePath|$($item.Length)|$($item.LastWriteTimeUtc.Ticks)")
+    }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($records -join "`n"))
+    # SHA256.HashData/Convert.ToHexString are unavailable in Windows
+    # PowerShell 5.1's .NET Framework runtime. Keep the build script portable
+    # by using the long-standing instance API instead.
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace('-', '')
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+function Sync-DevProfilesToRelease {
+    param([string]$Destination)
+
+    if (-not (Test-Path -LiteralPath $devConfig)) {
+        Write-Warning 'Không tìm thấy config.json của bản dev; release sẽ tạo config mẫu ở lần chạy đầu.'
+        return
+    }
+    if (-not (Test-Path -LiteralPath $devProfiles)) {
+        Write-Warning 'Không tìm thấy data\profiles của bản dev; chỉ đã sao chép config profile.'
+        Copy-Item -LiteralPath $devConfig -Destination (Join-Path $Destination 'config.json') -Force
+        return
+    }
+
+    $signature = Get-DevelopmentProfileSignature
+    $cachedConfig = Join-Path $profileSnapshotRoot 'config.json'
+    $cachedProfiles = Join-Path $profileSnapshotRoot 'profiles'
+    $cacheHit = (
+        (Test-Path -LiteralPath $cachedConfig) -and
+        (Test-Path -LiteralPath $cachedProfiles) -and
+        (Test-Path -LiteralPath $profileSnapshotManifest) -and
+        ((Get-Content -LiteralPath $profileSnapshotManifest -Raw).Trim() -eq $signature)
+    )
+    if (-not $cacheHit) {
+        New-Item -ItemType Directory -Path $profileSnapshotRoot -Force | Out-Null
+        Copy-Item -LiteralPath $devConfig -Destination $cachedConfig -Force
+        Invoke-ProfileRobocopy -Source $devProfiles -Destination $cachedProfiles -Mirror
+        [System.IO.File]::WriteAllText($profileSnapshotManifest, $signature, $utf8NoBom)
+        Write-Host 'Profile cache refreshed from development profiles.' -ForegroundColor DarkCyan
+    } else {
+        Write-Host 'Profile cache hit: development profiles are unchanged.' -ForegroundColor DarkCyan
+    }
+
+    $releaseProfiles = Join-Path $Destination 'data\profiles'
+    $releaseMarker = Join-Path $Destination '.ik-auto-profile-snapshot'
+    $releaseMatchesSnapshot = (
+        (Test-Path -LiteralPath (Join-Path $Destination 'config.json')) -and
+        (Test-Path -LiteralPath $releaseProfiles) -and
+        (Test-Path -LiteralPath $releaseMarker) -and
+        ((Get-Content -LiteralPath $releaseMarker -Raw).Trim() -eq $signature)
+    )
+    if ($releaseMatchesSnapshot) {
+        Write-Host 'Release profile cache hit: keeping existing release profiles.' -ForegroundColor DarkCyan
+        return
+    }
+
+    Copy-Item -LiteralPath $cachedConfig -Destination (Join-Path $Destination 'config.json') -Force
+    Invoke-ProfileRobocopy -Source $cachedProfiles -Destination $releaseProfiles
+    [System.IO.File]::WriteAllText($releaseMarker, $signature, $utf8NoBom)
+    Write-Host 'Release profiles synchronized from the cached development snapshot.' -ForegroundColor DarkCyan
+}
+
+function Update-ReleaseApplication {
+    param(
+        [string]$PackageDirectory,
+        [string]$Destination
+    )
+
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    Get-ChildItem -LiteralPath $PackageDirectory -File | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $Destination -Force
+    }
+    $packageInternal = Join-Path $PackageDirectory '_internal'
+    if (-not (Test-Path -LiteralPath $packageInternal)) {
+        throw "Build folder is missing _internal: $PackageDirectory"
+    }
+    $releaseInternal = Join-Path $Destination '_internal'
+    & robocopy $packageInternal $releaseInternal '/MIR' '/COPY:DAT' '/DCOPY:DAT' '/R:2' '/W:1' '/XJ' | Out-Host
+    if ($LASTEXITCODE -gt 7) {
+        throw "Could not update release application files (robocopy exit code $LASTEXITCODE)."
     }
 }
 
@@ -106,7 +209,7 @@ try {
     if ($CleanCache -and (Test-Path -LiteralPath $buildCacheRoot)) {
         Remove-Item -LiteralPath $buildCacheRoot -Recurse -Force
     }
-    New-Item -ItemType Directory -Path $pyInstallerWorkRoot, $pyInstallerSpecRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $pyInstallerWorkRoot, $pyInstallerSpecRoot, $pyInstallerDistRoot -Force | Out-Null
 
     if (-not (Test-PyInstallerAvailable)) {
         Write-Host 'PyInstaller is missing; installing it now...' -ForegroundColor DarkCyan
@@ -123,7 +226,7 @@ try {
         '--name', $applicationName,
         '--icon', $icon,
         '--paths', (Join-Path $projectRoot 'src'),
-        '--distpath', $releaseRoot,
+        '--distpath', $pyInstallerDistRoot,
         '--workpath', $pyInstallerWorkRoot,
         '--specpath', $pyInstallerSpecRoot,
         '--optimize', '2',
@@ -145,11 +248,14 @@ try {
     $pyInstallerArgs += $launcher
     & $python -m PyInstaller @pyInstallerArgs
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed to create the application.' }
+    $packageDirectory = Join-Path $pyInstallerDistRoot $applicationName
+    if (-not (Test-Path -LiteralPath $packageDirectory)) { throw "Build folder not found: $packageDirectory" }
     $applicationDir = Join-Path $releaseRoot $applicationName
+    Update-ReleaseApplication -PackageDirectory $packageDirectory -Destination $applicationDir
     $applicationExe = Join-Path $applicationDir "$applicationName.exe"
     if (-not (Test-Path -LiteralPath $applicationExe)) { throw "Build file not found: $applicationExe" }
 
-    Copy-DevProfilesToRelease -Destination $applicationDir
+    Sync-DevProfilesToRelease -Destination $applicationDir
 
     $buildInfoPath = Join-Path $applicationDir 'build-info.json'
     $buildInfo = @{ built_at = (Get-Date -Format 'dd/MM/yyyy HH:mm') } | ConvertTo-Json -Compress
@@ -175,7 +281,7 @@ try {
         $sizeText,
         "Built at: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))",
         'Excluded: unused Qt multimedia/PDF/QML/WebEngine modules and OpenCV FFmpeg video codec.',
-        'Includes config.json and Chrome profile state copied from the development build.',
+        'Keeps the release profile snapshot and synchronizes it from development only when changed.',
         'Regenerable Chrome caches and debug logs are excluded from the copied profiles.'
     ) -Encoding utf8
 
@@ -202,7 +308,7 @@ try {
         $shortcut.Save()
     }
     Write-Host "Build complete: $applicationExe ($sizeText)" -ForegroundColor Green
-    Write-Host 'Đã sao chép config và profile Chrome từ bản dev (không gồm cache).' -ForegroundColor Green
-    Write-Host 'Next builds reuse the PyInstaller cache. Use -CleanCache for a clean build.' -ForegroundColor DarkCyan
+    Write-Host 'Đã cập nhật ứng dụng; profile release dùng snapshot cache của bản dev.' -ForegroundColor Green
+    Write-Host 'Next builds reuse the PyInstaller and profile caches. Use -CleanCache for a clean build.' -ForegroundColor DarkCyan
     if (-not $NoDesktopShortcut) { Write-Host "Desktop shortcut created: $applicationName" -ForegroundColor Green }
 } finally { Pop-Location }

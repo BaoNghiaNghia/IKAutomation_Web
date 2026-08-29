@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 if /i "%~1"=="--locked" goto :locked
 
 set "IK_AUTO_RUN_SCRIPT=%~f0"

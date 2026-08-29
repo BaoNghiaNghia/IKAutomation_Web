@@ -144,6 +144,14 @@ def test_dashboard_log_keeps_only_ten_latest_rows() -> None:
     assert dashboard.log.value.splitlines() == [f"row-{index}" for index in range(5, 15)]
 
 
+def test_roster_dots_show_each_team_with_its_current_status_color() -> None:
+    dots = Dashboard._roster_dot_html(((1, "busy"), (2, "ready"), (3, "busy")))
+
+    assert dots.count("&#9679;") == 3
+    assert dots.count("#f59e0b") == 2
+    assert dots.count("#16a34a") == 1
+
+
 def test_monitor_first_pass_builds_baseline_then_alerts_only_for_attack_mail() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     dashboard.config = SimpleNamespace(
