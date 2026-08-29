@@ -1,8 +1,36 @@
-# IK Auto Secure
+# IK Auto — Browser Control
 
-Windows desktop tool for operating separate Chrome profiles used with the IK
-portal. It retains the profile manager, window controls, input synchronisation
-and local browser control while making data collection explicit and bounded.
+Ứng dụng Windows quản lý nhiều Chrome profile riêng biệt cho IK: mở/đóng
+profile theo nhóm, sắp xếp cửa sổ, Auto Farm, giám sát thông báo và đồng bộ
+chuột - bàn phím. Toàn bộ mã nguồn nằm trực tiếp tại thư mục gốc của
+repository này; không còn thư mục dự án lồng nhau.
+
+## Chức năng chính
+
+- Mỗi tài khoản dùng một Chrome profile và dữ liệu cục bộ riêng.
+- Mở, đóng và sắp xếp nhiều cửa sổ theo hàng; thao tác được điều tiết để tránh
+  tăng tải GPU đột ngột.
+- Auto Farm và giám sát thông báo theo nhóm profile, với log/ảnh debug khi một
+  bước không được xác minh.
+- Đồng bộ chuột - bàn phím giữa profile master và các profile đã chọn.
+- Có thể gửi thông báo trạng thái và cảnh báo qua Telegram.
+
+## Cấu trúc thư mục
+
+```text
+src/        Mã nguồn ứng dụng
+tests/      Bộ kiểm thử
+scripts/    Script cài Python và tạo bản phát hành
+docs/       Thiết kế, giới hạn và hướng dẫn kỹ thuật
+data/       Dữ liệu cục bộ, log và ảnh debug (không commit)
+release/    Bản build Windows (không commit)
+```
+
+## Yêu cầu
+
+- Windows 10/11 và Google Chrome.
+- Python 3.11, 3.12 hoặc 3.13. `run.cmd` sẽ thử cài Python 3.13 khi máy chưa
+  có bản phù hợp.
 
 The browser-farming architecture and migration plan are documented in
 [`docs/farm-automation-browser-spec.md`](docs/farm-automation-browser-spec.md).
