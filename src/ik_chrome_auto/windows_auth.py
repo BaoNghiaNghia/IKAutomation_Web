@@ -75,7 +75,7 @@ async def _verify_with_windows_hello(action: str) -> bool:
         )
     except ImportError as error:
         raise WindowsAuthenticationError(
-            "Thiếu thành phần Windows Hello. Hãy chạy run.cmd để tự cài đặt."
+            "Thiếu thành phần Windows Hello. Hãy chạy IKAutomation_dev.cmd để tự cài đặt."
         ) from error
 
     availability = await UserConsentVerifier.check_availability_async()

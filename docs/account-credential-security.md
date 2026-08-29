@@ -54,7 +54,7 @@ lại khi session hết hạn; không đọc hay xuất cookie ra khỏi profile
 
 ## Lệnh đã tích hợp
 
-Sau khi chạy `run.cmd` để tạo môi trường, dùng Command Prompt tại thư mục tool:
+Sau khi chạy `IKAutomation_dev.cmd` để tạo môi trường, dùng Command Prompt tại thư mục tool:
 
 ```bat
 .venv\Scripts\python.exe -m ik_chrome_auto credential set farm-01

@@ -354,6 +354,11 @@ def test_dashboard_uses_smaller_typography_on_high_dpi_logical_screen() -> None:
     assert dense[-1] < compact[-1] < desktop[-1]
 
 
+def test_profile_username_preview_is_limited_to_nine_characters() -> None:
+    assert Dashboard._mask_username("cuongg2003") == "cuongg***..."
+    assert Dashboard._mask_username("nam139abc") == "nam139***"
+
+
 def test_farm_profile_picker_uses_two_columns_only_above_ten_profiles() -> None:
     assert FarmProfileDialog._column_count(1) == 1
     assert FarmProfileDialog._column_count(10) == 1

@@ -80,7 +80,7 @@ exit /b 1
 
 :python_install_not_found
 echo Python was installed but Windows has not exposed it to this process yet.
-echo Close this window and run run.cmd again.
+echo Close this window and run IKAutomation_dev.cmd again.
 pause
 exit /b 1
 

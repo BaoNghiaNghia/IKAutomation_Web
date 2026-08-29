@@ -49,7 +49,7 @@ release/    Bản build Windows (không commit)
 ## Yêu cầu
 
 - Windows 10/11 và Google Chrome.
-- Python 3.11, 3.12 hoặc 3.13. `run.cmd` sẽ thử cài Python 3.13 khi máy chưa
+- Python 3.11, 3.12 hoặc 3.13. `IKAutomation_dev.cmd` sẽ thử cài Python 3.13 khi máy chưa
   có bản phù hợp.
 
 Kiến trúc và kế hoạch chuyển đổi Auto Farm được mô tả trong
@@ -75,7 +75,7 @@ Yêu cầu lưu trữ thông tin đăng nhập nằm trong
 
 ## Chạy ứng dụng
 
-Double-click `run.cmd` hoặc chạy từ Command Prompt. Script chỉ thiết lập khi
+Double-click `IKAutomation_dev.cmd` hoặc chạy từ Command Prompt. Script chỉ thiết lập khi
 cần, kiểm tra Chrome/cấu hình, chạy kiểm thử browser worker rồi mở dashboard.
 Ở lần chạy đầu, script tạo `.venv`, cài dependency còn thiếu và tạo
 `config.json` từ `config.example.json`. Nếu chưa có Python tương thích, script
@@ -101,7 +101,7 @@ file credential.
 
 ## Build ứng dụng Windows
 
-Sau khi chạy `run.cmd` một lần, double-click [`build.cmd`](build.cmd). Script sẽ
+Sau khi chạy `IKAutomation_dev.cmd` một lần, double-click [`build.cmd`](build.cmd). Script sẽ
 kiểm thử, tạo ứng dụng không có cửa sổ Terminal tại `release\IK Auto\IK Auto.exe`
 và tạo shortcut **IK Auto** có icon trên Desktop. Bản build đã loại Qt
 multimedia, PDF, QML/WebEngine không dùng và codec video OpenCV; các thành phần

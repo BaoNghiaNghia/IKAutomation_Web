@@ -111,7 +111,6 @@ class ProfileRow:
     status: QLabel
     resource: QLabel
     badge: QLabel
-    farm: PushButton
     card: CardWidget
 
 
@@ -418,7 +417,7 @@ class Dashboard(QWidget):
                 profile.id,
             )
         for account_number, profile in enumerate(self.config.profiles, start=1):
-            card=self._card(); self._set_roster_tooltip(card, ()); layout=QVBoxLayout(card); top=QHBoxLayout(); top.addWidget(StrongBodyLabel(self._profile_display_name(profile, account_number))); top.addStretch(); badge=QLabel("Đã dừng"); badge.setStyleSheet(f"background:#f1f5f9;color:#475569;border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;"); top.addWidget(badge); layout.addLayout(top); status=self._muted("Đã dừng"); resource=self._muted("—"); details=QHBoxLayout(); details.addWidget(status,1); details.addWidget(resource); layout.addLayout(details); buttons=QHBoxLayout(); buttons.setSpacing(_ui_px(5)); open_btn=self._compact_profile_button(PrimaryPushButton("Mở")); open_btn.clicked.connect(lambda _=False,pid=profile.id:self.runner.submit(pid,CommandKind.OPEN)); buttons.addWidget(open_btn); farm=self._compact_profile_button(PushButton("Farm")); farm.clicked.connect(lambda _=False,pid=profile.id:self._toggle_farm(pid)); buttons.addWidget(farm); buttons.addStretch(); delete=self._icon_button(FIF.DELETE,"Xóa profile"); delete.setFixedSize(_ui_px(29),_ui_px(29)); delete.clicked.connect(lambda _=False,pid=profile.id:self._remove_profile(pid)); buttons.addWidget(delete); layout.addLayout(buttons); index=len(self.rows); self.table_layout.addWidget(card, index // 2, index % 2); self.rows[profile.id]=ProfileRow(status,resource,badge,farm,card)
+            card=self._card(); self._set_roster_tooltip(card, ()); layout=QVBoxLayout(card); top=QHBoxLayout(); top.addWidget(StrongBodyLabel(self._profile_display_name(profile, account_number))); top.addStretch(); badge=QLabel("Đã dừng"); badge.setStyleSheet(f"background:#f1f5f9;color:#475569;border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;"); top.addWidget(badge); layout.addLayout(top); status=self._muted("Đã dừng"); resource=self._muted("—"); details=QHBoxLayout(); details.addWidget(status,1); details.addWidget(resource); layout.addLayout(details); index=len(self.rows); self.table_layout.addWidget(card, index // 2, index % 2); self.rows[profile.id]=ProfileRow(status,resource,badge,card)
         self.table_layout.setRowStretch((len(self.rows) + 1) // 2, 1)
 
     @staticmethod
@@ -427,7 +426,8 @@ class Dashboard(QWidget):
         if not value:
             return "Chưa có username"
         visible = value[:6]
-        return visible + "*" * (len(value) - len(visible))
+        masked = visible + "*" * (len(value) - len(visible))
+        return masked if len(masked) <= 9 else masked[:9] + "..."
 
     def _masked_profile_username(self, profile: ProfileConfig) -> str:
         try:
@@ -937,14 +937,13 @@ class Dashboard(QWidget):
         self._monitor_next_profile_at = now + MONITOR_PROFILE_STAGGER_SECONDS
 
     def _toggle_farm(self, pid: str) -> None:
-        row = self.rows[pid]
         if pid in self.farm_profiles:
-            self.farm_profiles.remove(pid); row.farm.setText("Farm"); self.runner.submit(pid, CommandKind.STOP_FARM)
+            self.farm_profiles.remove(pid); self.runner.submit(pid, CommandKind.STOP_FARM)
             self._refresh_sync_control()
             self._notify_telegram(f"⏹️ Đã dừng Farm: {self.config.profile(pid).name}")
         else:
             self._disable_sync_for_automation("Farm")
-            self.farm_profiles.add(pid); row.farm.setText("Dừng Farm"); self.runner.submit(pid, CommandKind.START_FARM)
+            self.farm_profiles.add(pid); self.runner.submit(pid, CommandKind.START_FARM)
             self._notify_telegram(f"🌾 Đã bắt đầu Farm: {self.config.profile(pid).name}")
 
     def _farm_launcher_action(self) -> None:
@@ -1061,9 +1060,6 @@ class Dashboard(QWidget):
             if profile_id not in self.farm_profiles:
                 self.farm_profiles.add(profile_id)
                 self.runner.submit(profile_id, CommandKind.START_FARM)
-            row = self.rows.get(profile_id)
-            if row:
-                row.farm.setText("Dừng Farm")
         self._farm_all_running = True
         self.farm_all_button.setText("Dừng Farm")
         self.farm_all_button.setStyleSheet(f"QPushButton {{ background:#ef4444; border:1px solid #ef4444; border-radius:{_ui_px(8)}px; color:#ffffff; font-weight:600; }} QPushButton:hover {{ background:#dc2626; border-color:#dc2626; }}")
@@ -1073,9 +1069,6 @@ class Dashboard(QWidget):
     def _stop_all_farms(self) -> None:
         for profile_id in tuple(self.farm_profiles):
             self.runner.submit(profile_id, CommandKind.STOP_FARM)
-            row = self.rows.get(profile_id)
-            if row:
-                row.farm.setText("Farm")
         self.farm_profiles.clear()
         self._farm_all_running = False
         self.farm_all_button.setText("Farms")
@@ -1465,7 +1458,7 @@ class Dashboard(QWidget):
                     row.status.setText(snap.message); text,bg,fg=self._state(snap.state); row.badge.setText(text); row.badge.setStyleSheet(f"background:{bg};color:{fg};border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;"); self._set_profile_card_state(row,snap.state)
                     self._set_roster_tooltip(row.card, snap.farm_roster)
                     if snap.state in {WorkerState.STOPPED, WorkerState.ERROR} or "Đã dừng Auto Farm" in snap.message:
-                        self.farm_profiles.discard(snap.profile_id); row.farm.setText("Farm"); self._refresh_sync_control()
+                        self.farm_profiles.discard(snap.profile_id); self._refresh_sync_control()
                 try:
                     profile_name = self.config.profile(snap.profile_id).name
                 except KeyError:

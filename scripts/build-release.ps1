@@ -36,7 +36,7 @@ $excludedModules = @(
     'PySide6.QtWebEngineWidgets'
 )
 
-if (-not (Test-Path -LiteralPath $python)) { throw 'Missing .venv. Run run.cmd once before building.' }
+if (-not (Test-Path -LiteralPath $python)) { throw 'Missing .venv. Run IKAutomation_dev.cmd once before building.' }
 if (-not (Test-Path -LiteralPath $icon)) { throw "Missing icon: $icon" }
 
 Push-Location $projectRoot
