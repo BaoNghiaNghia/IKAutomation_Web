@@ -15,6 +15,26 @@ này; không còn thư mục dự án lồng nhau.
 - Đồng bộ chuột - bàn phím giữa profile master và các profile đã chọn.
 - Có thể gửi thông báo trạng thái và cảnh báo qua Telegram.
 
+## Độ phân giải khi chạy Automation
+
+Khi xếp 5 profile trên một hàng, canvas hiển thị của mỗi cửa sổ có thể chỉ còn
+khoảng `366×168`. Phóng to ảnh chụp từ kích thước này không tạo ra thêm chi
+tiết, nên không đủ an toàn để nhận diện đội, nút Farm hoặc thư Chiến đấu.
+
+Vì vậy Farm và Giám sát dùng chung một **renderer tạm 1280×720**:
+
+1. Khi một profile đến lượt, tool lưu vị trí/kích thước ô lưới hiện tại.
+2. Chỉ profile đó được nâng renderer thực lên `1280×720`, sau đó ảnh CDP và
+   thao tác X/Y tỷ lệ đều dùng đúng canvas độ phân giải cao này.
+3. Hoàn tất lượt Giám sát hoặc khi Farm chuyển sang thời gian chờ dài, profile
+   được trả về chính xác ô lưới cũ.
+4. Tại một thời điểm chỉ có **một** renderer 1280×720. Các profile còn lại chờ
+   lượt, tránh việc một nhóm 5 profile tạo đồng thời năm bề mặt WebGL 720p và
+   làm GPU tăng đột ngột.
+
+Nhóm profile vẫn dùng chính sách điều phối hiện có; riêng việc dựng ảnh độ phân
+giải cao được tuần tự hóa để ưu tiên độ chính xác và độ ổn định của máy.
+
 ## Cấu trúc thư mục
 
 ```text

@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ik_chrome_auto.actions import ActionCancelled, AutomationFunctions
 from ik_chrome_auto.browser import ChromeProfileSession
@@ -61,12 +62,17 @@ MONITOR_REFERENCE_ASPECT_RATIO = 16 / 9
 # values are still applied independently to the live canvas dimensions so a
 # compact profile viewport keeps the same relative target.
 FARM_REFERENCE_ASPECT_RATIO = 16 / 9
-# A canvas below this range turns the team text and resource controls into a
-# handful of pixels.  Coordinates still scale correctly, but vision cannot
-# make a safe Ready/Busy decision at that size (as seen in 366×168 captures).
-# Farm temporarily enlarges only the active profile renderer to this minimum;
-# it does not change the saved dashboard layout preference.
-FARM_MINIMUM_CANVAS_SIZE = (640, 360)
+# A 366×168 canvas has too little original information for team and button
+# recognition.  The worker therefore temporarily renders a single active
+# profile at this true 16:9 size; it never upscales a compact screenshot.
+AUTOMATION_RENDERER_SIZE = (1280, 720)
+FARM_MINIMUM_CANVAS_SIZE = AUTOMATION_RENDERER_SIZE
+# One high-detail WebGL renderer at a time prevents five compact profiles from
+# becoming five simultaneous 720p GPU surfaces.  A Farm lease survives the
+# short internal workflow steps and is released for long waits; monitoring
+# holds the same lease only for its bounded mailbox flow.
+AUTOMATION_RENDERER_WAIT_SECONDS = 30.0
+FARM_RENDERER_IDLE_RELEASE_SECONDS = 4.0
 FARM_RESOURCE_BUTTON_CENTERS: dict[str, tuple[float, float]] = {
     "food": (0.286, 0.735),
     "wood": (0.406, 0.735),
@@ -135,6 +141,7 @@ class ProfileWorker:
         drag_item_visible: bool = False,
         scrollbars_visible: bool = False,
         topmost: bool = False,
+        automation_renderer_lock: threading.Lock | None = None,
     ) -> None:
         self.config = config
         self.profile = profile
@@ -162,6 +169,10 @@ class ProfileWorker:
         self._drag_item_visible = drag_item_visible
         self._scrollbars_visible = scrollbars_visible
         self._topmost = topmost
+        self._automation_renderer_lock = automation_renderer_lock or threading.Lock()
+        self._automation_renderer_locked = False
+        self._automation_renderer_layout: Any | None = None
+        self._farm_renderer_waiting = False
         self._farm: FarmWorkflow | None = None
         self._farm_next_at = 0.0
         self._farm_city_clicks = 0
@@ -265,6 +276,56 @@ class ProfileWorker:
                 self.session.pump(5)
             time.sleep(min(0.08, max(0.0, deadline - time.monotonic())))
 
+    def _acquire_automation_renderer(self, *, wait_seconds: float = 0.0) -> bool:
+        """Lease the one true 1280×720 renderer and save this tile's geometry."""
+        if getattr(self, "_automation_renderer_locked", False):
+            return True
+        if self.session is None:
+            return False
+        renderer_lock = getattr(self, "_automation_renderer_lock", None)
+        if renderer_lock is None:
+            renderer_lock = threading.Lock()
+            self._automation_renderer_lock = renderer_lock
+        acquired = renderer_lock.acquire(
+            timeout=max(0.0, float(wait_seconds))
+        )
+        if not acquired:
+            return False
+        self._automation_renderer_locked = True
+        try:
+            begin = getattr(self.session, "begin_automation_renderer", None)
+            self._automation_renderer_layout = (
+                begin(*AUTOMATION_RENDERER_SIZE) if callable(begin) else None
+            )
+        except Exception:
+            self._automation_renderer_locked = False
+            renderer_lock.release()
+            raise
+        return True
+
+    def _release_automation_renderer(self, *, restore: bool = True) -> None:
+        """Return the leased profile to its exact compact grid cell."""
+        if not getattr(self, "_automation_renderer_locked", False):
+            return
+        layout = self._automation_renderer_layout
+        self._automation_renderer_layout = None
+        self._automation_renderer_locked = False
+        try:
+            restore_renderer = getattr(self.session, "restore_automation_renderer", None)
+            if restore and callable(restore_renderer):
+                restore_renderer(layout)
+        finally:
+            self._automation_renderer_lock.release()
+
+    def _release_farm_renderer_when_idle(self) -> None:
+        """Keep a Farm lease for its short workflow, not for its long retry wait."""
+        if not getattr(self, "_automation_renderer_locked", False):
+            return
+        if self._farm is None or (
+            self._farm_next_at - time.monotonic() >= FARM_RENDERER_IDLE_RELEASE_SECONDS
+        ):
+            self._release_automation_renderer()
+
     def _capture_mail_canvas(self) -> tuple[bytes, tuple[int, int]]:
         if self.session is None:
             raise RuntimeError("Profile chưa mở")
@@ -319,6 +380,10 @@ class ProfileWorker:
         """
         if self.session is None:
             return SCAN_ERROR
+        if not self._acquire_automation_renderer(
+            wait_seconds=AUTOMATION_RENDERER_WAIT_SECONDS
+        ):
+            raise RuntimeError("Hết thời gian chờ renderer 1280×720 cho Giám sát")
         if self._mail_monitor is None:
             self._mail_monitor = BrowserMailMonitor()
         monitor = self._mail_monitor
@@ -374,21 +439,24 @@ class ProfileWorker:
                 return TERRITORY_ATTACKED
             return COMBAT_MAIL_OTHER
         finally:
-            if mail_open:
-                try:
-                    latest_png, latest_size = self._capture_mail_canvas()
-                    close = monitor.find_close_button(latest_png)
-                    if close is not None:
-                        self._tap_monitor_viewport_point(CLOSE_MAIL_POINT, latest_size)
-                        self._monitor_pause(0.35)
-                except Exception as close_error:
-                    self.event_log.write(
-                        "mail_monitor_close_error",
-                        {
-                            "profile_id": self.profile.id,
-                            "message": f"{type(close_error).__name__}: {close_error}",
-                        },
-                    )
+            try:
+                if mail_open:
+                    try:
+                        latest_png, latest_size = self._capture_mail_canvas()
+                        close = monitor.find_close_button(latest_png)
+                        if close is not None:
+                            self._tap_monitor_viewport_point(CLOSE_MAIL_POINT, latest_size)
+                            self._monitor_pause(0.35)
+                    except Exception as close_error:
+                        self.event_log.write(
+                            "mail_monitor_close_error",
+                            {
+                                "profile_id": self.profile.id,
+                                "message": f"{type(close_error).__name__}: {close_error}",
+                            },
+                        )
+            finally:
+                self._release_automation_renderer()
 
     def _loop(self) -> None:
         while True:
@@ -441,6 +509,7 @@ class ProfileWorker:
                     self._farm_gather_clicks = 0
                     self._farm_capture_blocked_count = 0
                     self._farm_canvas_resize_attempts = 0
+                    self._farm_renderer_waiting = False
                     self._farm_team_selection_clicks = 0
                     self._farm_expected_team_row = None
                     self._farm_dispatch_click_at = 0.0
@@ -455,6 +524,8 @@ class ProfileWorker:
                     continue
                 if command.kind == CommandKind.STOP_FARM:
                     self._farm = None
+                    self._farm_renderer_waiting = False
+                    self._release_automation_renderer()
                     self._log_farm("stopped", {"reason": "user"})
                     self._publish(WorkerState.READY if self.session is not None else WorkerState.STOPPED, "Đã dừng Auto Farm")
                     continue
@@ -621,6 +692,16 @@ class ProfileWorker:
         """
         if self.session is None or self._farm is None:
             return
+        if not self._acquire_automation_renderer():
+            self._farm_next_at = time.monotonic() + 0.5
+            if not self._farm_renderer_waiting:
+                self._farm_renderer_waiting = True
+                self._publish(
+                    WorkerState.RUNNING,
+                    "Auto Farm: đang chờ lượt renderer 1280×720 để nhận diện chính xác",
+                )
+            return
+        self._farm_renderer_waiting = False
         try:
             detected, _surface, image_size = self.session.detect_farm_state()
             self._farm_capture_blocked_count = 0
@@ -1735,6 +1816,8 @@ class ProfileWorker:
             )
             self._farm = None
             self._publish(WorkerState.ERROR, f"Auto Farm đã dừng an toàn: {error}")
+        finally:
+            self._release_farm_renderer_when_idle()
 
     def _reset_farm_cycle(self) -> None:
         """Create a clean farm cycle without stopping the active worker."""
@@ -2230,6 +2313,10 @@ class ProfileWorker:
 
     def _close_session(self) -> None:
         self._farm = None
+        self._farm_renderer_waiting = False
+        # Closing does not need to redraw the compact tile, but it must free
+        # the shared high-resolution lease for the next profile.
+        self._release_automation_renderer(restore=False)
         if self.session is None:
             return
         try:
@@ -2239,6 +2326,8 @@ class ProfileWorker:
 
     def _handle_external_close(self) -> None:
         self._farm = None
+        self._farm_renderer_waiting = False
+        self._release_automation_renderer(restore=False)
         if self.session is None:
             return
         try:
@@ -2268,6 +2357,10 @@ class MultiProfileRunner:
         self.windows_topmost = False
         self._resource_cpu_samples: dict[str, tuple[float, float]] = {}
         self._sync_lock = threading.Lock()
+        # A compact 5-column grid must never create five concurrent 720p
+        # WebGL surfaces. Workers lease this lock only while real pixels are
+        # required for Farm or mail recognition.
+        self._automation_renderer_lock = threading.Lock()
         self.sync_profiles()
 
     def sync_profiles(self) -> None:
@@ -2288,6 +2381,7 @@ class MultiProfileRunner:
                     drag_item_visible=self.drag_items_visible,
                     scrollbars_visible=self.scrollbars_visible,
                     topmost=self.windows_topmost,
+                    automation_renderer_lock=self._automation_renderer_lock,
                 )
 
     def submit(self, profile_id: str, kind: CommandKind, **payload: object) -> None:

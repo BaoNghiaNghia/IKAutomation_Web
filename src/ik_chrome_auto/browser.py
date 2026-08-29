@@ -7,6 +7,7 @@ import random
 import re
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -42,6 +43,15 @@ KNOWN_CHROME_PATHS = (
     Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
     Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
 )
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationRendererLayout:
+    """Native Chrome geometry saved before a temporary automation resize."""
+
+    outer: WindowRect
+    renderer: WindowRect
+    resized: bool
 
 LOGIN_USERNAME_SELECTORS = (
     "input[autocomplete='username']",
@@ -561,6 +571,65 @@ class ChromeProfileSession:
         )
         self.pump(120)
         return True
+
+    def begin_automation_renderer(
+        self, width: int, height: int
+    ) -> AutomationRendererLayout | None:
+        """Temporarily give one headed profile a high-detail game renderer.
+
+        The dashboard may show compact window tiles, but enlarging a captured
+        366×168 canvas cannot recreate the pixels needed for reliable Farm or
+        mailbox recognition.  This records the exact grid geometry, resizes
+        the live renderer to the requested automation size, and leaves it to
+        the caller to restore the saved layout through
+        :meth:`restore_automation_renderer`.
+
+        Headless and non-Windows sessions already use their browser capture
+        path and do not own a native renderer window, so they return ``None``.
+        """
+        width, height = validate_viewport(int(width), int(height))
+        if sys.platform != "win32" or self.config.browser.headless:
+            return None
+        hwnd = self.window_handle or self._bind_native_window(retries=10)
+        if hwnd is None:
+            raise RuntimeError(f"Không tìm thấy cửa sổ Chrome của {self.profile.name}")
+        outer = get_window_rect(hwnd)
+        renderer = get_renderer_rect(hwnd)
+        resized = renderer.width < width or renderer.height < height
+        layout = AutomationRendererLayout(outer=outer, renderer=renderer, resized=resized)
+        if not resized:
+            return layout
+        move_window_renderer(
+            hwnd,
+            outer.left,
+            outer.top,
+            width,
+            height,
+            topmost=self._topmost,
+        )
+        # Chromium needs a short settle period before its WebGL canvas reflects
+        # the native renderer dimensions in a DevTools screenshot.
+        self.pump(220)
+        return layout
+
+    def restore_automation_renderer(self, layout: AutomationRendererLayout | None) -> None:
+        """Restore the compact grid geometry saved for a temporary renderer."""
+        if layout is None or not layout.resized:
+            return
+        if sys.platform != "win32" or self.config.browser.headless:
+            return
+        hwnd = self.window_handle or self._bind_native_window(retries=3)
+        if hwnd is None:
+            return
+        move_window_renderer(
+            hwnd,
+            layout.outer.left,
+            layout.outer.top,
+            layout.renderer.width,
+            layout.renderer.height,
+            topmost=self._topmost,
+        )
+        self.pump(120)
 
     def read_world_position(self) -> tuple[int, int] | None:
         """Read a visible X/Y label if the portal exposes it as DOM text."""

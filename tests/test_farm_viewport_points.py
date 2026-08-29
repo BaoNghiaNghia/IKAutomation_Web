@@ -1,4 +1,5 @@
 from ik_chrome_auto.runner import (
+    AUTOMATION_RENDERER_SIZE,
     FARM_MINIMUM_CANVAS_SIZE,
     FARM_REFERENCE_ASPECT_RATIO,
     ProfileWorker,
@@ -22,8 +23,10 @@ def test_farm_layout_fallbacks_scale_for_a_compact_five_profile_viewport() -> No
 
 def test_farm_rejects_tiny_renderer_captures_before_team_or_resource_input() -> None:
     """A tiny canvas cannot safely distinguish Ready from Busy labels."""
-    assert FARM_MINIMUM_CANVAS_SIZE == (640, 360)
-    assert ProfileWorker._farm_canvas_is_usable((640, 360)) is True
+    assert AUTOMATION_RENDERER_SIZE == (1280, 720)
+    assert FARM_MINIMUM_CANVAS_SIZE == (1280, 720)
+    assert ProfileWorker._farm_canvas_is_usable((1280, 720)) is True
+    assert ProfileWorker._farm_canvas_is_usable((640, 360)) is False
     assert ProfileWorker._farm_canvas_is_usable((366, 168)) is False
     assert ProfileWorker._farm_canvas_is_usable((186, 66)) is False
 

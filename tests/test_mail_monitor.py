@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6,6 +7,7 @@ import numpy as np
 
 from ik_chrome_auto.mail_monitor import BrowserMailMonitor
 from ik_chrome_auto.runner import (
+    AUTOMATION_RENDERER_SIZE,
     CLOSE_MAIL_POINT,
     COMBAT_TAB_POINT,
     MAIL_BUTTON_POINT,
@@ -54,6 +56,20 @@ class _MouseSession(_TapSession):
         self.mouse_clicks.append((bounds, image_size))
 
 
+class _RendererSession(_TapSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.begin_calls: list[tuple[int, int]] = []
+        self.restore_calls: list[object | None] = []
+
+    def begin_automation_renderer(self, width: int, height: int) -> object:
+        self.begin_calls.append((width, height))
+        return "saved-grid-cell"
+
+    def restore_automation_renderer(self, layout: object | None) -> None:
+        self.restore_calls.append(layout)
+
+
 class _BaselineMonitor:
     def find_close_button(self, _png: bytes) -> object:
         return object()
@@ -99,6 +115,26 @@ def test_monitor_controls_prefer_mouse_clicks_at_the_same_relative_xy() -> None:
     # canvas. It is not a desktop-pixel click and therefore scales per tab.
     assert worker.session.mouse_clicks == [((68, 251, 2, 2), (600, 312))]
     assert worker.session.taps == []
+
+
+def test_automation_renderer_uses_real_720p_then_restores_the_grid_tile() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    session = _RendererSession()
+    worker.session = session
+    worker._automation_renderer_lock = threading.Lock()
+    worker._automation_renderer_locked = False
+    worker._automation_renderer_layout = None
+
+    assert worker._acquire_automation_renderer() is True
+    assert worker._acquire_automation_renderer() is True
+    assert session.begin_calls == [AUTOMATION_RENDERER_SIZE]
+
+    worker._release_automation_renderer()
+
+    assert session.restore_calls == ["saved-grid-cell"]
+    assert worker._automation_renderer_locked is False
+    assert worker._automation_renderer_lock.acquire(blocking=False) is True
+    worker._automation_renderer_lock.release()
 
 
 def test_combat_tab_uses_relative_xy_and_scales_to_the_renderer() -> None:
