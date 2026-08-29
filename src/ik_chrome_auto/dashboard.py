@@ -13,10 +13,11 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QColor, QCursor, QGuiApplication, QIcon, QPixmap
-from PySide6.QtWidgets import QApplication, QDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
 from qfluentwidgets import CardWidget, CheckBox, ComboBox, FluentIcon as FIF, LineEdit, PasswordLineEdit, PrimaryPushButton, PrimaryToolButton, PushButton, StrongBodyLabel, SubtitleLabel, ToolButton
 
 from ik_chrome_auto.config import ensure_data_dirs, load_config, save_config, unique_profile_id
+from ik_chrome_auto.credential_store import escape_account_export_field, parse_account_export_line
 from ik_chrome_auto.farm_launch_policy import FarmLaunchPolicy
 from ik_chrome_auto.interaction import format_coordinate
 from ik_chrome_auto.models import CommandKind, ProfileConfig, ProfileMode, WorkerSnapshot, WorkerState
@@ -263,25 +264,29 @@ class Dashboard(QWidget):
 
     @staticmethod
     def _responsive_metrics(screen_width: int, screen_height: int) -> tuple[int, int, int, int, bool]:
-        """Return a screen-safe window and sidebar size in Qt logical pixels."""
+        """Return a screen-safe window and sidebar size in Qt logical pixels.
+
+        The dashboard intentionally occupies three fifths of the available
+        monitor height. Unlike compact UI metrics, window geometry is kept in
+        native Qt logical pixels so this proportion stays true at every DPI.
+        """
         safe_width = max(480, screen_width - 16)
         safe_height = max(360, screen_height - 16)
+        height = min(safe_height, round(screen_height * 3 / 5))
         compact = screen_width < 1500 or screen_height < 900
         dense = Dashboard._is_dense_screen(screen_width, screen_height)
         if dense:
             width = min(safe_width, max(min(700, safe_width), round(screen_width * 0.78)))
-            height = min(safe_height, max(min(440, safe_height), round(screen_height * 0.80)))
             sidebar_min = max(195, min(260, round(width * 0.30)))
             sidebar_max = max(sidebar_min, min(285, round(width * 0.34)))
         else:
             ratio = 0.72 if compact else 0.50
             width = min(safe_width, max(min(780, safe_width), round(screen_width * ratio)))
-            height = min(safe_height, max(min(520, safe_height), round(screen_height * ratio)))
             sidebar_min = max(240, min(340, round(width * 0.31)))
             sidebar_max = max(sidebar_min, min(390, round(width * 0.36)))
         return (
             _ui_px(width),
-            _ui_px(height),
+            height,
             _ui_px(sidebar_min),
             _ui_px(sidebar_max),
             compact,
@@ -1828,7 +1833,86 @@ class FarmProfileDialog(QDialog):
 class AccountManagerDialog(QDialog):
     """Central CRUD form. Secrets only live in this dialog until saved to Windows Vault."""
     def __init__(self,parent:Dashboard,profiles:list[ProfileConfig])->None:
-        super().__init__(parent); self.rows:list[tuple[str|None,LineEdit,PasswordLineEdit,QWidget]]=[]; self._username_warnings:dict[LineEdit,QLabel]={}; self.setWindowTitle("Quản lý tài khoản game"); self.resize(_ui_px(720),_ui_px(520)); layout=QVBoxLayout(self); layout.addWidget(SubtitleLabel("Quản lý tài khoản game")); layout.addWidget(QLabel("Thêm, sửa hoặc xóa tài khoản. Password chỉ được lưu mã hóa trong Windows Credential Manager.")); self.search=LineEdit(); self.search.setPlaceholderText("Tìm theo tên tài khoản hoặc username / email"); self.search.addAction(QAction(FIF.SEARCH.icon(),"Tìm kiếm",self.search),QLineEdit.ActionPosition.LeadingPosition); self.search.textChanged.connect(self._filter_rows); search_row=QHBoxLayout(); search_row.setContentsMargins(0,0,0,_ui_px(10)); search_row.addStretch(1); search_row.addWidget(self.search,1); layout.addLayout(search_row); self.list=QVBoxLayout(); self.list.setAlignment(Qt.AlignmentFlag.AlignTop); self.list.setSpacing(_ui_px(8)); content=QWidget(); content.setLayout(self.list); scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(content); layout.addWidget(scroll,1); control=QHBoxLayout(); add=PushButton("+ Thêm tài khoản"); add.clicked.connect(lambda:self.add_row()); control.addWidget(add); control.addStretch(); self.show=FullRowCheckBox("Hiện password"); self.show.stateChanged.connect(self.toggle_password); control.addWidget(self.show); layout.addLayout(control); actions=QHBoxLayout(); actions.addStretch(); cancel=PushButton("Hủy"); cancel.clicked.connect(self.reject); save=PrimaryPushButton("Lưu thay đổi"); save.clicked.connect(self.validate); actions.addWidget(cancel); actions.addWidget(save); layout.addLayout(actions)
+        super().__init__(parent)
+        self.rows:list[tuple[str|None,LineEdit,PasswordLineEdit,QWidget]]=[]
+        self._username_warnings:dict[LineEdit,QLabel]={}
+        self.setWindowTitle("Quản lý tài khoản game")
+        self.resize(_ui_px(780),_ui_px(580))
+        layout=QVBoxLayout(self)
+        layout.setSpacing(_ui_px(10))
+        title_row=QHBoxLayout()
+        intro=QVBoxLayout()
+        intro.setSpacing(_ui_px(2))
+        intro.addWidget(SubtitleLabel("Quản lý tài khoản"))
+        note=QLabel("Thêm, sửa hoặc xóa tài khoản. Password được lưu mã hóa trong Windows Credential Manager.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#62758e;background:transparent;")
+        intro.addWidget(note)
+        title_row.addLayout(intro,1)
+        format_note=QLabel("Định dạng file\nTên profile | Username | Password")
+        format_note.setStyleSheet(
+            f"background:#f4f8ff;color:#42627f;border:1px solid #d8e6f7;"
+            f"border-radius:{_ui_px(7)}px;padding:{_ui_px(5)}px {_ui_px(8)}px;"
+        )
+        title_row.addWidget(format_note)
+        layout.addLayout(title_row)
+        self.search=LineEdit()
+        self.search.setPlaceholderText("Tìm theo tên tài khoản hoặc username / email")
+        self.search.addAction(QAction(FIF.SEARCH.icon(),"Tìm kiếm",self.search),QLineEdit.ActionPosition.LeadingPosition)
+        self.search.textChanged.connect(self._filter_rows)
+        search_row=QHBoxLayout()
+        search_row.setContentsMargins(0,0,0,_ui_px(2))
+        search_row.addWidget(StrongBodyLabel("Tìm kiếm"))
+        search_row.addWidget(self.search,1)
+        layout.addLayout(search_row)
+        list_header=QHBoxLayout()
+        list_header.addWidget(StrongBodyLabel("Danh sách tài khoản"))
+        list_header.addStretch()
+        self.account_count=QLabel()
+        self.account_count.setStyleSheet(
+            f"background:#eaf3ff;color:#2767bd;border-radius:{_ui_px(9)}px;"
+            f"padding:{_ui_px(2)}px {_ui_px(7)}px;"
+        )
+        list_header.addWidget(self.account_count)
+        layout.addLayout(list_header)
+        self.list=QVBoxLayout()
+        self.list.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.list.setSpacing(_ui_px(8))
+        content=QWidget()
+        content.setLayout(self.list)
+        scroll=QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+        layout.addWidget(scroll,1)
+        control=QHBoxLayout()
+        control.setSpacing(_ui_px(7))
+        add=PushButton("+ Thêm")
+        add.setToolTip("Thêm một tài khoản trống")
+        add.clicked.connect(lambda:self.add_row())
+        control.addWidget(add)
+        import_accounts=PushButton(FIF.FOLDER_ADD.icon(), "Nhập file")
+        import_accounts.setToolTip("Nhập file Tên profile|Username|Password")
+        import_accounts.clicked.connect(self.import_credentials)
+        control.addWidget(import_accounts)
+        export=PushButton(FIF.SAVE.icon(), "Xuất file")
+        export.setToolTip("Xuất từng profile theo định dạng Tên profile|Username|Password")
+        export.clicked.connect(self.export_credentials)
+        control.addWidget(export)
+        control.addStretch()
+        control.addWidget(QLabel("Bảo mật:"))
+        self.show=FullRowCheckBox("Hiện password")
+        self.show.stateChanged.connect(self.toggle_password)
+        control.addWidget(self.show)
+        layout.addLayout(control)
+        actions=QHBoxLayout()
+        actions.addStretch()
+        cancel=PushButton("Hủy")
+        cancel.clicked.connect(self.reject)
+        save=PrimaryPushButton("Lưu thay đổi")
+        save.clicked.connect(self.validate)
+        actions.addWidget(cancel)
+        actions.addWidget(save)
+        layout.addLayout(actions)
         for profile in profiles:
             if profile.mode != ProfileMode.MANAGED: continue
             username=password=""
@@ -1840,12 +1924,16 @@ class AccountManagerDialog(QDialog):
             self.add_row(profile.id,username,password)
         if not self.rows: self.add_row()
         self._filter_rows()
+        self._update_account_count()
     def add_row(self,profile_id:str|None=None,username_value:str="",password_value:str="")->None:
-        row=CardWidget(); row.setFixedHeight(_ui_px(104)); row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed); layout=QVBoxLayout(row); layout.setContentsMargins(_ui_px(12),_ui_px(8),_ui_px(12),_ui_px(8)); layout.setSpacing(_ui_px(7)); header=QHBoxLayout(); header.addWidget(StrongBodyLabel(f"Tài khoản {len(self.rows)+1:02d}")); header.addStretch(); remove=PushButton("×"); remove.setToolTip("Xóa tài khoản"); remove.setFixedSize(_ui_px(32),_ui_px(28)); header.addWidget(remove); layout.addLayout(header); fields=QHBoxLayout(); fields.setSpacing(_ui_px(8)); username=LineEdit(); username.addAction(QAction(FIF.PEOPLE.icon(),"Username",username),QLineEdit.ActionPosition.LeadingPosition); username.setPlaceholderText("Username / email"); username.setText(username_value); username_box=QVBoxLayout(); username_box.setContentsMargins(0,0,0,0); username_box.setSpacing(_ui_px(2)); username_box.addWidget(username); warning=QLabel(" "); warning.setStyleSheet(f"color:transparent;background:transparent;font-size:{_ui_px(10)}px;"); warning.setFixedHeight(_ui_px(14)); username_box.addWidget(warning); password=PasswordLineEdit(); password.addAction(QAction(FIF.FINGERPRINT.icon(),"Password",password),QLineEdit.ActionPosition.LeadingPosition); password.setPlaceholderText("Password"); password.setText(password_value); fields.addLayout(username_box,1); fields.addWidget(password,1,Qt.AlignmentFlag.AlignTop); layout.addLayout(fields); remove.clicked.connect(lambda:self.remove_row(row)); username.textChanged.connect(self._filter_rows); username.textChanged.connect(self._update_username_validation); self.rows.append((profile_id,username,password,row)); self._username_warnings[username]=warning; self.list.addWidget(row); self._filter_rows(); self._update_username_validation()
+        row=CardWidget(); row.setFixedHeight(_ui_px(104)); row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed); layout=QVBoxLayout(row); layout.setContentsMargins(_ui_px(12),_ui_px(8),_ui_px(12),_ui_px(8)); layout.setSpacing(_ui_px(7)); header=QHBoxLayout(); header.addWidget(StrongBodyLabel(f"Tài khoản {len(self.rows)+1:02d}")); header.addStretch(); remove=PushButton("×"); remove.setToolTip("Xóa tài khoản"); remove.setFixedSize(_ui_px(32),_ui_px(28)); header.addWidget(remove); layout.addLayout(header); fields=QHBoxLayout(); fields.setSpacing(_ui_px(8)); username=LineEdit(); username.addAction(QAction(FIF.PEOPLE.icon(),"Username",username),QLineEdit.ActionPosition.LeadingPosition); username.setPlaceholderText("Username / email"); username.setText(username_value); username_box=QVBoxLayout(); username_box.setContentsMargins(0,0,0,0); username_box.setSpacing(_ui_px(2)); username_box.addWidget(username); warning=QLabel(" "); warning.setStyleSheet(f"color:transparent;background:transparent;font-size:{_ui_px(10)}px;"); warning.setFixedHeight(_ui_px(14)); username_box.addWidget(warning); password=PasswordLineEdit(); password.addAction(QAction(FIF.FINGERPRINT.icon(),"Password",password),QLineEdit.ActionPosition.LeadingPosition); password.setPlaceholderText("Password"); password.setText(password_value); fields.addLayout(username_box,1); fields.addWidget(password,1,Qt.AlignmentFlag.AlignTop); layout.addLayout(fields); remove.clicked.connect(lambda:self.remove_row(row)); username.textChanged.connect(self._filter_rows); username.textChanged.connect(self._update_username_validation); self.rows.append((profile_id,username,password,row)); self._username_warnings[username]=warning; self.list.addWidget(row); self._filter_rows(); self._update_username_validation(); self._update_account_count()
     def remove_row(self,row:QWidget)->None:
         removed = [item for item in self.rows if item[3] is row]; self.rows=[item for item in self.rows if item[3] is not row];
         for _, username, _, _ in removed: self._username_warnings.pop(username, None)
-        self.list.removeWidget(row); row.deleteLater(); self._filter_rows(); self._update_username_validation()
+        self.list.removeWidget(row); row.deleteLater(); self._filter_rows(); self._update_username_validation(); self._update_account_count()
+    def _update_account_count(self) -> None:
+        if hasattr(self,"account_count"):
+            self.account_count.setText(f"{len(self.rows)} tài khoản")
     def _filter_rows(self) -> None:
         query = self.search.text().strip().casefold()
         for index, (_profile_id, username, _password, row) in enumerate(self.rows, start=1):
@@ -1882,6 +1970,105 @@ class AccountManagerDialog(QDialog):
     def toggle_password(self,_state:int)->None:
         mode=LineEdit.EchoMode.Normal if self.show.isChecked() else LineEdit.EchoMode.Password
         for _,_,password,_ in self.rows: password.setEchoMode(mode)
+    def import_credentials(self)->None:
+        """Add valid, non-duplicate credentials from a portable text export."""
+        selected,_filter=QFileDialog.getOpenFileName(
+            self,
+            "Nhập username/password",
+            str(Path.home()),
+            "Tệp văn bản (*.txt);;Tất cả tệp (*.*)",
+        )
+        if not selected:
+            return
+        try:
+            source=Path(selected)
+            content=source.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError) as error:
+            QMessageBox.warning(self,"Không nhập được file",str(error))
+            return
+
+        known_usernames={
+            username.text().strip().casefold()
+            for _profile_id,username,_password,_row in self.rows
+            if username.text().strip()
+        }
+        imported=duplicates=invalid=0
+        for line in content.splitlines():
+            if not line.strip():
+                continue
+            parsed=parse_account_export_line(line)
+            if parsed is None:
+                invalid+=1
+                continue
+            _profile_name,username,password=parsed
+            key=username.casefold()
+            if key in known_usernames:
+                duplicates+=1
+                continue
+            known_usernames.add(key)
+            # profile_id=None deliberately creates a fresh local profile when
+            # the dialog is saved, avoiding an ID collision with another PC.
+            self.add_row(None,username,password)
+            imported+=1
+
+        summary=f"Đã thêm {imported} profile từ:\n{source}"
+        details=[]
+        if duplicates:
+            details.append(f"{duplicates} username trùng")
+        if invalid:
+            details.append(f"{invalid} dòng không đúng định dạng")
+        if details:
+            summary += "\nBỏ qua: " + ", ".join(details) + "."
+        if imported:
+            summary += "\n\nBấm Lưu thay đổi để áp dụng vào hệ thống."
+            QMessageBox.information(self,"Đã nhập tài khoản",summary)
+        else:
+            QMessageBox.warning(self,"Không có tài khoản mới",summary)
+    def export_credentials(self)->None:
+        """Write the current dialog values only after an explicit user action."""
+        values=self.accounts()
+        if not values:
+            QMessageBox.warning(self,"Chưa có tài khoản","Không có profile nào để xuất.")
+            return
+        missing=[str(index) for index,(_profile_id,username,password) in enumerate(values,start=1) if not username or not password]
+        if missing:
+            QMessageBox.warning(
+                self,
+                "Thiếu thông tin",
+                "Không thể xuất profile thiếu username hoặc password: " + ", ".join(missing),
+            )
+            return
+        suggested=Path.home() / f"ik-auto-accounts-{time.strftime('%Y%m%d-%H%M%S')}.txt"
+        selected,_filter=QFileDialog.getSaveFileName(
+            self,
+            "Xuất username/password",
+            str(suggested),
+            "Tệp văn bản (*.txt);;Tất cả tệp (*.*)",
+        )
+        if not selected:
+            return
+        lines=[
+            "|".join((
+                escape_account_export_field(f"Tài khoản {index:02d}"),
+                escape_account_export_field(username),
+                escape_account_export_field(password),
+            ))
+            for index,(_profile_id,username,password) in enumerate(values,start=1)
+        ]
+        try:
+            output=Path(selected)
+            if not output.suffix:
+                output=output.with_suffix(".txt")
+            output.write_text("\n".join(lines)+"\n",encoding="utf-8")
+        except OSError as error:
+            QMessageBox.warning(self,"Không xuất được file",str(error))
+            return
+        QMessageBox.information(
+            self,
+            "Đã xuất tài khoản",
+            f"Đã xuất {len(lines)} profile vào:\n{output}\n\n"
+            "File chứa password dạng rõ; hãy lưu và chia sẻ file cẩn thận.",
+        )
     def validate(self)->None:
         values=self.accounts()
         if not values: QMessageBox.warning(self,"Thiếu thông tin","Hãy giữ hoặc thêm ít nhất một tài khoản."); return

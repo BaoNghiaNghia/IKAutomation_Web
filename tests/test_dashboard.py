@@ -328,18 +328,18 @@ def test_sync_master_profile_id_is_stored_as_combo_user_data() -> None:
     assert combo.items == [("cuongg********", None, "account-2")]
 
 
-def test_dashboard_uses_more_space_on_compact_screens_and_half_on_desktop() -> None:
+def test_dashboard_uses_three_fifths_of_every_screen_height() -> None:
     compact = Dashboard._responsive_metrics(1366, 768)
     desktop = Dashboard._responsive_metrics(1920, 1080)
 
-    assert compact == (792, 445, 246, 285, True)
-    assert desktop == (773, 435, 240, 279, False)
+    assert compact == (792, 461, 246, 285, True)
+    assert desktop == (773, 648, 240, 279, False)
 
 
 def test_dashboard_never_exceeds_small_logical_screen_geometry() -> None:
     width, height, sidebar_min, sidebar_max, compact = Dashboard._responsive_metrics(640, 400)
 
-    assert (width, height) == (502, 309)
+    assert (width, height) == (502, 240)
     assert sidebar_min <= sidebar_max < width
     assert compact is True
 
