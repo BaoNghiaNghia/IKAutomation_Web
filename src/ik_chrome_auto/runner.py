@@ -87,6 +87,10 @@ FARM_MINIMUM_CANVAS_SIZE = AUTOMATION_RENDERER_SIZE
 # holds the same lease only for its bounded mailbox flow.
 AUTOMATION_RENDERER_WAIT_SECONDS = 30.0
 FARM_RENDERER_IDLE_RELEASE_SECONDS = 4.0
+# World Map can show a blank, fading canvas for well over eight seconds while
+# the portal loads.  The transition has already been clicked exactly once, so
+# wait for an explicit map control instead of aborting mid-load.
+FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS = 35.0
 FARM_RESOURCE_BUTTON_CENTERS: dict[str, tuple[float, float]] = {
     "food": (0.286, 0.735),
     "wood": (0.406, 0.735),
@@ -1118,20 +1122,24 @@ class ProfileWorker:
             if (
                 self._farm_world_map_click_at > 0
                 and state != FarmGameState.WORLD_MAP
-                and elapsed_after_click <= 8.0
+                and elapsed_after_click <= FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS
                 and not (
                     state == FarmGameState.UNKNOWN
                     and browser_canvas.found
                     and not city.found
                 )
             ):
-                self._farm_next_at = time.monotonic() + 0.8
-                self._publish(WorkerState.RUNNING, "Auto Farm: đang chờ World Map tải xong")
+                self._farm_next_at = time.monotonic() + 1.2
+                self._publish(
+                    WorkerState.RUNNING,
+                    "Auto Farm: đang chờ World Map tải xong "
+                    f"({elapsed_after_click:.0f}/{FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS:.0f}s)",
+                )
                 return
             if (
                 self._farm_world_map_click_at > 0
                 and state == FarmGameState.UNKNOWN
-                and elapsed_after_click <= 8.0
+                and elapsed_after_click <= FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS
                 and browser_canvas.found
                 and not city.found
             ):
@@ -1160,11 +1168,19 @@ class ProfileWorker:
                     f"Auto Farm: World Map đã xác minh; {roster_summary}; {decision.message}",
                 )
                 return
-            if self._farm_world_map_click_at > 0 and elapsed_after_click > 8.0:
+            if (
+                self._farm_world_map_click_at > 0
+                and elapsed_after_click > FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS
+            ):
                 screenshot = self._save_farm_debug_capture("world-map-unverified")
                 self._log_farm(
                     "error",
-                    {"reason": "world_map_unverified_after_single_click", "screenshot": str(screenshot) if screenshot else None},
+                    {
+                        "reason": "world_map_unverified_after_single_click",
+                        "elapsed_seconds": round(elapsed_after_click, 2),
+                        "timeout_seconds": FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS,
+                        "screenshot": str(screenshot) if screenshot else None,
+                    },
                 )
                 self._farm = None
                 self._publish(

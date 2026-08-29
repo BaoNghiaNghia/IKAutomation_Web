@@ -4,6 +4,7 @@ from ik_chrome_auto.runner import (
     AUTOMATION_RENDERER_WINDOW_SIZE,
     FARM_MINIMUM_CANVAS_SIZE,
     FARM_REFERENCE_ASPECT_RATIO,
+    FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS,
     ProfileWorker,
 )
 
@@ -33,6 +34,11 @@ def test_farm_rejects_tiny_renderer_captures_before_team_or_resource_input() -> 
     assert ProfileWorker._farm_canvas_is_usable((640, 360)) is False
     assert ProfileWorker._farm_canvas_is_usable((366, 168)) is False
     assert ProfileWorker._farm_canvas_is_usable((186, 66)) is False
+
+
+def test_farm_allows_a_slow_world_map_portal_transition() -> None:
+    """A blank loading canvas is normal and must not fail after eight seconds."""
+    assert FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS >= 30.0
 
 
 def test_continent_coordinate_fields_use_canvas_ratio_offsets() -> None:
