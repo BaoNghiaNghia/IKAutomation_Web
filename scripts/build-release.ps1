@@ -77,6 +77,30 @@ function Copy-DevProfilesToRelease {
     }
 }
 
+function Test-PyInstallerAvailable {
+    # On PowerShell 7, a failed native command can be promoted to a terminating
+    # NativeCommandError when ErrorActionPreference is Stop. A missing optional
+    # build dependency is expected here and must instead trigger installation.
+    $nativePreference = Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue
+    $previousNativePreference = if ($nativePreference) { $nativePreference.Value } else { $null }
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell converts Python's ModuleNotFoundError on stderr
+        # into a NativeCommandError when the outer script uses Stop.
+        $ErrorActionPreference = 'Continue'
+        if ($nativePreference) {
+            $PSNativeCommandUseErrorActionPreference = $false
+        }
+        & $python -c "import PyInstaller" 2>$null
+        return $LASTEXITCODE -eq 0
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        if ($nativePreference) {
+            $PSNativeCommandUseErrorActionPreference = $previousNativePreference
+        }
+    }
+}
+
 Push-Location $projectRoot
 try {
     if ($CleanCache -and (Test-Path -LiteralPath $buildCacheRoot)) {
@@ -84,8 +108,8 @@ try {
     }
     New-Item -ItemType Directory -Path $pyInstallerWorkRoot, $pyInstallerSpecRoot -Force | Out-Null
 
-    & $python -c "import PyInstaller" > $null 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Test-PyInstallerAvailable)) {
+        Write-Host 'PyInstaller is missing; installing it now...' -ForegroundColor DarkCyan
         & $python -m pip install --disable-pip-version-check 'pyinstaller>=6.11,<7'
         if ($LASTEXITCODE -ne 0) { throw 'PyInstaller installation failed.' }
     }
