@@ -7,6 +7,7 @@ import numpy as np
 
 from ik_chrome_auto.mail_monitor import BrowserMailMonitor
 from ik_chrome_auto.runner import (
+    AUTOMATION_RENDERER_WINDOW_SIZE,
     AUTOMATION_RENDERER_SIZE,
     CLOSE_MAIL_POINT,
     COMBAT_TAB_POINT,
@@ -127,7 +128,7 @@ def test_automation_renderer_uses_real_720p_then_restores_the_grid_tile() -> Non
 
     assert worker._acquire_automation_renderer() is True
     assert worker._acquire_automation_renderer() is True
-    assert session.begin_calls == [AUTOMATION_RENDERER_SIZE]
+    assert session.begin_calls == [AUTOMATION_RENDERER_WINDOW_SIZE]
 
     worker._release_automation_renderer()
 

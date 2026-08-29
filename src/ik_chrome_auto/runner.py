@@ -66,6 +66,20 @@ FARM_REFERENCE_ASPECT_RATIO = 16 / 9
 # recognition.  The worker therefore temporarily renders a single active
 # profile at this true 16:9 size; it never upscales a compact screenshot.
 AUTOMATION_RENDERER_SIZE = (1280, 720)
+# Chrome's native renderer includes an 8 px game-surface gutter on every edge
+# in app mode.  Therefore a native 1280×720 renderer produces only a
+# 1264×704 CDP game-canvas capture and Farm remains blocked.  Size the native
+# window slightly larger, while keeping 1280×720 as the required *captured*
+# automation canvas and all coordinate/template references.
+AUTOMATION_RENDERER_CANVAS_GUTTER = (16, 16)
+AUTOMATION_RENDERER_WINDOW_SIZE = tuple(
+    canvas + gutter
+    for canvas, gutter in zip(
+        AUTOMATION_RENDERER_SIZE,
+        AUTOMATION_RENDERER_CANVAS_GUTTER,
+        strict=True,
+    )
+)
 FARM_MINIMUM_CANVAS_SIZE = AUTOMATION_RENDERER_SIZE
 # One high-detail WebGL renderer at a time prevents five compact profiles from
 # becoming five simultaneous 720p GPU surfaces.  A Farm lease survives the
@@ -277,7 +291,7 @@ class ProfileWorker:
             time.sleep(min(0.08, max(0.0, deadline - time.monotonic())))
 
     def _acquire_automation_renderer(self, *, wait_seconds: float = 0.0) -> bool:
-        """Lease the one true 1280×720 renderer and save this tile's geometry."""
+        """Lease a renderer that yields a true 1280×720 CDP game canvas."""
         if getattr(self, "_automation_renderer_locked", False):
             return True
         if self.session is None:
@@ -295,7 +309,7 @@ class ProfileWorker:
         try:
             begin = getattr(self.session, "begin_automation_renderer", None)
             self._automation_renderer_layout = (
-                begin(*AUTOMATION_RENDERER_SIZE) if callable(begin) else None
+                begin(*AUTOMATION_RENDERER_WINDOW_SIZE) if callable(begin) else None
             )
         except Exception:
             self._automation_renderer_locked = False
@@ -711,7 +725,7 @@ class ProfileWorker:
                 )
                 try:
                     resized = self.session.ensure_minimum_game_renderer(
-                        *FARM_MINIMUM_CANVAS_SIZE
+                        *AUTOMATION_RENDERER_WINDOW_SIZE
                     )
                 except Exception as error:
                     resized = False
