@@ -2,7 +2,8 @@
 param(
     [switch]$SkipTests,
     [switch]$NoDesktopShortcut,
-    [switch]$Archive
+    [switch]$Archive,
+    [switch]$CleanCache
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,8 +13,12 @@ $icon = Join-Path $projectRoot 'src\ik_chrome_auto\assets\ik_auto.ico'
 $assets = Join-Path $projectRoot 'src\ik_chrome_auto\assets'
 $launcher = Join-Path $projectRoot 'src\ik_chrome_auto\launcher.py'
 $releaseRoot = Join-Path $projectRoot 'release'
-$buildRoot = Join-Path $projectRoot 'build'
+$buildCacheRoot = Join-Path $projectRoot '.build-cache'
+$pyInstallerWorkRoot = Join-Path $buildCacheRoot 'pyinstaller-work'
+$pyInstallerSpecRoot = Join-Path $buildCacheRoot 'pyinstaller-spec'
 $applicationName = 'IK Auto'
+$devConfig = Join-Path $projectRoot 'config.json'
+$devProfiles = Join-Path $projectRoot 'data\profiles'
 
 # These modules are bundled by ``--collect-all qfluentwidgets`` although the
 # dashboard only uses Qt Widgets, SVG icons and XML. Collecting them inflates a
@@ -39,25 +44,64 @@ $excludedModules = @(
 if (-not (Test-Path -LiteralPath $python)) { throw 'Missing .venv. Run IKAutomation_dev.cmd once before building.' }
 if (-not (Test-Path -LiteralPath $icon)) { throw "Missing icon: $icon" }
 
+function Copy-DevProfilesToRelease {
+    param([string]$Destination)
+
+    # A release is a portable snapshot of the current development setup. Keep
+    # config and Chrome profile state, but omit regenerable cache/debug files
+    # so 45 profiles do not unnecessarily inflate the build.
+    if (Test-Path -LiteralPath $devConfig) {
+        Copy-Item -LiteralPath $devConfig -Destination (Join-Path $Destination 'config.json') -Force
+    } else {
+        Write-Warning 'Không tìm thấy config.json của bản dev; release sẽ tạo config mẫu ở lần chạy đầu.'
+        return
+    }
+    if (-not (Test-Path -LiteralPath $devProfiles)) {
+        Write-Warning 'Không tìm thấy data\profiles của bản dev; chỉ đã sao chép config profile.'
+        return
+    }
+
+    $releaseProfiles = Join-Path $Destination 'data\profiles'
+    New-Item -ItemType Directory -Path $releaseProfiles -Force | Out-Null
+    $robocopyArgs = @(
+        $devProfiles, $releaseProfiles, '/E', '/COPY:DAT', '/DCOPY:DAT',
+        '/R:2', '/W:1', '/XJ',
+        '/XD', 'Cache', 'Code Cache', 'GPUCache', 'GrShaderCache',
+        'DawnCache', 'ShaderCache', 'Crashpad',
+        '/XF', '*.log', '*.tmp', 'LOCK', 'LOCKfile'
+    )
+    & robocopy @robocopyArgs | Out-Host
+    # Robocopy uses 0-7 for successful copies, including skipped cache files.
+    if ($LASTEXITCODE -gt 7) {
+        throw "Could not copy development profiles (robocopy exit code $LASTEXITCODE). Close Chrome and build again."
+    }
+}
+
 Push-Location $projectRoot
 try {
-    & $python -m pip install --disable-pip-version-check 'pyinstaller>=6.11,<7'
-    if ($LASTEXITCODE -ne 0) { throw 'PyInstaller installation failed.' }
+    if ($CleanCache -and (Test-Path -LiteralPath $buildCacheRoot)) {
+        Remove-Item -LiteralPath $buildCacheRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $pyInstallerWorkRoot, $pyInstallerSpecRoot -Force | Out-Null
+
+    & $python -c "import PyInstaller" > $null 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        & $python -m pip install --disable-pip-version-check 'pyinstaller>=6.11,<7'
+        if ($LASTEXITCODE -ne 0) { throw 'PyInstaller installation failed.' }
+    }
+    Write-Host "Using PyInstaller cache: $buildCacheRoot" -ForegroundColor DarkCyan
     if (-not $SkipTests) {
         & $python -m pytest -q
         if ($LASTEXITCODE -ne 0) { throw 'Tests failed; build stopped.' }
     }
-    foreach ($path in @($releaseRoot, $buildRoot)) {
-        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
-    }
     $pyInstallerArgs = @(
-        '--noconfirm', '--clean', '--windowed', '--onedir', '--noupx',
+        '--noconfirm', '--windowed', '--onedir', '--noupx',
         '--name', $applicationName,
         '--icon', $icon,
         '--paths', (Join-Path $projectRoot 'src'),
         '--distpath', $releaseRoot,
-        '--workpath', $buildRoot,
-        '--specpath', $buildRoot,
+        '--workpath', $pyInstallerWorkRoot,
+        '--specpath', $pyInstallerSpecRoot,
         '--optimize', '2',
         '--add-data', "$(Join-Path $projectRoot 'config.example.json');.",
         '--add-data', "$assets;ik_chrome_auto/assets",
@@ -71,12 +115,17 @@ try {
     foreach ($module in $excludedModules) {
         $pyInstallerArgs += @('--exclude-module', $module)
     }
+    if ($CleanCache) {
+        $pyInstallerArgs += '--clean'
+    }
     $pyInstallerArgs += $launcher
     & $python -m PyInstaller @pyInstallerArgs
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed to create the application.' }
     $applicationDir = Join-Path $releaseRoot $applicationName
     $applicationExe = Join-Path $applicationDir "$applicationName.exe"
     if (-not (Test-Path -LiteralPath $applicationExe)) { throw "Build file not found: $applicationExe" }
+
+    Copy-DevProfilesToRelease -Destination $applicationDir
 
     # Farm matching uses still images only. OpenCV's bundled FFmpeg bridge is
     # only required for VideoCapture/VideoWriter and otherwise costs ~30 MB.
@@ -93,7 +142,8 @@ try {
         'IK Auto compact Windows release',
         $sizeText,
         'Excluded: unused Qt multimedia/PDF/QML/WebEngine modules and OpenCV FFmpeg video codec.',
-        'Browser profiles, logs and screenshots are created outside the release folder for new installations.'
+        'Includes config.json and Chrome profile state copied from the development build.',
+        'Regenerable Chrome caches and debug logs are excluded from the copied profiles.'
     ) -Encoding utf8
 
     if ($Archive) {
@@ -119,5 +169,7 @@ try {
         $shortcut.Save()
     }
     Write-Host "Build complete: $applicationExe ($sizeText)" -ForegroundColor Green
+    Write-Host 'Đã sao chép config và profile Chrome từ bản dev (không gồm cache).' -ForegroundColor Green
+    Write-Host 'Next builds reuse the PyInstaller cache. Use -CleanCache for a clean build.' -ForegroundColor DarkCyan
     if (-not $NoDesktopShortcut) { Write-Host "Desktop shortcut created: $applicationName" -ForegroundColor Green }
 } finally { Pop-Location }

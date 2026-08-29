@@ -7,5 +7,6 @@ data/snapshots/
 data/screenshots/
 data/logs/
 build/
+.build-cache/
 release/
 *.spec
