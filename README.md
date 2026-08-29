@@ -2,8 +2,8 @@
 
 Ứng dụng Windows quản lý nhiều Chrome profile riêng biệt cho IK: mở/đóng
 profile theo nhóm, sắp xếp cửa sổ, Auto Farm, giám sát thông báo và đồng bộ
-chuột - bàn phím. Toàn bộ mã nguồn nằm trực tiếp tại thư mục gốc của
-repository này; không còn thư mục dự án lồng nhau.
+chuột - bàn phím. Toàn bộ mã nguồn nằm trực tiếp tại thư mục gốc của kho mã
+này; không còn thư mục dự án lồng nhau.
 
 ## Chức năng chính
 
@@ -32,43 +32,42 @@ release/    Bản build Windows (không commit)
 - Python 3.11, 3.12 hoặc 3.13. `run.cmd` sẽ thử cài Python 3.13 khi máy chưa
   có bản phù hợp.
 
-The browser-farming architecture and migration plan are documented in
+Kiến trúc và kế hoạch chuyển đổi Auto Farm được mô tả trong
 [`docs/farm-automation-browser-spec.md`](docs/farm-automation-browser-spec.md).
-The non-negotiable browser-farm workflow and safety invariants are recorded in
+Quy trình bắt buộc và các nguyên tắc an toàn của Farm nằm trong
 [`docs/farm-browser-implementation-contract.md`](docs/farm-browser-implementation-contract.md).
-Credential-storage requirements are documented in
+Yêu cầu lưu trữ thông tin đăng nhập nằm trong
 [`docs/account-credential-security.md`](docs/account-credential-security.md).
 
-## Safety defaults
+## Mặc định an toàn
 
-- Only `http`/`https` URLs whose hostname matches `capture.allowed_hosts` are
-  opened or observed. Matching is hostname-based, so a URL that merely contains
-  an allowed domain in its path or query is rejected.
-- Network/WebSocket/message capture and response-body capture are disabled by
-  default. Turn both on only for a short, supported diagnostic session and
-  treat the generated logs as sensitive.
-- JSONL logs rotate at 5 MB with three retained backups. Snapshots retain only
-  the configured newest files (`capture.snapshot_retention`, default `50`).
-- Chrome automation-identifying banners are not hidden by default. The tool
-  does not attempt to bypass game controls, access restrictions, or terms.
-- Browser profiles contain login cookies. They are excluded from Git; keep the
-  `data` folder on an encrypted, access-controlled Windows account.
+- Chỉ mở hoặc quan sát URL `http`/`https` có hostname khớp với
+  `capture.allowed_hosts`. Việc so khớp dựa trên hostname; URL chỉ chứa domain
+  được phép trong path hoặc query sẽ bị từ chối.
+- Việc ghi nhận mạng/WebSocket/tin nhắn và nội dung phản hồi mặc định bị tắt.
+  Chỉ bật trong phiên chẩn đoán ngắn và xem log sinh ra là dữ liệu nhạy cảm.
+- Log JSONL tự xoay vòng ở 5 MB và giữ ba bản sao lưu. Ảnh chụp chỉ giữ số file
+  mới nhất theo `capture.snapshot_retention` (mặc định `50`).
+- Công cụ không ẩn banner nhận diện tự động hóa của Chrome và không cố vượt qua
+  cơ chế kiểm soát, hạn chế truy cập hoặc điều khoản của game.
+- Profile trình duyệt có thể chứa cookie đăng nhập. Chúng bị loại khỏi Git; hãy
+  giữ thư mục `data` trong tài khoản Windows được mã hóa và kiểm soát truy cập.
 
-## Run
+## Chạy ứng dụng
 
-Double-click `run.cmd`, or run it from Command Prompt. It performs all setup
-only when needed, checks Chrome/configuration, runs the browser-worker test,
-then opens the dashboard. On the first run it creates `.venv`, installs missing
-packages, and creates `config.json` from `config.example.json`. If a compatible
-Python is missing, it installs Python 3.13 through Windows `winget` first.
+Double-click `run.cmd` hoặc chạy từ Command Prompt. Script chỉ thiết lập khi
+cần, kiểm tra Chrome/cấu hình, chạy kiểm thử browser worker rồi mở dashboard.
+Ở lần chạy đầu, script tạo `.venv`, cài dependency còn thiếu và tạo
+`config.json` từ `config.example.json`. Nếu chưa có Python tương thích, script
+sẽ thử cài Python 3.13 qua Windows `winget` trước.
 
-Run tests from an activated virtual environment:
+Chạy toàn bộ kiểm thử từ môi trường ảo đã kích hoạt:
 
 ```powershell
 python -m pytest -q
 ```
 
-## Debug Auto Farm
+## Chẩn đoán Auto Farm
 
 Khi bấm **Farm**, tool ghi log riêng theo từng profile tại
 `data\logs\farm-<profile-id>.jsonl`. Mỗi dòng có thời gian, trạng thái game,
@@ -84,9 +83,10 @@ file credential.
 
 Sau khi chạy `run.cmd` một lần, double-click [`build.cmd`](build.cmd). Script sẽ
 kiểm thử, tạo ứng dụng không có cửa sổ Terminal tại `release\IK Auto\IK Auto.exe`
-và tạo shortcut **IK Auto** có icon trên Desktop. Build đã loại Qt multimedia,
-PDF, QML/WebEngine không dùng và codec video OpenCV; các thành phần bắt buộc như
-Chrome CDP/Playwright, OpenCV nhận diện ảnh và Qt UI vẫn được giữ nguyên.
+và tạo shortcut **IK Auto** có icon trên Desktop. Bản build đã loại Qt
+multimedia, PDF, QML/WebEngine không dùng và codec video OpenCV; các thành phần
+bắt buộc như Chrome CDP/Playwright, OpenCV nhận diện ảnh và giao diện Qt vẫn
+được giữ nguyên.
 
 Với bản build mới, cài đặt lần đầu lưu `config.json`, profile Chrome, ảnh và log
 tại `%LOCALAPPDATA%\IK Auto`, không nằm trong thư mục `release`. Vì vậy có thể
@@ -103,5 +103,5 @@ cũ để không mất profile.
 File phát hành sẽ là `release\IK-Auto-portable.zip`; người nhận giải nén toàn bộ
 thư mục trước khi chạy `IK Auto.exe`.
 
-This project is intended for authorised automation only. Review the target
-service's terms and use separate profiles for separate accounts.
+Dự án chỉ dành cho hoạt động tự động hóa được cho phép. Hãy xem điều khoản của
+dịch vụ mục tiêu và sử dụng profile tách biệt cho từng tài khoản.
