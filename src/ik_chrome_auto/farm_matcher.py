@@ -26,6 +26,9 @@ _BROWSER_REFERENCE_HEIGHT = 433
 _READY_TEAM_LABEL = "browser_ready_team_label.png"
 _READY_TEAM_LABEL_SNOW = "browser_ready_team_label_snow.png"
 _BUSY_TEAM_LABEL = "browser_busy_team_label.png"
+# The countdown digits after the busy icon change every second.  Matching the
+# entire label made a busy row intermittently score below a false Ready match.
+_BUSY_TEAM_INDICATOR_WIDTH = 26
 # Browser screenshots have their own HUD scaling. These are stable roster
 # layout proportions, not gameplay click coordinates. A matched Ready label
 # is mapped to its actual row before any scheduler decision is made.
@@ -442,7 +445,11 @@ class BrowserCanvasMatcher:
         portrait_left = round(image_width * _ROSTER_PORTRAIT_LEFT_RATIO)
         portrait_right = min(round(image_width * _ROSTER_PORTRAIT_RIGHT_RATIO), image_width)
         ready_grays = tuple(cv2.cvtColor(template, cv2.COLOR_BGR2GRAY) for template in status_ready)
-        busy_gray = cv2.cvtColor(status_busy, cv2.COLOR_BGR2GRAY)
+        # Keep only the static icon/prefix of the busy label; the trailing
+        # ``mm:ss`` text is intentionally excluded because it changes on each
+        # capture.  This is especially important for rows 1/2 in the live HUD.
+        busy_indicator = status_busy[:, : min(_BUSY_TEAM_INDICATOR_WIDTH, status_busy.shape[1])]
+        busy_gray = cv2.cvtColor(busy_indicator, cv2.COLOR_BGR2GRAY)
         states: dict[int, TeamRowState] = {}
         for team in range(1, _MAX_TEAM_ROWS + 1):
             row_top = roster_top + (team - 1) * row_height
@@ -469,15 +476,31 @@ class BrowserCanvasMatcher:
                 for template in ready_grays
             )
             busy_score = -1.0
-            if status_busy.shape[1] <= search.shape[1] and status_busy.shape[0] <= search.shape[0]:
+            # The icon starts at the fixed left edge of the label and the HUD
+            # baseline is stable within each row. Restrict its search band to
+            # that position: allowing it to slide across the whole label made
+            # plain Ready text/background falsely correlate with Busy.
+            # Labels start roughly 16px into this cropped slot; keep a narrow
+            # horizontal band rather than the full text field.
+            busy_band = search[12:36, :52]
+            if (
+                busy_indicator.shape[1] <= busy_band.shape[1]
+                and busy_indicator.shape[0] <= busy_band.shape[0]
+            ):
                 busy_score = cv2.minMaxLoc(
-                    cv2.matchTemplate(search_gray, busy_gray, cv2.TM_CCOEFF_NORMED)
+                    cv2.matchTemplate(
+                        cv2.cvtColor(busy_band, cv2.COLOR_BGR2GRAY),
+                        busy_gray,
+                        cv2.TM_CCOEFF_NORMED,
+                    )
                 )[1]
             # A row is Ready only with strong positive evidence and when that
             # evidence is decisively stronger than the observed busy label.
             # This excludes the sidebar's repeated background which used to
             # make every row score as `Sẵn sàng` at the old 0.66 threshold.
-            if ready_score >= 0.55 and ready_score >= busy_score + 0.06:
+            if busy_score >= 0.62:
+                states[team] = TeamRowState.BUSY
+            elif ready_score >= 0.55 and ready_score >= busy_score + 0.06:
                 states[team] = TeamRowState.READY
             elif busy_score >= 0.55 and busy_score >= ready_score + 0.05:
                 states[team] = TeamRowState.BUSY

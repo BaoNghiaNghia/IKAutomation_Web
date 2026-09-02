@@ -148,6 +148,34 @@ def test_full_renderer_roster_uses_direct_busy_evidence_per_row() -> None:
     )
 
 
+def test_busy_row_uses_static_indicator_when_countdown_changes() -> None:
+    matcher = BrowserCanvasMatcher()
+    ready = matcher._load("browser_ready_team_label.png")
+    busy = matcher._load("browser_busy_team_label.png")
+    canvas = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    for team in range(1, 4):
+        row_top = round(720 * 0.425) + (team - 1) * round(720 * 0.071)
+        portrait = np.random.default_rng(team + 10).integers(0, 256, (51, 52), dtype=np.uint8)
+        canvas[row_top : row_top + 51, 18:70] = portrait[..., None]
+        if team == 2:
+            # Retain the icon/static prefix but replace the live countdown.
+            canvas[row_top + 16 : row_top + 32, 78:104] = busy[:, :26]
+            canvas[row_top + 16 : row_top + 32, 104:128] = np.random.default_rng(99).integers(
+                0, 256, (16, 24, 3), dtype=np.uint8
+            )
+        else:
+            canvas[row_top + 16 : row_top + 32, 78:126] = ready
+
+    roster = matcher._team_roster(canvas)
+
+    assert tuple((row.team, row.state) for row in roster) == (
+        (1, TeamRowState.READY),
+        (2, TeamRowState.BUSY),
+        (3, TeamRowState.READY),
+    )
+
+
 def test_active_resource_templates_are_locked_to_the_1280_renderer() -> None:
     """Selected-resource templates include each supplied gold-ring state."""
     import ik_chrome_auto.farm_matcher as matcher_module

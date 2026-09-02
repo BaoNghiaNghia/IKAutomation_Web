@@ -234,17 +234,15 @@ def test_farm_retries_transient_failures_before_stopping(monkeypatch) -> None:
     worker._reset_farm_cycle = lambda **_kwargs: setattr(worker, "_farm", object())
     monkeypatch.setattr("ik_chrome_auto.runner.time.monotonic", lambda: 100.0)
 
-    for attempt in range(1, FARM_MAX_RECOVERY_ATTEMPTS + 1):
+    for attempt in range(1, FARM_MAX_RECOVERY_ATTEMPTS + 3):
         assert worker._retry_farm_or_stop("world_map", "World Map đang tải") is True
         assert logs[-1][0] == "retry"
         assert logs[-1][1]["attempt"] == attempt
+        assert logs[-1][1]["continuous"] is True
         assert updates[-1][0] == WorkerState.RUNNING
 
-    assert worker._retry_farm_or_stop("world_map", "World Map đang tải") is False
-    assert worker._farm is None
-    assert logs[-1][0] == "error"
-    assert logs[-1][1]["retries_exhausted"] is True
-    assert updates[-1][0] == WorkerState.ERROR
+    assert worker._farm is not None
+    assert logs[-1][1]["backoff_step"] == FARM_MAX_RECOVERY_ATTEMPTS
 
 
 def test_continent_coordinate_fields_use_canvas_ratio_offsets() -> None:

@@ -103,6 +103,8 @@ FARM_CONTROL_POSTCONDITION_HOLD_SECONDS = 2.2
 # the portal loads.  The transition has already been clicked exactly once, so
 # wait for an explicit map control instead of aborting mid-load.
 FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS = 35.0
+# Controls the capped retry backoff, not whether Farm may stop. A Farm run is
+# intentionally persistent and ends only through the user's Stop Farm command.
 FARM_MAX_RECOVERY_ATTEMPTS = 3
 FARM_RECOVERY_BASE_DELAY_SECONDS = 3.0
 FARM_RESOURCE_BUTTON_CENTERS: dict[str, tuple[float, float]] = {
@@ -2019,37 +2021,29 @@ class ProfileWorker:
         screenshot: Path | None = None,
         **details: object,
     ) -> bool:
-        """Restart a transient Farm cycle before eventually failing safely."""
+        """Restart a transient Farm cycle without ending a user-started run."""
         self._farm_recovery_attempts += 1
         attempt = self._farm_recovery_attempts
+        backoff_step = min(attempt, FARM_MAX_RECOVERY_ATTEMPTS)
         payload = {
             "reason": reason,
             "attempt": attempt,
-            "max_attempts": FARM_MAX_RECOVERY_ATTEMPTS,
+            "backoff_step": backoff_step,
+            "continuous": True,
             "screenshot": str(screenshot) if screenshot else None,
             **details,
         }
-        if attempt <= FARM_MAX_RECOVERY_ATTEMPTS:
-            delay_seconds = FARM_RECOVERY_BASE_DELAY_SECONDS * attempt
-            self._log_farm("retry", {**payload, "delay_seconds": delay_seconds})
-            self._reset_farm_cycle(preserve_recovery_attempts=True)
-            self._farm_next_at = time.monotonic() + delay_seconds
-            self._publish(
-                WorkerState.RUNNING,
-                f"Auto Farm: {message}; đang thử lại ({attempt}/{FARM_MAX_RECOVERY_ATTEMPTS})",
-                f"Thử lại sau {delay_seconds:.0f}s"
-                + (f" | Ảnh debug: {screenshot}" if screenshot else ""),
-            )
-            return True
-
-        self._log_farm("error", {**payload, "retries_exhausted": True})
-        self._farm = None
+        delay_seconds = FARM_RECOVERY_BASE_DELAY_SECONDS * backoff_step
+        self._log_farm("retry", {**payload, "delay_seconds": delay_seconds})
+        self._reset_farm_cycle(preserve_recovery_attempts=True)
+        self._farm_next_at = time.monotonic() + delay_seconds
         self._publish(
-            WorkerState.ERROR,
-            f"Auto Farm dừng sau {FARM_MAX_RECOVERY_ATTEMPTS} lần thử lại: {message}",
-            f"Ảnh trước khi dừng: {screenshot}" if screenshot else "",
+            WorkerState.RUNNING,
+            f"Auto Farm: {message}; sẽ tiếp tục thử lại (lần {attempt})",
+            f"Thử lại sau {delay_seconds:.0f}s"
+            + (f" | Ảnh debug: {screenshot}" if screenshot else ""),
         )
-        return False
+        return True
 
     def _reset_farm_cycle(self, *, preserve_recovery_attempts: bool = False) -> None:
         """Create a clean farm cycle without stopping the active worker."""
