@@ -28,3 +28,18 @@ def test_selector_is_non_repeating_and_bounded_to_three_attempts() -> None:
     assert all(selection.point is not None for selection in selections[:3])
     assert len({selection.point for selection in selections[:3]}) == 3
     assert selections[3].exhausted
+
+
+def test_selector_does_not_reset_the_pool_after_a_successful_area_change() -> None:
+    selector = ResourceAreaPointSelector(Random(11))
+    first = selector.next(
+        run_id="run", profile_id="account-2", resource="iron", level=6, area_epoch=1
+    )
+    second = selector.next(
+        run_id="run", profile_id="account-2", resource="iron", level=6, area_epoch=2
+    )
+
+    assert first.point is not None
+    assert second.point is not None
+    assert second.point != first.point
+    assert second.attempt == 2

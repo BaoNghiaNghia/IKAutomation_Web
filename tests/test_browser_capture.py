@@ -369,6 +369,16 @@ def test_close_detaches_page_cdp_even_for_external_profile() -> None:
     assert session._runtime_page is None
 
 
+def test_close_browser_closes_detached_external_profile_context() -> None:
+    session, _canvas, context, page = make_session()
+    cdp = session._get_page_cdp_session(page)
+
+    session.close(close_browser=True)
+
+    assert cdp.detach_calls == 1
+    assert context.close_calls == 1
+
+
 def test_switching_page_detaches_old_session_and_resets_capture_probe() -> None:
     context = FakeContext([FakeCDP(), FakeCDP()])
     session, _canvas, _context, old_page = make_session(context=context)

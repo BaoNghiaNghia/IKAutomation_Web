@@ -573,11 +573,15 @@ class ProfileWorker:
                 continue
             try:
                 if command.kind == CommandKind.SHUTDOWN:
-                    self._close_session()
+                    # Tool shutdown deliberately leaves profile Chrome
+                    # windows running so an update/restart can reconnect.
+                    self._close_session(close_browser=False)
                     self._publish(WorkerState.STOPPED, "Đã đóng worker")
                     return
                 if command.kind == CommandKind.STOP:
-                    self._close_session()
+                    # STOP is submitted by the explicit “Đóng tabs” button;
+                    # this must close the retained detached Chrome context.
+                    self._close_session(close_browser=True)
                     self._publish(WorkerState.STOPPED, "Đã dừng profile")
                     continue
                 if command.kind == CommandKind.START_FARM:
@@ -1088,14 +1092,15 @@ class ProfileWorker:
                     self._farm_next_at = time.monotonic() + 0.35
                     self._publish(WorkerState.RUNNING, "Auto Farm: đang quan sát toast hoặc popup sau Tìm kiếm")
                     return
-                else:
+                elif state == FarmGameState.RESOURCE_SEARCH and find_resource.actionable:
                     # The ADB execution service treats a search panel that
                     # remains usable after its observation window as a
                     # bounded no-result attempt.  The website often does not
                     # render a toast for that outcome, so do not stall on the
                     # same Search button or classify it as a technical error.
-                    # Rotate resource first. A verified area change is allowed
-                    # only after the whole four-resource round has no result.
+                    # The same fresh enabled Search control is the confirmed
+                    # negative outcome.  Move to an eligible World Map area
+                    # now; do not click Search again or rotate blindly.
                     resource, level = self._farm.current_target()
                     self._farm_find_resource_click_at = 0.0
                     if self._handle_search_no_result(
@@ -1106,6 +1111,17 @@ class ProfileWorker:
                         after_tap_seconds=toast_elapsed,
                     ):
                         return
+                    return
+                else:
+                    # Neither a result popup nor the same verified Search
+                    # panel appeared.  This is a transient UI state, not
+                    # permission to edit coordinates.
+                    screenshot = self._save_farm_debug_capture("search-result-unverified")
+                    self._retry_farm_or_stop(
+                        "search_result_unverified",
+                        "không xác minh được popup hoặc panel Tìm kiếm sau thao tác",
+                        screenshot,
+                    )
                     return
             # A full target can expire before the selected march is sent. The
             # game shows a confirmation dialog in that exact case. Never
@@ -2103,46 +2119,25 @@ class ProfileWorker:
         delay_seconds: float,
         after_tap_seconds: float | None = None,
     ) -> bool:
-        """Advance one bounded no-result outcome without retrying a target.
+        """Relocate after a verified Search miss without blind retries.
 
-        The four randomized resource types are exhausted first at the current
-        level. Only then can the browser use the verified World Map coordinate
-        workflow. This prevents an early area jump after a single missing
-        resource and preserves the ADB point-selector's three-point limit.
+        The portal's negative outcome is that the same enabled Search button
+        remains on the verified resource panel.  In that case the requested
+        behaviour is to move the current target to another eligible World Map
+        area immediately, not to silently rotate resource types first.
         """
         if self._farm is None:
             return False
-        if self._farm.advance_search_plan():
-            next_resource, next_level = self._farm.current_target()
-            self._farm_resource_selected_at = 0.0
-            self._farm_resource_selected_by_layout = False
-            self._farm_resource_template_misses = 0
-            self._farm_find_resource_clicks = 0
-            self._farm_find_resource_click_at = 0.0
-            self._log_farm(
-                "search_no_result",
-                {
-                    "reason": reason,
-                    "resource": resource,
-                    "level": level,
-                    "next_resource": next_resource,
-                    "next_level": next_level,
-                    "round_complete": False,
-                    "after_tap_seconds": round(after_tap_seconds, 2) if after_tap_seconds is not None else None,
-                },
-            )
-            self._farm_next_at = time.monotonic() + delay_seconds
-            self._publish(
-                WorkerState.RUNNING,
-                f"Auto Farm: không có {resource} cấp {level}; đổi sang {next_resource} cấp {next_level}",
-            )
-            return True
-
-        # All four resource types have been tried at this level. The workflow
-        # now owns a new point selection, which is shuffled and non-repeating
-        # per run/profile/resource/level/area epoch by ResourceAreaPointSelector.
-        area_resource, area_level = self._farm.current_target()
-        relocation = self._try_resource_area_relocation(area_resource, area_level)
+        self._log_farm(
+            "search_no_result",
+            {
+                "reason": reason,
+                "resource": resource,
+                "level": level,
+                "after_tap_seconds": round(after_tap_seconds, 2) if after_tap_seconds is not None else None,
+            },
+        )
+        relocation = self._try_resource_area_relocation(resource, level)
         if relocation == "moved":
             self._farm_resource_selected_at = 0.0
             self._farm_resource_selected_by_layout = False
@@ -2156,47 +2151,39 @@ class ProfileWorker:
             self._farm_find_resource_click_at = 0.0
             self._log_farm(
                 "search_round_area_relocated",
-                {"reason": reason, "level": area_level, "resource": area_resource},
+                {"reason": reason, "level": level, "resource": resource},
             )
             self._farm_next_at = time.monotonic() + 1.0
             return True
         if relocation == "unavailable":
-            # Do not skip to another level if the map/input UI cannot be
-            # verified. The coordinate method can retry later without blind
-            # interaction and without losing the selected search plan.
+            # Do not continue from a half-verified map/input UI. A new
+            # preflight brings the game back to a known state before any next
+            # input, while the user-started Farm itself remains running.
             self._log_farm(
                 "search_round_area_waiting",
-                {"reason": reason, "level": area_level, "resource": area_resource},
+                {"reason": reason, "level": level, "resource": resource},
             )
-            self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
-            self._publish(
-                WorkerState.RUNNING,
-                f"Auto Farm: đã thử 4 tài nguyên cấp {area_level}; chờ xác minh World Map để đổi khu vực",
+            return self._retry_farm_or_stop(
+                "resource_area_navigation_unverified",
+                "không thể xác minh đổi khu vực; quay lại preflight an toàn",
+                resource=resource,
+                level=level,
             )
-            return True
 
-        # The approved three-point pool for this level is exhausted. Only now
-        # move to the next configured level; if all pools ended, finish this
-        # cycle and let the normal 15-second scheduler start a fresh one.
-        if self._farm.advance_level_plan():
-            next_resource, next_level = self._farm.current_target()
-            self._farm_resource_selected_at = 0.0
-            self._farm_resource_selected_by_layout = False
-            self._farm_resource_template_misses = 0
-            self._farm_find_resource_clicks = 0
-            self._farm_find_resource_click_at = 0.0
-            self._log_farm(
-                "search_area_pool_exhausted",
-                {"reason": reason, "level": area_level, "next_resource": next_resource, "next_level": next_level},
-            )
-            self._farm_next_at = time.monotonic() + delay_seconds
-            self._publish(
-                WorkerState.RUNNING,
-                f"Auto Farm: hết 3 điểm khu vực cho cấp {area_level}; chuyển sang {next_resource} cấp {next_level}",
-            )
-            return True
-        self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
-        self._publish(WorkerState.COMPLETED, "Auto Farm: đã thử hết tài nguyên, cấp mỏ và điểm khu vực; chờ cycle tiếp theo")
+        # Three non-repeating points are the whole bounded fallback for this
+        # target.  Keep Auto Farm active, but do not loop through coordinates
+        # or invent another level after the pool has been exhausted.
+        self._farm.step = FarmStep.WAITING
+        self._farm.waiting_for_ready_team = False
+        self._farm_next_at = time.monotonic() + FARM_NO_READY_TEAM_RESCAN_SECONDS
+        self._log_farm(
+            "resource_area_pool_unavailable",
+            {"reason": reason, "level": level, "resource": resource, "max_attempts": 3},
+        )
+        self._publish(
+            WorkerState.RUNNING,
+            f"Auto Farm: không còn điểm khu vực khả dụng cho {resource} cấp {level}; chờ lượt kiểm tra sau",
+        )
         return True
 
     @staticmethod
@@ -2330,13 +2317,22 @@ class ProfileWorker:
         bounds: tuple[int, int, int, int],
         image_size: tuple[int, int],
     ) -> None:
-        """Click City/Map as a real mouse input at its exact canvas ratio."""
+        """Click City/Map natively at its exact verified canvas ratio.
+
+        Several portal profiles acknowledge Playwright's synthetic mouse
+        call without forwarding it to the WebGL HUD.  The native path uses
+        the live window and canvas geometry, so it remains resolution-safe
+        while producing the same physical click a user performs.
+        """
         if self.session is None:
             raise RuntimeError("Profile chưa mở")
         if not getattr(self, "_automation_renderer_locked", False):
             raise RuntimeError("Nút Map/City chỉ được bấm sau khi renderer đã khóa ở 1280×720")
+        native_click = getattr(self.session, "click_game_surface_native_ratio", None)
         click_ratio = getattr(self.session, "click_game_surface_ratio", None)
-        if callable(click_ratio):
+        if callable(native_click):
+            native_click(*FARM_MAP_TOGGLE_CENTER)
+        elif callable(click_ratio):
             click_ratio(*FARM_MAP_TOGGLE_CENTER)
         else:
             click_mouse = getattr(self.session, "click_farm_template_mouse", None)
@@ -2437,7 +2433,11 @@ class ProfileWorker:
         field. This keeps the original pair available for a rollback if the
         destination cannot be verified.
         """
-        if self.session is None or self._farm is None:
+        if (
+            self.session is None
+            or self._farm is None
+            or not getattr(self, "_automation_renderer_locked", False)
+        ):
             return "unavailable"
         selection = self._farm_area_selector.next(
             run_id=self._farm_run_id,
@@ -2460,16 +2460,16 @@ class ProfileWorker:
         # City's dedicated map icon. This is intentionally different from the
         # old ADB minimap shortcut and matches the portal UI contract.
         return_to_city = detected.evidence_for(FarmTemplateId.BROWSER_WORLD_MAP_BACK_BUTTON)
-        if not return_to_city.actionable:
+        if detected.state != DetectedGameState.WORLD_MAP or not return_to_city.actionable:
             self._log_farm("resource_area_navigation_blocked", {
                 "reason": "world_map_return_button_unavailable", "point": point,
                 "attempt": selection.attempt, "city_levels": selection.city_levels,
             })
             return "unavailable"
-        self.session.tap_farm_template(return_to_city.bounds, size)  # type: ignore[arg-type]
+        input_method = self._tap_farm_game_control(return_to_city.bounds, size)  # type: ignore[arg-type]
         self._log_farm(
             "tap_world_map_return_to_city",
-            {"bounds": return_to_city.bounds, "point": point},
+            {"bounds": return_to_city.bounds, "point": point, "input": input_method},
         )
         time.sleep(0.7)
         city, _surface, city_size = self.session.detect_farm_state()
@@ -2480,10 +2480,10 @@ class ProfileWorker:
                 "attempt": selection.attempt,
             })
             return "unavailable"
-        self.session.tap_farm_template(city_map_button.bounds, city_size)  # type: ignore[arg-type]
+        input_method = self._tap_farm_game_control(city_map_button.bounds, city_size)  # type: ignore[arg-type]
         self._log_farm(
             "tap_city_continent_map",
-            {"bounds": city_map_button.bounds, "point": point},
+            {"bounds": city_map_button.bounds, "point": point, "input": input_method},
         )
         time.sleep(0.6)
         continent, _surface, continent_size = self.session.detect_farm_state()
@@ -2506,37 +2506,62 @@ class ProfileWorker:
                 "reason": "original_coordinates_unreadable", "point": point, "attempt": selection.attempt,
             })
             return "unavailable"
+
+        def rollback_coordinates(
+            frame: object,
+            frame_size: tuple[int, int],
+            *,
+            reason: str,
+        ) -> bool:
+            """Restore the readable pair; never guess a coordinate field."""
+            rollback_pin = frame.evidence_for(FarmTemplateId.CONTINENT_MAP_PIN_BUTTON)  # type: ignore[attr-defined]
+            if not rollback_pin.actionable:
+                self._log_farm("resource_area_rollback_blocked", {
+                    "reason": reason, "point": point, "original": (original_x, original_y),
+                })
+                return False
+            rollback_x, rollback_y = self._coordinate_fields_from_pin(rollback_pin.bounds, frame_size)  # type: ignore[arg-type]
+            restored_x = (
+                self.session.read_focused_numeric_farm_input(rollback_x, frame_size) is not None
+                and self.session.replace_focused_farm_input(original_x)
+            )
+            restored_y = (
+                self.session.read_focused_numeric_farm_input(rollback_y, frame_size) is not None
+                and self.session.replace_focused_farm_input(original_y)
+            )
+            restored = restored_x and restored_y
+            self._log_farm("resource_area_rolled_back", {
+                "reason": reason, "point": point, "original": (original_x, original_y),
+                "verified": restored,
+            })
+            return restored
+
         if not self.session.read_focused_numeric_farm_input(x_field, continent_size) == original_x:
             return "unavailable"
         if not self.session.replace_focused_farm_input(point[0]):
             return "unavailable"
         if not self.session.read_focused_numeric_farm_input(y_field, continent_size) == original_y or not self.session.replace_focused_farm_input(point[1]):
-            self.session.read_focused_numeric_farm_input(x_field, continent_size)
-            self.session.replace_focused_farm_input(original_x)
+            rollback_coordinates(continent, continent_size, reason="y_input_unverified")
             return "unavailable"
         refreshed, _surface, refreshed_size = self.session.detect_farm_state()
         refreshed_pin = refreshed.evidence_for(FarmTemplateId.CONTINENT_MAP_PIN_BUTTON)
         if not refreshed_pin.actionable:
+            rollback_coordinates(refreshed, refreshed_size, reason="pin_missing_after_coordinate_input")
             return "unavailable"
-        self.session.tap_farm_template(refreshed_pin.bounds, refreshed_size)  # type: ignore[arg-type]
+        input_method = self._tap_farm_game_control(refreshed_pin.bounds, refreshed_size)  # type: ignore[arg-type]
+        self._log_farm("tap_continent_map_pin", {"bounds": refreshed_pin.bounds, "point": point, "input": input_method})
         time.sleep(0.45)
         target_frame, _surface, target_size = self.session.detect_farm_state()
         target_pin = target_frame.evidence_for(FarmTemplateId.CONTINENT_MAP_SEARCH_TARGET_PIN)
         if not target_pin.actionable:
-            rollback_pin = target_frame.evidence_for(FarmTemplateId.CONTINENT_MAP_PIN_BUTTON)
-            if rollback_pin.actionable:
-                rollback_x, rollback_y = self._coordinate_fields_from_pin(rollback_pin.bounds, target_size)  # type: ignore[arg-type]
-                self.session.read_focused_numeric_farm_input(rollback_x, target_size)
-                self.session.replace_focused_farm_input(original_x)
-                self.session.read_focused_numeric_farm_input(rollback_y, target_size)
-                self.session.replace_focused_farm_input(original_y)
-                self.session.tap_farm_template(rollback_pin.bounds, target_size)  # type: ignore[arg-type]
+            rollback_coordinates(target_frame, target_size, reason="destination_pin_unverified")
             self._log_farm("resource_area_navigation_rolled_back", {
                 "reason": "destination_pin_unverified", "point": point,
                 "original": (original_x, original_y), "attempt": selection.attempt,
             })
             return "unavailable"
-        self.session.tap_farm_template(target_pin.bounds, target_size)  # type: ignore[arg-type]
+        input_method = self._tap_farm_game_control(target_pin.bounds, target_size)  # type: ignore[arg-type]
+        self._log_farm("tap_continent_target_pin", {"bounds": target_pin.bounds, "point": point, "input": input_method})
         time.sleep(0.7)
         final, _surface, _final_size = self.session.detect_farm_state()
         world_verified = final.state == DetectedGameState.WORLD_MAP or (
@@ -2544,6 +2569,7 @@ class ProfileWorker:
             and final.evidence_for(FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON).found
         )
         if not world_verified:
+            rollback_coordinates(final, _final_size, reason="world_map_unverified_after_target_pin")
             self._log_farm("resource_area_navigation_blocked", {
                 "reason": "world_map_unverified_after_target_pin", "point": point,
                 "attempt": selection.attempt,
@@ -2721,7 +2747,7 @@ class ProfileWorker:
                 )
         return path
 
-    def _close_session(self) -> None:
+    def _close_session(self, *, close_browser: bool = False) -> None:
         self._farm = None
         self._farm_renderer_waiting = False
         # Closing does not need to redraw the compact tile, but it must free
@@ -2730,7 +2756,7 @@ class ProfileWorker:
         if self.session is None:
             return
         try:
-            self.session.close()
+            self.session.close(close_browser=close_browser)
         finally:
             self.session = None
 

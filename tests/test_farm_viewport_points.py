@@ -42,14 +42,18 @@ def test_farm_map_toggle_uses_exact_canvas_percentage_and_excludes_mail() -> Non
     assert not (left <= 151 < left + width and top <= 583 < top + height)
 
 
-def test_farm_map_toggle_prefers_mouse_ratio_over_touch() -> None:
+def test_farm_map_toggle_prefers_native_mouse_ratio_over_synthetic_input() -> None:
     class Session:
         def __init__(self) -> None:
-            self.ratios: list[tuple[float, float]] = []
+            self.native_ratios: list[tuple[float, float]] = []
+            self.synthetic_ratios: list[tuple[float, float]] = []
             self.touches: list[object] = []
 
+        def click_game_surface_native_ratio(self, x: float, y: float) -> None:
+            self.native_ratios.append((x, y))
+
         def click_game_surface_ratio(self, x: float, y: float) -> None:
-            self.ratios.append((x, y))
+            self.synthetic_ratios.append((x, y))
 
         def tap_farm_template(self, *args: object) -> None:
             self.touches.append(args)
@@ -62,7 +66,8 @@ def test_farm_map_toggle_prefers_mouse_ratio_over_touch() -> None:
 
     worker._click_map_toggle(bounds, (1280, 720))
 
-    assert worker.session.ratios == [(53 / 1280, 666 / 720)]
+    assert worker.session.native_ratios == [(53 / 1280, 666 / 720)]
+    assert worker.session.synthetic_ratios == []
     assert worker.session.touches == []
     assert worker._automation_renderer_hold_until > 0.0
 

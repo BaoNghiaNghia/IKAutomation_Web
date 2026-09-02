@@ -84,7 +84,11 @@ class ResourceAreaPointSelector:
 
     def __init__(self, random: Random | None = None) -> None:
         self._random = random or SystemRandom()
-        self._bags: dict[tuple[str, str, str, int, int], list[MapPoint]] = {}
+        # A bag belongs to one running Farm session, device, resource and
+        # resource level.  In particular it does *not* reset after reaching
+        # a new area: resetting there allowed a previously used coordinate to
+        # be selected again forever.
+        self._bags: dict[tuple[str, str, str, int], list[MapPoint]] = {}
 
     def next(
         self,
@@ -96,7 +100,11 @@ class ResourceAreaPointSelector:
         area_epoch: int,
     ) -> AreaPointSelection:
         city_levels = eligible_city_levels(level)
-        key = (run_id, profile_id, resource, level, area_epoch)
+        # ``area_epoch`` remains part of the public call for compatibility
+        # with existing worker callers and logs.  It must not partition the
+        # point pool; each selected point is non-repeating for this run.
+        del area_epoch
+        key = (run_id, profile_id, resource, level)
         points = eligible_points(level)
         bag = self._bags.get(key)
         if bag is None:
@@ -109,4 +117,5 @@ class ResourceAreaPointSelector:
         return AreaPointSelection(bag.pop(0), attempt, self.max_attempts, len(bag), city_levels)
 
     def clear(self, *, run_id: str, profile_id: str, resource: str, level: int, area_epoch: int) -> None:
-        self._bags.pop((run_id, profile_id, resource, level, area_epoch), None)
+        del area_epoch
+        self._bags.pop((run_id, profile_id, resource, level), None)

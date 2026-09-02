@@ -1471,7 +1471,15 @@ class ChromeProfileSession:
             self._page.wait_for_timeout(milliseconds)
             self._configure_interaction_frames()
 
-    def close(self) -> None:
+    def close(self, *, close_browser: bool = False) -> None:
+        """Detach from a profile, optionally closing its Chrome window.
+
+        Closing the IK Auto dashboard must only detach: its profiles are
+        intentionally retained for an update/restart.  The explicit
+        ``Đóng tabs`` command, however, owns the user's intent to close the
+        individual Chrome profile window and must close the persistent
+        browser context even though Chrome was launched as a detached process.
+        """
         self._closing = True
         try:
             self._detach_page_cdp_session()
@@ -1479,7 +1487,10 @@ class ChromeProfileSession:
             # ``__new__`` and therefore do not run ``__init__``.  Treat those
             # sessions as externally owned, the same safe default used for a
             # detached profile Chrome.
-            if getattr(self, "_owns_browser_process", False) and self._context is not None:
+            if (
+                (close_browser or getattr(self, "_owns_browser_process", False))
+                and self._context is not None
+            ):
                 try:
                     self._context.close()
                 except Exception:
