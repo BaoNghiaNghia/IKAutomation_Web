@@ -4,6 +4,7 @@ from ik_chrome_auto.runner import (
     AUTOMATION_RENDERER_WINDOW_SIZE,
     FARM_MINIMUM_CANVAS_SIZE,
     FARM_MAX_RECOVERY_ATTEMPTS,
+    FARM_NO_READY_TEAM_RESCAN_SECONDS,
     FARM_RENDERER_IDLE_RELEASE_SECONDS,
     FARM_REFERENCE_ASPECT_RATIO,
     FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS,
@@ -145,6 +146,21 @@ def test_farm_keeps_720p_renderer_through_search_postcondition(monkeypatch) -> N
     assert released == []
 
 
+def test_farm_yields_720p_after_postcondition_even_for_a_short_next_poll(monkeypatch) -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker._automation_renderer_locked = True
+    worker._automation_renderer_hold_until = 99.0
+    worker._farm = FarmWorkflow()
+    worker._farm_next_at = 100.35
+    released: list[bool] = []
+    worker._release_automation_renderer = lambda **_kwargs: released.append(True)
+    monkeypatch.setattr("ik_chrome_auto.runner.time.monotonic", lambda: 100.0)
+
+    worker._release_farm_renderer_when_idle()
+
+    assert released == [True]
+
+
 def test_farm_rejects_tiny_renderer_captures_before_team_or_resource_input() -> None:
     """A tiny canvas cannot safely distinguish Ready from Busy labels."""
     assert AUTOMATION_RENDERER_SIZE == (1280, 720)
@@ -165,6 +181,10 @@ def test_farm_allows_a_slow_world_map_portal_transition() -> None:
 def test_farm_can_yield_the_high_resolution_renderer_during_completed_waits() -> None:
     """Long completed waits still yield the one shared renderer."""
     assert FARM_RENDERER_IDLE_RELEASE_SECONDS < 1.0
+
+
+def test_no_ready_team_wait_is_two_minutes_before_the_next_scan() -> None:
+    assert FARM_NO_READY_TEAM_RESCAN_SECONDS == 120.0
 
 
 def test_farm_yields_720p_renderer_during_long_postcondition_wait(monkeypatch) -> None:

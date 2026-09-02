@@ -93,6 +93,7 @@ AUTOMATION_RENDERER_WAIT_SECONDS = 30.0
 # the old four-second lease made the first profile monopolise it indefinitely
 # while another profile was waiting for its initial scan.
 FARM_RENDERER_IDLE_RELEASE_SECONDS = 0.9
+FARM_NO_READY_TEAM_RESCAN_SECONDS = 120.0
 FARM_MAP_TRANSITION_RENDERER_HOLD_SECONDS = 2.0
 # A click is not complete until its fresh 1280×720 postcondition has been
 # observed.  This must exceed the two-second Search verification delay, so the
@@ -232,6 +233,7 @@ class ProfileWorker:
         self._farm_world_map_click_at = 0.0
         self._farm_ready_teams: tuple[int, ...] = ()
         self._farm_roster: tuple[TeamRosterRow, ...] = ()
+        self._farm_post_dispatch_roster_scan_pending = False
         self._farm_search_clicks = 0
         self._farm_resource_tab_clicked_at = 0.0
         self._farm_resource_panel_verified = False
@@ -398,21 +400,11 @@ class ProfileWorker:
         # game is consuming and verifying a Map transition click.
         if time.monotonic() < getattr(self, "_automation_renderer_hold_until", 0.0):
             return
-        if self._farm is None:
-            self._release_automation_renderer()
-            return
-        idle_for = self._farm_next_at - time.monotonic()
-        if idle_for < FARM_RENDERER_IDLE_RELEASE_SECONDS:
-            return
-        # Long waits must yield the single 720p renderer to another profile.
-        # The next tick acquires it again *before* taking a capture or sending
-        # input, so this never performs Farm actions on a compact canvas.  Do
-        # not use historical click counters here: those remain non-zero while
-        # World Map or a confirmation dialog is settling and previously let
-        # one profile monopolise the renderer indefinitely.
-        if self._farm.step == FarmStep.WAITING:
-            self._release_automation_renderer()
-            return
+        # The post-click hold above is the only period that must retain the
+        # renderer. Afterwards always yield, including before a short
+        # 0.35–0.8s poll: otherwise one profile can reacquire every short tick
+        # and starve another profile already waiting at a resource popup. The
+        # next Farm tick reacquires 1280×720 before it captures or clicks.
         self._release_automation_renderer()
 
     def _capture_mail_canvas(self) -> tuple[bytes, tuple[int, int]]:
@@ -942,10 +934,44 @@ class ProfileWorker:
             # The World Map transition hides the team HUD. Retain a roster
             # detected in the stable City frame and use it only for this farm
             # run; it is reset whenever Farm is started again.
-            if ready_teams:
-                self._farm_ready_teams = ready_teams
             if roster:
                 self._farm_roster = roster
+                # A readable roster is authoritative even when every row is
+                # busy.  Keeping the prior non-empty ready list here made a
+                # team that had just departed look ready until the next farm
+                # restart.
+                self._farm_ready_teams = self._ready_teams_from_roster(roster)
+            elif ready_teams:
+                # Compatibility for detectors that only return positive Ready
+                # slots but cannot yet establish a full roster.
+                self._farm_ready_teams = ready_teams
+            # A new Farm cycle may only proceed after its completed dispatch
+            # has been followed by one readable roster scan. This prevents a
+            # stale dashboard/team choice while the previous march changes a
+            # row from Ready to Busy.
+            if self._farm_post_dispatch_roster_scan_pending:
+                if not roster:
+                    self._farm_next_at = time.monotonic() + 0.8
+                    self._publish(
+                        WorkerState.RUNNING,
+                        "Auto Farm: chờ quét lại trạng thái đội sau lượt vừa rồi",
+                    )
+                    return
+                self._farm_post_dispatch_roster_scan_pending = False
+                self._log_farm(
+                    "post_dispatch_roster_scanned",
+                    {
+                        "roster": [
+                            {"team": row.team, "state": row.state.value, "evidence": row.evidence}
+                            for row in roster
+                        ],
+                        "ready_teams": self._farm_ready_teams,
+                    },
+                )
+                self._publish(
+                    WorkerState.RUNNING,
+                    f"Auto Farm: đã quét lại đội sau lượt; {self._roster_summary(roster)}",
+                )
             self._log_farm(
                 "detection",
                 {
@@ -1132,6 +1158,7 @@ class ProfileWorker:
                     # Start a fresh randomized cycle after the requested
                     # 15-second delay so the roster is scanned again.
                     self._reset_farm_cycle()
+                    self._farm_post_dispatch_roster_scan_pending = True
                     self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
                     self._log_farm(
                         "next_cycle_scheduled",
@@ -1203,7 +1230,7 @@ class ProfileWorker:
                     FarmGameState.WORLD_MAP,
                     ready_teams=self._farm_ready_teams or ready_teams,
                 )
-                delay = 0.35 if decision.step == FarmStep.OPEN_SEARCH else self._farm.policy.retry_delay_seconds
+                delay = self._world_map_decision_delay(decision, open_search_delay=0.35)
                 self._farm_next_at = time.monotonic() + delay
                 self._log_farm(
                     "world_map_verified",
@@ -1247,7 +1274,7 @@ class ProfileWorker:
                     FarmGameState.WORLD_MAP,
                     ready_teams=self._farm_ready_teams,
                 )
-                delay = 0.8 if decision.step == FarmStep.OPEN_SEARCH else self._farm.policy.retry_delay_seconds
+                delay = self._world_map_decision_delay(decision, open_search_delay=0.8)
                 self._farm_next_at = time.monotonic() + delay
                 self._log_farm(
                     "world_map_verified",
@@ -1920,10 +1947,10 @@ class ProfileWorker:
                     "blocked_no_ready_team",
                     {"screenshot": str(screenshot) if screenshot else None},
                 )
-                self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
+                self._farm_next_at = time.monotonic() + FARM_NO_READY_TEAM_RESCAN_SECONDS
                 self._publish(
                     WorkerState.RUNNING,
-                    "Auto Farm: World Map đã xác minh; không có đội sẵn sàng",
+                    "Auto Farm: World Map đã xác minh; không có đội sẵn sàng, quét lại sau 2 phút",
                     f"Ảnh kiểm tra: {screenshot}" if screenshot else "",
                 )
                 return
@@ -2035,6 +2062,7 @@ class ProfileWorker:
         self._farm_world_map_click_at = 0.0
         self._farm_ready_teams = ()
         self._farm_roster = ()
+        self._farm_post_dispatch_roster_scan_pending = False
         self._farm_search_clicks = 0
         self._farm_resource_tab_clicked_at = 0.0
         self._farm_resource_panel_verified = False
@@ -2559,6 +2587,23 @@ class ProfileWorker:
         ready = ",".join(str(row.team) for row in roster if row.state.value == "ready") or "không có"
         busy = ",".join(str(row.team) for row in roster if row.state.value == "busy") or "không có"
         return f"đã quét {len(roster)} đội (sẵn sàng: {ready}; bận: {busy})"
+
+    def _world_map_decision_delay(self, decision: object, *, open_search_delay: float) -> float:
+        """Choose the next scan delay without shortening a no-ready wait."""
+        if getattr(decision, "step", None) == FarmStep.OPEN_SEARCH:
+            return open_search_delay
+        if (
+            getattr(decision, "step", None) == FarmStep.WAITING
+            and self._farm is not None
+            and self._farm.waiting_for_ready_team
+        ):
+            return FARM_NO_READY_TEAM_RESCAN_SECONDS
+        return self._farm.policy.retry_delay_seconds if self._farm is not None else 15.0
+
+    @staticmethod
+    def _ready_teams_from_roster(roster: tuple[TeamRosterRow, ...]) -> tuple[int, ...]:
+        """Derive the current ready set from one complete, readable roster."""
+        return tuple(row.team for row in roster if row.state.value == "ready")
 
     @staticmethod
     def _is_expected_team_selected(

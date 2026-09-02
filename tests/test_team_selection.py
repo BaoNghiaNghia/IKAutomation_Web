@@ -89,3 +89,23 @@ def test_dispatch_rejects_visible_team_panel() -> None:
         expected_team=1,
         roster=(),
     ) is False
+
+
+def test_readable_roster_replaces_stale_ready_team_state() -> None:
+    roster = (
+        TeamRosterRow(1, TeamRowState.BUSY, "BusyLabel"),
+        TeamRosterRow(2, TeamRowState.BUSY, "BusyLabel"),
+        TeamRosterRow(3, TeamRowState.READY, "ReadyLabel"),
+    )
+
+    assert ProfileWorker._ready_teams_from_roster(roster) == (3,)
+
+
+def test_all_busy_roster_produces_no_ready_team_for_post_dispatch_scan() -> None:
+    roster = (
+        TeamRosterRow(1, TeamRowState.BUSY, "BusyLabel"),
+        TeamRosterRow(2, TeamRowState.BUSY, "BusyLabel"),
+        TeamRosterRow(3, TeamRowState.BUSY, "BusyLabel"),
+    )
+
+    assert ProfileWorker._ready_teams_from_roster(roster) == ()
