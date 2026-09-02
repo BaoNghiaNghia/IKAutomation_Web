@@ -1511,6 +1511,26 @@ class ChromeProfileSession:
         """
         self._closing = True
         try:
+            if close_browser:
+                # ``connect_over_cdp`` attaches to Chrome's default context.
+                # Closing that BrowserContext is not a reliable way to close
+                # the externally launched browser and may simply be ignored.
+                # Browser.close is the DevTools command for terminating this
+                # exact per-profile Chrome process.
+                try:
+                    if self._page is not None and not self._page.is_closed():
+                        self._get_page_cdp_session(self._page).send("Browser.close", {})
+                except Exception:
+                    # If the browser-level command is unavailable, close all
+                    # pages explicitly. A managed app-mode profile normally
+                    # has one page, whose close also closes its window.
+                    if self._context is not None:
+                        for page in tuple(self._context.pages):
+                            try:
+                                if not page.is_closed():
+                                    page.close(run_before_unload=False)
+                            except Exception:
+                                continue
             self._detach_page_cdp_session()
             # Some focused vision tests construct a lightweight session with
             # ``__new__`` and therefore do not run ``__init__``.  Treat those

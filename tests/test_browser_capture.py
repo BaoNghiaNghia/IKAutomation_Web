@@ -412,6 +412,7 @@ def test_close_browser_closes_detached_external_profile_context() -> None:
     session.close(close_browser=True)
 
     assert cdp.detach_calls == 1
+    assert ("Browser.close", {}) in cdp.calls
     assert context.close_calls == 1
 
 
