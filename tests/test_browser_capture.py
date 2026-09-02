@@ -33,6 +33,7 @@ class FakeCanvas:
         self.direct_png = direct_png or (b"\x89PNG\r\n\x1a\n" + b"\0" * 1_200)
         self.evaluate_calls = 0
         self.screenshot_calls = 0
+        self.click_calls: list[dict[str, Any]] = []
 
     def evaluate(self, _script: str) -> str:
         self.evaluate_calls += 1
@@ -42,6 +43,9 @@ class FakeCanvas:
     def screenshot(self, **_kwargs: Any) -> bytes:
         self.screenshot_calls += 1
         return ASSET_PNG
+
+    def click(self, **kwargs: Any) -> None:
+        self.click_calls.append(kwargs)
 
 
 class FakeCDP:
@@ -273,14 +277,31 @@ def test_mouse_fallback_click_uses_the_template_center() -> None:
 
     session.click_farm_template_mouse((10, 20, 30, 40), (100, 100))
 
-    calls = context.sessions[0].calls
-    assert [method for method, _params in calls] == ["Input.dispatchMouseEvent"] * 3
-    assert [params["type"] for _method, params in calls] == [
-        "mouseMoved",
-        "mousePressed",
-        "mouseReleased",
-    ]
-    assert all(params["x"] == 137.5 and params["y"] == 154.25 for _method, params in calls)
+    assert context.sessions[0].calls == []
+    assert _canvas.click_calls == [{
+        "position": {
+            "x": BOX["width"] * 0.25,
+            "y": BOX["height"] * 0.4,
+        },
+        "force": True,
+        "timeout": session.config.browser.startup_timeout_ms,
+    }]
+
+
+def test_canvas_ratio_mouse_click_uses_locator_in_the_correct_frame() -> None:
+    session, _canvas, context, _page = make_session()
+
+    session.click_game_surface_ratio(53 / 1280, 666 / 720)
+
+    assert context.sessions[0].calls == []
+    assert _canvas.click_calls == [{
+        "position": {
+            "x": BOX["width"] * 53 / 1280,
+            "y": BOX["height"] * 666 / 720,
+        },
+        "force": True,
+        "timeout": 90_000,
+    }]
 
 
 def test_cdp_capture_uses_exact_canvas_clip() -> None:

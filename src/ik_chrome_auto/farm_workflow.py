@@ -39,9 +39,9 @@ class FarmStep(StrEnum):
 @dataclass(frozen=True, slots=True)
 class FarmPolicy:
     resources: tuple[str, ...] = ("iron", "stone", "wood", "food")
-    # Only these levels have an approved World Map relocation pool. Level 5
-    # must not enter that flow because no verified area rule exists for it.
-    levels: tuple[int, ...] = (6, 7, 8)
+    # Fallback only. The runner replaces this with the value currently shown
+    # in ``Cấp: n / n`` and never clicks the level controls.
+    levels: tuple[int, ...] = (7,)
     # All four rows can be used. The selected team is the first verified Ready
     # row from the World Map roster and remains locked for the whole cycle.
     allowed_teams: tuple[int, ...] = (1, 2, 3, 4)
@@ -79,6 +79,7 @@ class FarmWorkflow:
         self.resource_index = 0
         self.level_index = 0
         self.team: int | None = None
+        self.observed_level: int | None = None
         # WAITING has several meanings. Only the no-ready-team wait may be
         # resumed directly from a fresh World Map roster scan; post-dispatch
         # and terminal search-plan waits must still start a new cycle.
@@ -213,5 +214,10 @@ class FarmWorkflow:
     def current_target(self) -> tuple[str, int]:
         return self._target()
 
+    def set_observed_level(self, level: int) -> None:
+        """Use the level currently visible in the verified search panel."""
+        if level > 0:
+            self.observed_level = level
+
     def _target(self) -> tuple[str, int]:
-        return self.resource_order[self.resource_index], self.policy.levels[self.level_index]
+        return self.resource_order[self.resource_index], self.observed_level or self.policy.levels[self.level_index]

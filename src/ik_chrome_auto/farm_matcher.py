@@ -34,6 +34,9 @@ _ROSTER_ROW_HEIGHT_RATIO = 0.071
 _ROSTER_BOTTOM_RATIO = 0.720
 _ROSTER_LABEL_LEFT_RATIO = 0.048
 _ROSTER_LABEL_RIGHT_RATIO = 0.145
+_ROSTER_PORTRAIT_LEFT_RATIO = 0.014
+_ROSTER_PORTRAIT_RIGHT_RATIO = 0.055
+_ROSTER_PORTRAIT_MIN_EDGE_DENSITY = 0.155
 _MAX_TEAM_ROWS = 4
 
 
@@ -67,28 +70,36 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
         region="lower_left",
     ),
     # In City, the bottom-left parchment/compass control opens World Map.
+    # Use the full control captured from the real 1280x720 renderer instead
+    # of the legacy browser crop, then scale it with the current canvas.
     FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON: TemplateSpec(
-        "browser_map_to_city_tight.png",
-        threshold=0.78,
-        region="city_corner",
-        reference_width=835,
-        reference_height=432,
-        scale_variants=(0.92, 0.96, 1.0, 1.04, 1.08),
-        grayscale=True,
+        "browser_open_world_map_1280.png",
+        threshold=0.70,
+        # The Map control is left of the Mail button.  Keep its region narrow
+        # enough that the neighbouring envelope cannot become a false map
+        # match on a 1280×720 City canvas.
+        region="map_corner",
+        reference_width=1280,
+        reference_height=720,
+        scale_variants=(0.94, 0.97, 1.0, 1.03, 1.06),
+        edge=True,
     ),
-    # In World Map, the bottom-left castle control returns to City. Its
-    # palette changes with the account environment, so match the tightly
-    # cropped edge shape and keep both known colour variants.
+    # In World Map, the bottom-left castle control returns to City. These two
+    # full controls were captured from the real 1280x720 renderer. The earlier
+    # tight browser crop omitted too much of the castle and missed the red
+    # skin; match the icon shape so terrain colour cannot affect detection.
     FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON: TemplateSpec(
-        "browser_city_icon_green_tight.png",
-        threshold=0.60,
-        region="city_corner",
-        reference_width=835,
-        reference_height=432,
+        "browser_city_return_green_1280.png",
+        threshold=0.68,
+        # Exclude the adjacent envelope completely. Matching only authorises
+        # the action; runner.py taps the fixed canvas-relative toggle point.
+        region="map_corner",
+        reference_width=1280,
+        reference_height=720,
         alternatives=(
-            "browser_city_icon_red_tight.png",
+            "browser_city_return_red_1280.png",
         ),
-        scale_variants=(0.92, 0.96, 1.0, 1.04, 1.08),
+        scale_variants=(0.94, 0.97, 1.0, 1.03, 1.06),
         edge=True,
     ),
     FarmTemplateId.CONTINENT_MAP_TITLE: TemplateSpec("continent_map_title.png"),
@@ -138,7 +149,10 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
     # next to the live X/Y indicator, unlike the larger ADB minimap button.
     FarmTemplateId.BROWSER_WORLD_MAP_COORDINATE_PIN: TemplateSpec(
         "browser_world_map_coordinate_pin.png",
-        threshold=0.75,
+        # Current 1280x720 World Map skins score 0.740-0.746, while the
+        # supplied City frame is 0.716. This bounded threshold recognises the
+        # live Map HUD without allowing City to authorise a Search click.
+        threshold=0.735,
         region="top",
         reference_width=835,
         reference_height=432,
@@ -154,13 +168,15 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
         scale_variants=(0.94, 0.97, 1.0, 1.03, 1.06),
     ),
     FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON: TemplateSpec(
+        # Supplied cropped magnifier from the live 1280×720 World Map HUD.
+        # It must be scaled in that canvas reference frame; the old compact
+        # 836×433 reference enlarged this icon and could miss it or confuse a
+        # nearby lower-left control.
         "browser_resource_search_button.png",
-        # Account-2's green World Map skin consistently scores about 0.75.
-        # It is used only after a World Map state is independently verified.
-        threshold=0.70,
+        threshold=0.76,
         region="lower_left",
-        reference_width=836,
-        reference_height=433,
+        reference_width=1280,
+        reference_height=720,
     ),
     FarmTemplateId.BROWSER_RESOURCE_SEARCH_PANEL: TemplateSpec(
         "browser_resource_search_panel_anchor.png",
@@ -205,20 +221,35 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
     # lower panel keeps its native artwork aspect while the canvas height may
     # be letterboxed by the host page.
     FarmTemplateId.BROWSER_FOOD_RESOURCE_ACTIVE: TemplateSpec(
-        "browser_resource_food_active.png", threshold=0.72, region="lower",
-        reference_width=881, reference_height=239, uniform_width_scale=True,
+        # Captured from the supplied 1280x720 renderer, including the gold
+        # active ring and orange resource label. This prevents the inactive
+        # neighbouring icons from being accepted as the selected resource.
+        "browser_resource_food_active_1280.png", threshold=0.72, region="lower",
+        reference_width=1280, reference_height=720,
     ),
     FarmTemplateId.BROWSER_WOOD_RESOURCE_ACTIVE: TemplateSpec(
-        "browser_resource_wood_active.png", threshold=0.72, region="lower",
-        reference_width=881, reference_height=239, uniform_width_scale=True,
+        "browser_resource_wood_active_1280.png", threshold=0.72, region="lower",
+        reference_width=1280, reference_height=720,
     ),
     FarmTemplateId.BROWSER_STONE_RESOURCE_ACTIVE: TemplateSpec(
-        "browser_resource_stone_active.png", threshold=0.72, region="lower",
-        reference_width=881, reference_height=239, uniform_width_scale=True,
+        "browser_resource_stone_active_1280.png", threshold=0.72, region="lower",
+        reference_width=1280, reference_height=720,
     ),
     FarmTemplateId.BROWSER_IRON_RESOURCE_ACTIVE: TemplateSpec(
-        "browser_resource_iron_active.png", threshold=0.72, region="lower",
-        reference_width=881, reference_height=239, uniform_width_scale=True,
+        "browser_resource_iron_active_1280.png", threshold=0.72, region="lower",
+        reference_width=1280, reference_height=720,
+    ),
+    # The visible ``Cấp: n / n`` readout is evidence only.  The runner never
+    # clicks + or −; it uses this value as the current search level.
+    FarmTemplateId.BROWSER_RESOURCE_LEVEL_6: TemplateSpec(
+        "browser_resource_level_6.png", threshold=0.82, region="lower",
+        reference_width=1014, reference_height=275, uniform_width_scale=True,
+        grayscale=True,
+    ),
+    FarmTemplateId.BROWSER_RESOURCE_LEVEL_7: TemplateSpec(
+        "browser_resource_level_7.png", threshold=0.82, region="lower",
+        reference_width=1031, reference_height=278, uniform_width_scale=True,
+        grayscale=True,
     ),
     # The resource panel's "only search eligible target" checkbox must be
     # enabled before Search.  Match the *unchecked* glyph only; after tapping
@@ -229,19 +260,40 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
         # Green World Map skin uses a smaller blue unchecked circle. The
         # original template scored only ~0.53 there, so include its verified
         # crop rather than treating a failed match as an already-checked box.
-        threshold=0.72,
+        # The supplied live canvas crop scores ~0.52 against the compact
+        # portal skin. This template is only used in the verified resource
+        # panel's tight lower-right region and must disappear after the tap,
+        # so 0.50 remains a bounded, safe gate.
+        threshold=0.50,
         region="lower_right",
         reference_width=836,
         reference_height=433,
         alternatives=("browser_search_target_checkbox_unchecked_green.png",),
         scale_variants=(0.94, 0.97, 1.0, 1.03, 1.06),
     ),
+    FarmTemplateId.BROWSER_SEARCH_TARGET_CHECKBOX_CHECKED: TemplateSpec(
+        # Supplied live screenshot of the blue checkmark state. It is used as
+        # the positive post-click condition before Search is allowed.  Live
+        # 1280x720 profiles score about 0.74 after Chrome's text/subpixel
+        # rendering changes, so keep a small margin below that observed
+        # result while retaining the tight checkbox-only region.
+        "browser_search_target_checkbox_checked.png",
+        threshold=0.70,
+        region="lower_right",
+        reference_width=1014,
+        reference_height=275,
+        uniform_width_scale=True,
+    ),
     FarmTemplateId.BROWSER_SEARCH_BUTTON_ENABLED: TemplateSpec(
         "browser_search_button_enabled.png",
         threshold=0.80,
         region="lower",
-        reference_width=835,
-        reference_height=432,
+        # Replaced with the supplied live Search-button capture. The newest
+        # production diagnostic shows this crop at its native 1280×720 size;
+        # the earlier 1014-wide assumption enlarged it by 26% and made the
+        # button miss at 0.50 confidence instead of its observed 0.995.
+        reference_width=1280,
+        reference_height=720,
     ),
     # These localized toast anchors are shared from the ADB pack. They are
     # observed after a Search tap only; they never authorise an input.
@@ -260,68 +312,65 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
     # Confirmation is permitted only when both the invariant beginning of the
     # target-resource expiry message and its red confirm button are visible.
     FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_TOAST: TemplateSpec(
-        # Match only the fixed message prefix. The following timer and amount
-        # change every time this warning opens, so including them caused a
-        # valid dialog to be rejected despite a strong Confirm match.
-        # Browser canvas anti-aliasing makes this text prefix score ~0.57 on
-        # a confirmed production dialog. It is never used alone: the runner
-        # also requires the independently matched red Confirm button (0.80).
-        "browser_target_resource_expiry_toast.png", threshold=0.55,
-        reference_width=850, reference_height=446,
-        scale_variants=(0.94, 0.97, 1.0, 1.03, 1.06), grayscale=True,
+        # Crop from the supplied 1280×720 confirmation dialog. It stops
+        # before the changing countdown and amount, so only the invariant
+        # prefix authorises confirmation together with its red button.
+        "browser_target_resource_expiry_toast.png", threshold=0.78,
+        reference_width=1280, reference_height=720,
+        scale_variants=(0.97, 1.0, 1.03), grayscale=True,
     ),
     FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_CONFIRM: TemplateSpec(
         "browser_target_resource_expiry_confirm.png", threshold=0.80,
-        reference_width=850, reference_height=446,
+        reference_width=1280, reference_height=720,
         scale_variants=(0.97, 1.0, 1.03),
     ),
     FarmTemplateId.BROWSER_GATHER_BUTTON_ENABLED: TemplateSpec(
         "browser_gather_button_enabled.png",
         threshold=0.80,
         region="lower",
-        reference_width=835,
-        reference_height=432,
+        reference_width=1280,
+        reference_height=720,
     ),
     FarmTemplateId.BROWSER_TEAM_SELECTION_PANEL: TemplateSpec(
         "browser_team_selection_panel_anchor.png",
         threshold=0.80,
-        reference_width=840,
-        reference_height=439,
+        reference_width=1280,
+        reference_height=720,
     ),
     FarmTemplateId.BROWSER_TEAM_ACTION_BUTTON: TemplateSpec(
         "browser_gather_button_enabled.png",
         threshold=0.80,
         region="lower",
-        reference_width=835,
-        reference_height=432,
+        reference_width=1280,
+        reference_height=720,
     ),
     FarmTemplateId.BROWSER_TEAM_2_BADGE: TemplateSpec(
         "browser_team_2_badge.png",
         threshold=0.82,
         region="left",
-        reference_width=840,
-        reference_height=439,
+        reference_width=1280,
+        reference_height=720,
     ),
     FarmTemplateId.BROWSER_TEAM_3_BADGE: TemplateSpec(
         "browser_team_3_badge.png",
         threshold=0.82,
         region="left",
-        reference_width=840,
-        reference_height=439,
+        reference_width=1280,
+        reference_height=720,
     ),
     FarmTemplateId.BROWSER_TEAM_4_BADGE: TemplateSpec(
         "browser_team_4_badge.png",
         threshold=0.82,
         region="left",
-        reference_width=840,
-        reference_height=439,
+        reference_width=1280,
+        reference_height=720,
     ),
     FarmTemplateId.BROWSER_TEAM_SELECTED_BORDER: TemplateSpec(
         "browser_team_selected_border_anchor.png",
-        threshold=0.78,
+        threshold=0.76,
         region="left",
-        reference_width=840,
-        reference_height=439,
+        reference_width=1280,
+        reference_height=720,
     ),
 }
 
@@ -371,13 +420,14 @@ class BrowserCanvasMatcher:
         )
         busy_template = self._load(_BUSY_TEAM_LABEL)
         image_height, image_width = image.shape[:2]
-        def scale(template: object) -> object:
-            scaled_width = max(1, round(template.shape[1] * image_width / _BROWSER_REFERENCE_WIDTH))
-            scaled_height = max(1, round(template.shape[0] * image_height / _BROWSER_REFERENCE_HEIGHT))
-            return cv2.resize(template, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
-
-        scaled_ready = tuple(scale(template) for template in ready_templates)
-        scaled_busy = scale(busy_template)
+        # The game reflows the roster panel between the compact grid canvas and
+        # the leased 1280x720 renderer, but its status font remains essentially
+        # the same device-pixel size. Scaling these 48x16 text templates with
+        # the whole canvas produced ~73x27 templates at 1280x720; only one of
+        # four identical "Sẵn sàng" rows then happened to match. Keep status
+        # glyphs at their captured HUD size and scale only the row positions.
+        status_ready = ready_templates
+        status_busy = busy_template
         # Restrict every status match to the small left-side roster panel.
         # This intentionally excludes all gameplay, city HUD and popup text.
         roster_top = round(image_height * _ROSTER_TOP_RATIO)
@@ -389,14 +439,29 @@ class BrowserCanvasMatcher:
         # bottom is game team 1 → 4 and only a local `Sẵn sàng` match is Ready.
         label_left = round(image_width * _ROSTER_LABEL_LEFT_RATIO)
         label_right = min(round(image_width * _ROSTER_LABEL_RIGHT_RATIO), image_width)
-        ready_grays = tuple(cv2.cvtColor(template, cv2.COLOR_BGR2GRAY) for template in scaled_ready)
-        busy_gray = cv2.cvtColor(scaled_busy, cv2.COLOR_BGR2GRAY)
+        portrait_left = round(image_width * _ROSTER_PORTRAIT_LEFT_RATIO)
+        portrait_right = min(round(image_width * _ROSTER_PORTRAIT_RIGHT_RATIO), image_width)
+        ready_grays = tuple(cv2.cvtColor(template, cv2.COLOR_BGR2GRAY) for template in status_ready)
+        busy_gray = cv2.cvtColor(status_busy, cv2.COLOR_BGR2GRAY)
         states: dict[int, TeamRowState] = {}
         for team in range(1, _MAX_TEAM_ROWS + 1):
             row_top = roster_top + (team - 1) * row_height
             row_bottom = min(roster_bottom, row_top + row_height)
+            # A status-like patch alone cannot create a team row. On a
+            # three-team account the collapse arrow/background directly below
+            # row 3 scores highly against the small grayscale Ready template.
+            # Portraits have a dense, stable set of edges across skins, while
+            # that empty footer does not. Require the portrait slot first.
+            portrait = image[row_top:row_bottom, portrait_left:portrait_right]
+            if portrait.size == 0:
+                continue
+            portrait_gray = cv2.cvtColor(portrait, cv2.COLOR_BGR2GRAY)
+            portrait_edges = cv2.Canny(portrait_gray, 60, 140)
+            portrait_edge_density = cv2.countNonZero(portrait_edges) / portrait_gray.size
+            if portrait_edge_density < _ROSTER_PORTRAIT_MIN_EDGE_DENSITY:
+                continue
             search = image[row_top:row_bottom, label_left:label_right]
-            if any(template.shape[1] > search.shape[1] or template.shape[0] > search.shape[0] for template in scaled_ready):
+            if any(template.shape[1] > search.shape[1] or template.shape[0] > search.shape[0] for template in status_ready):
                 continue
             search_gray = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
             ready_score = max(
@@ -404,7 +469,7 @@ class BrowserCanvasMatcher:
                 for template in ready_grays
             )
             busy_score = -1.0
-            if scaled_busy.shape[1] <= search.shape[1] and scaled_busy.shape[0] <= search.shape[0]:
+            if status_busy.shape[1] <= search.shape[1] and status_busy.shape[0] <= search.shape[0]:
                 busy_score = cv2.minMaxLoc(
                     cv2.matchTemplate(search_gray, busy_gray, cv2.TM_CCOEFF_NORMED)
                 )[1]
@@ -412,9 +477,9 @@ class BrowserCanvasMatcher:
             # evidence is decisively stronger than the observed busy label.
             # This excludes the sidebar's repeated background which used to
             # make every row score as `Sẵn sàng` at the old 0.66 threshold.
-            if ready_score >= 0.82 and ready_score >= busy_score + 0.08:
+            if ready_score >= 0.55 and ready_score >= busy_score + 0.06:
                 states[team] = TeamRowState.READY
-            elif busy_score >= 0.78 and busy_score >= ready_score + 0.05:
+            elif busy_score >= 0.55 and busy_score >= ready_score + 0.05:
                 states[team] = TeamRowState.BUSY
         if not states:
             return ()
@@ -519,6 +584,7 @@ class BrowserCanvasMatcher:
         # its search area separate prevents similar castle/terrain artwork in
         # the rest of the game canvas from becoming City evidence.
         if name == "city_corner": return 0, height * 3 // 4, width // 6, height - (height * 3 // 4)
+        if name == "map_corner": return 0, height * 3 // 4, width * 3 // 25, height - (height * 3 // 4)
         if name == "lower_left": return 0, height // 2, width // 2, height - height // 2
         if name == "lower": return 0, height // 2, width, height - height // 2
         if name == "lower_right": return width // 2, height // 2, width - width // 2, height - height // 2

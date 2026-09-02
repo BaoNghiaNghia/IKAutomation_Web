@@ -31,6 +31,7 @@ from ik_chrome_auto.mail_monitor import (
     COMBAT_MAIL_OTHER,
     MAIL_BASELINE,
     NO_NEW_COMBAT_MAIL,
+    SCAN_CANCELLED,
     SCAN_ERROR,
     TERRITORY_ATTACKED,
     BrowserMailMonitor,
@@ -92,6 +93,11 @@ AUTOMATION_RENDERER_WAIT_SECONDS = 30.0
 # the old four-second lease made the first profile monopolise it indefinitely
 # while another profile was waiting for its initial scan.
 FARM_RENDERER_IDLE_RELEASE_SECONDS = 0.9
+FARM_MAP_TRANSITION_RENDERER_HOLD_SECONDS = 2.0
+# A click is not complete until its fresh 1280×720 postcondition has been
+# observed.  This must exceed the two-second Search verification delay, so the
+# grid cannot shrink between the click and the capture that proves it worked.
+FARM_CONTROL_POSTCONDITION_HOLD_SECONDS = 2.2
 # World Map can show a blank, fading canvas for well over eight seconds while
 # the portal loads.  The transition has already been clicked exactly once, so
 # wait for an explicit map control instead of aborting mid-load.
@@ -105,9 +111,27 @@ FARM_RESOURCE_BUTTON_CENTERS: dict[str, tuple[float, float]] = {
     "iron": (0.646, 0.735),
 }
 FARM_RESOURCE_BUTTON_SIZE = (0.095, 0.18)
-FARM_WORLD_MAP_SEARCH_CENTER = (0.325, 0.807)
-FARM_WORLD_MAP_SEARCH_SIZE = (0.058, 0.104)
-FARM_SEARCH_TARGET_CHECKBOX_CENTER = (0.717, 0.718)
+# The City/World Map toggle keeps the same bottom-left slot in both directions.
+# Its centre was measured at (53, 666) on the real 1280×720 game canvas.  The
+# matcher verifies the current screen, but the tap deliberately uses this
+# canvas-relative slot so a false visual bound can never redirect it to Mail.
+FARM_MAP_TOGGLE_CENTER = (53 / 1280, 666 / 720)
+FARM_MAP_TOGGLE_SIZE = (80 / 1280, 90 / 720)
+# Supplied 1280x720 World Map frames place the magnifier at
+# (425, 552, 57, 57). Keep the fallback on that exact canvas-relative slot;
+# the previous X ratio resolved around 416 and missed the button centre.
+FARM_WORLD_MAP_SEARCH_CENTER = (453.5 / 1280, 580.5 / 720)
+FARM_WORLD_MAP_SEARCH_SIZE = (57 / 1280, 57 / 720)
+# The search panel initially opens on the monster category.  Its bottom-left
+# category button switches the same panel to the four resource types.  These
+# ratios are measured from the supplied 1280x720 renderer frame; they are a
+# fallback only after the resource-search panel itself has been verified.
+FARM_RESOURCE_TAB_CENTER = (210 / 1280, 670.5 / 720)
+FARM_RESOURCE_TAB_SIZE = (92 / 1280, 47 / 720)
+# Measured from the supplied resource panel: the round checkbox is above the
+# Search button's left edge, at x≈1022 on the real 1280×720 renderer.  The old
+# 0.717 ratio landed on explanatory text instead of the toggle.
+FARM_SEARCH_TARGET_CHECKBOX_CENTER = (1022 / 1280, 517 / 720)
 FARM_SEARCH_TARGET_CHECKBOX_SIZE = (0.04, 0.065)
 FARM_TEAM_ROW_WIDTH_RATIO = 0.172
 FARM_TEAM_ROW_HEIGHT_RATIO = 0.19
@@ -198,6 +222,7 @@ class ProfileWorker:
         self._automation_renderer_lock = automation_renderer_lock or threading.Lock()
         self._automation_renderer_locked = False
         self._automation_renderer_layout: Any | None = None
+        self._automation_renderer_hold_until = 0.0
         self._farm_renderer_waiting = False
         self._farm: FarmWorkflow | None = None
         self._farm_next_at = 0.0
@@ -213,8 +238,10 @@ class ProfileWorker:
         self._farm_resource_template_misses = 0
         self._farm_resource_selected_at = 0.0
         self._farm_resource_selected_by_layout = False
+        self._farm_detected_resource_level: int | None = None
         self._farm_target_checkbox_click_at = 0.0
         self._farm_target_checkbox_verified = False
+        self._farm_target_checkbox_seen_unchecked = False
         self._farm_target_checkbox_clicks = 0
         self._farm_find_resource_clicks = 0
         self._farm_find_resource_click_at = 0.0
@@ -232,6 +259,9 @@ class ProfileWorker:
         self._farm_run_id = ""
         self._farm_recovery_attempts = 0
         self._mail_monitor: BrowserMailMonitor | None = None
+        # Stopping monitoring can also cover a MONITOR_MAIL command already
+        # waiting in this worker's queue, before that command opens mail.
+        self._mail_monitor_cancelled = threading.Event()
 
     def submit(self, command: WorkerCommand) -> None:
         self._ensure_thread()
@@ -244,6 +274,16 @@ class ProfileWorker:
     def shutdown(self) -> None:
         self.stop_event.set()
         self.submit(WorkerCommand(CommandKind.SHUTDOWN))
+
+    def enable_mail_monitor(self) -> None:
+        self._mail_monitor_cancelled.clear()
+
+    def cancel_mail_monitor(self) -> None:
+        self._mail_monitor_cancelled.set()
+
+    def _mail_monitor_is_cancelled(self) -> bool:
+        cancelled = getattr(self, "_mail_monitor_cancelled", None)
+        return bool(cancelled is not None and cancelled.is_set())
 
     def join(self, timeout: float = 5.0) -> None:
         if self.thread and self.thread.is_alive():
@@ -345,13 +385,35 @@ class ProfileWorker:
             self._automation_renderer_lock.release()
 
     def _release_farm_renderer_when_idle(self) -> None:
-        """Keep a Farm lease for its short workflow, not for its long retry wait."""
+        """Restore the grid only after the active 720p interaction is complete.
+
+        Once a Farm input has been sent, every following capture and
+        post-condition in that cycle must use the same 1280x720 renderer.
+        Releasing merely because the next verification is 1-2 seconds away
+        creates a compact-grid frame between click and verification.
+        """
         if not getattr(self, "_automation_renderer_locked", False):
             return
-        if self._farm is None or (
-            self._farm_next_at - time.monotonic() >= FARM_RENDERER_IDLE_RELEASE_SECONDS
-        ):
+        # Do not shrink from 1280x720 back to a five-column tile while the
+        # game is consuming and verifying a Map transition click.
+        if time.monotonic() < getattr(self, "_automation_renderer_hold_until", 0.0):
+            return
+        if self._farm is None:
             self._release_automation_renderer()
+            return
+        idle_for = self._farm_next_at - time.monotonic()
+        if idle_for < FARM_RENDERER_IDLE_RELEASE_SECONDS:
+            return
+        # Long waits must yield the single 720p renderer to another profile.
+        # The next tick acquires it again *before* taking a capture or sending
+        # input, so this never performs Farm actions on a compact canvas.  Do
+        # not use historical click counters here: those remain non-zero while
+        # World Map or a confirmation dialog is settling and previously let
+        # one profile monopolise the renderer indefinitely.
+        if self._farm.step == FarmStep.WAITING:
+            self._release_automation_renderer()
+            return
+        self._release_automation_renderer()
 
     def _capture_mail_canvas(self) -> tuple[bytes, tuple[int, int]]:
         if self.session is None:
@@ -405,6 +467,8 @@ class ProfileWorker:
         reads only the top item when that category carries an unread badge.
         Every transition is verified from a fresh renderer capture.
         """
+        if self._mail_monitor_is_cancelled():
+            return SCAN_CANCELLED
         if self.session is None:
             return SCAN_ERROR
         if not self._acquire_automation_renderer(
@@ -423,6 +487,8 @@ class ProfileWorker:
             if close is None:
                 self._tap_monitor_viewport_point(MAIL_BUTTON_POINT, latest_size)
                 self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
+                if self._mail_monitor_is_cancelled():
+                    return SCAN_CANCELLED
                 latest_png, latest_size = self._capture_mail_canvas()
                 close = monitor.find_close_button(latest_png)
                 if close is None:
@@ -436,6 +502,8 @@ class ProfileWorker:
                 # categories outside the requested baseline flow.
                 self._tap_monitor_viewport_point(READ_ALL_MAIL_POINT, latest_size)
                 self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
+                if self._mail_monitor_is_cancelled():
+                    return SCAN_CANCELLED
                 latest_png, latest_size = self._capture_mail_canvas()
                 if monitor.find_close_button(latest_png) is None:
                     raise RuntimeError("Hộp thư bị đóng sau khi bấm Đọc & Nhận Tất Cả")
@@ -449,6 +517,8 @@ class ProfileWorker:
             # fixed canvas-relative X/Y rather than another visual search.
             self._tap_monitor_viewport_point(COMBAT_TAB_POINT, latest_size)
             self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
+            if self._mail_monitor_is_cancelled():
+                return SCAN_CANCELLED
             latest_png, latest_size = self._capture_mail_canvas()
             if monitor.find_close_button(latest_png) is None:
                 raise RuntimeError("Hộp thư bị đóng trước khi đọc tab Chiến đấu")
@@ -459,6 +529,8 @@ class ProfileWorker:
             # authoritative; no historical row below it is inspected.
             self._tap_monitor_viewport_point(FIRST_MAIL_ROW_POINT, latest_size)
             self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
+            if self._mail_monitor_is_cancelled():
+                return SCAN_CANCELLED
             latest_png, latest_size = self._capture_mail_canvas()
             if monitor.find_close_button(latest_png) is None:
                 raise RuntimeError("Không xác minh được thư đầu tiên sau khi mở")
@@ -528,8 +600,10 @@ class ProfileWorker:
                     self._farm_resource_template_misses = 0
                     self._farm_resource_selected_at = 0.0
                     self._farm_resource_selected_by_layout = False
+                    self._farm_detected_resource_level = None
                     self._farm_target_checkbox_click_at = 0.0
                     self._farm_target_checkbox_verified = False
+                    self._farm_target_checkbox_seen_unchecked = False
                     self._farm_target_checkbox_clicks = 0
                     self._farm_find_resource_clicks = 0
                     self._farm_find_resource_click_at = 0.0
@@ -813,6 +887,20 @@ class ProfileWorker:
             target_checkbox_unchecked = detected.evidence_for(
                 FarmTemplateId.BROWSER_SEARCH_TARGET_CHECKBOX_UNCHECKED
             )
+            target_checkbox_checked = detected.evidence_for(
+                FarmTemplateId.BROWSER_SEARCH_TARGET_CHECKBOX_CHECKED
+            )
+            resource_level_evidence = {
+                6: detected.evidence_for(FarmTemplateId.BROWSER_RESOURCE_LEVEL_6),
+                7: detected.evidence_for(FarmTemplateId.BROWSER_RESOURCE_LEVEL_7),
+            }
+            detected_resource_level = next(
+                (level for level, evidence in resource_level_evidence.items() if evidence.found),
+                None,
+            )
+            if detected_resource_level is not None:
+                self._farm_detected_resource_level = detected_resource_level
+                self._farm.set_observed_level(detected_resource_level)
             find_resource = detected.evidence_for(FarmTemplateId.BROWSER_SEARCH_BUTTON_ENABLED)
             search_toasts = {
                 "not_found": detected.evidence_for(FarmTemplateId.BROWSER_TOAST_NOT_FOUND),
@@ -882,6 +970,12 @@ class ProfileWorker:
                     },
                     "iron_resource": self._evidence_payload(iron_resource),
                     "target_checkbox_unchecked": self._evidence_payload(target_checkbox_unchecked),
+                    "target_checkbox_checked": self._evidence_payload(target_checkbox_checked),
+                    "resource_level": detected_resource_level,
+                    "resource_level_evidence": {
+                        str(level): self._evidence_payload(evidence)
+                        for level, evidence in resource_level_evidence.items()
+                    },
                     "target_checkbox_verified": self._farm_target_checkbox_verified,
                     "find_resource": self._evidence_payload(find_resource),
                     "search_toasts": {
@@ -983,12 +1077,13 @@ class ProfileWorker:
                 fresh_toast = fresh.evidence_for(FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_TOAST)
                 fresh_confirm = fresh.evidence_for(FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_CONFIRM)
                 if fresh_toast.found and fresh_confirm.actionable:
-                    self.session.tap_farm_template(fresh_confirm.bounds, fresh_size)  # type: ignore[arg-type]
+                    input_method = self._click_farm_panel_control(fresh_confirm.bounds, fresh_size)  # type: ignore[arg-type]
                     self._farm_dispatch_click_at = time.monotonic()
                     self._farm_next_at = self._farm_dispatch_click_at + 0.9
                     self._log_farm("confirm_target_resource_expiry", {
                         "bounds": fresh_confirm.bounds,
                         "team": self._farm.team,
+                        "input": input_method,
                     })
                     self._publish(
                         WorkerState.RUNNING,
@@ -1250,19 +1345,20 @@ class ProfileWorker:
                         and fresh_map_to_city.actionable
                         and self._farm_return_city_clicks < 2
                     ):
-                        # Retry once with touch; the first CDP mouse click can
-                        # be swallowed while the canvas is finishing an
-                        # animation. The fresh template bounds prevent a blind
-                        # second tap.
-                        self.session.tap_farm_template(fresh_map_to_city.bounds, fresh_size)  # type: ignore[arg-type]
+                        # Retry the verified control at its fixed canvas slot.
+                        # Never reuse visual bounds here: the nearby Mail icon
+                        # can resemble parts of the castle/parchment artwork.
+                        click_bounds = self._map_toggle_layout_bounds(fresh_size)
+                        self._click_map_toggle(click_bounds, fresh_size)
                         self._farm_return_city_clicks += 1
                         self._farm_return_city_click_at = time.monotonic()
                         self._farm_next_at = self._farm_return_city_click_at + 1.2
                         self._log_farm(
                             "retry_return_to_city",
                             {
-                                "bounds": fresh_map_to_city.bounds,
-                                "method": "touch",
+                                "bounds": click_bounds,
+                                "matched_bounds": fresh_map_to_city.bounds,
+                                "method": "mouse_canvas_ratio",
                                 "attempt": self._farm_return_city_clicks,
                                 "control": "world_map_castle",
                             },
@@ -1283,17 +1379,18 @@ class ProfileWorker:
                     self._farm_next_at = time.monotonic() + 0.8
                     self._publish(WorkerState.RUNNING, "Auto Farm: chờ nút City ổn định trước cycle mới")
                     return
-                # Only the freshly matched castle control is allowed to
-                # return to City. Never substitute the opposite-direction
-                # parchment toggle when the state is ambiguous.
-                self.session.tap_farm_template(fresh_map_to_city.bounds, fresh_size)  # type: ignore[arg-type]
-                method = "touch"
+                # Detection authorises the transition; the actual input uses
+                # the stable bottom-left toggle slot, never matched bounds.
+                click_bounds = self._map_toggle_layout_bounds(fresh_size)
+                self._click_map_toggle(click_bounds, fresh_size)
+                method = "mouse_canvas_ratio"
                 self._farm_return_city_click_at = time.monotonic()
                 self._farm_return_city_clicks += 1
                 self._log_farm(
                     "tap_return_to_city",
                     {
-                        "bounds": fresh_map_to_city.bounds,
+                        "bounds": click_bounds,
+                        "matched_bounds": fresh_map_to_city.bounds,
                         "method": method,
                         "attempt": self._farm_return_city_clicks,
                         "control": "world_map_castle",
@@ -1304,7 +1401,10 @@ class ProfileWorker:
                 return
             if (
                 self._farm.step == FarmStep.OPEN_SEARCH
-                and state in {FarmGameState.CITY, FarmGameState.WORLD_MAP}
+                # Search exists only on World Map. Allowing City here made a
+                # weak cross-match click a lower-left City control and then
+                # restart the whole City -> Map transition.
+                and state == FarmGameState.WORLD_MAP
                 # On some portal skins the magnifier used to prove World Map
                 # is also the control that opens the resource-search panel.
                 # Its dedicated search template can score below threshold even
@@ -1329,15 +1429,19 @@ class ProfileWorker:
                 fresh_button = fresh.evidence_for(FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON)
                 fresh_world = fresh.evidence_for(FarmTemplateId.WORLD_MAP_ANCHOR)
                 fresh_coordinate_pin = fresh.evidence_for(FarmTemplateId.BROWSER_WORLD_MAP_COORDINATE_PIN)
-                if fresh_button.actionable:
+                # A fresh capture may have completed a Map ↔ City transition
+                # since the outer check. Never let a magnifier-shaped match
+                # on that other screen authorise a lower-left click: the same
+                # slot is the Map toggle and would flip back to World Map.
+                if fresh.state == DetectedGameState.WORLD_MAP and fresh_button.actionable:
                     click_bounds = fresh_button.bounds
                     method = "resource_search_button"
-                elif fresh_world.actionable:
-                    click_bounds = fresh_world.bounds
-                    method = "world_map_anchor_fallback"
-                elif fresh.state == DetectedGameState.WORLD_MAP and fresh_coordinate_pin.actionable:
-                    # The coordinate HUD proves World Map but is not itself a
-                    # button. The magnifier slot is safe only in this state.
+                elif fresh.state == DetectedGameState.WORLD_MAP and (
+                    fresh_world.actionable or fresh_coordinate_pin.actionable
+                ):
+                    # World Map anchors only authorise input; they are not the
+                    # Search control. Always click the measured magnifier slot
+                    # instead of reusing an unrelated matched bound.
                     click_bounds = self._world_map_search_layout_bounds(fresh_size)
                     method = "verified_world_map_layout_fallback"
                 else:
@@ -1349,12 +1453,19 @@ class ProfileWorker:
                     )
                     self._publish(WorkerState.RUNNING, "Auto Farm: nút tìm tài nguyên thay đổi, đang nhận diện lại")
                     return
-                self.session.tap_farm_template(click_bounds, fresh_size)  # type: ignore[arg-type]
+                # This portal's WebGL HUD ignores CDP touch on some profiles.
+                # Use an OS-level click first, derived solely from the fresh
+                # 1280×720 renderer capture.  If its postcondition is still
+                # absent, retry once through Playwright's canvas locator.
+                if self._farm_search_clicks == 0:
+                    input_method = self._click_farm_native_game_control(click_bounds, fresh_size)
+                else:
+                    input_method = self._click_farm_panel_control(click_bounds, fresh_size)
                 self._farm_search_clicks += 1
-                self._farm_next_at = time.monotonic() + 1.5
+                self._farm_next_at = time.monotonic() + 2.0
                 self._log_farm(
                     "tap_resource_search",
-                    {"bounds": click_bounds, "method": method},
+                    {"bounds": click_bounds, "method": method, "input": input_method},
                 )
                 self._publish(WorkerState.RUNNING, "Auto Farm: đã mở tìm tài nguyên, đang xác minh panel")
                 return
@@ -1372,12 +1483,17 @@ class ProfileWorker:
                     self._farm_next_at = time.monotonic() + 0.8
                     self._publish(WorkerState.RUNNING, "Auto Farm: City thay đổi, bỏ click và nhận diện lại")
                     return
-                self.session.tap_farm_template(fresh_city.bounds, fresh_size)  # type: ignore[arg-type]
+                click_bounds = self._map_toggle_layout_bounds(fresh_size)
+                self._click_map_toggle(click_bounds, fresh_size)
                 self._farm_city_clicks += 1
                 self._farm_world_map_click_at = time.monotonic()
                 self._log_farm(
                     "tap_city_to_world_map",
-                    {"bounds": fresh_city.bounds, "method": "touch"},
+                    {
+                        "bounds": click_bounds,
+                        "matched_bounds": fresh_city.bounds,
+                        "method": "mouse_canvas_ratio",
+                    },
                 )
                 self._farm_next_at = time.monotonic() + 1.2
                 self._publish(
@@ -1404,12 +1520,12 @@ class ProfileWorker:
                     self._farm_next_at = time.monotonic() + 0.8
                     self._publish(WorkerState.RUNNING, "Auto Farm: nút Thu thập thay đổi, đang nhận diện lại")
                     return
-                self.session.tap_farm_template(fresh_gather.bounds, fresh_size)  # type: ignore[arg-type]
+                input_method = self._click_farm_panel_control(fresh_gather.bounds, fresh_size)  # type: ignore[arg-type]
                 self._farm_gather_clicks += 1
                 self._farm_next_at = time.monotonic() + 1.5
                 self._log_farm(
                     "tap_gather",
-                    {"bounds": fresh_gather.bounds, "resource": decision.resource, "level": decision.level},
+                    {"bounds": fresh_gather.bounds, "resource": decision.resource, "level": decision.level, "input": input_method},
                 )
                 self._publish(WorkerState.RUNNING, "Auto Farm: đã bấm Thu thập, đang xác minh chọn đội")
                 return
@@ -1461,7 +1577,7 @@ class ProfileWorker:
                     self._farm_next_at = time.monotonic() + 0.8
                     self._publish(WorkerState.RUNNING, "Auto Farm: panel chọn đội thay đổi, đang nhận diện lại")
                     return
-                self.session.tap_farm_template(row_bounds, fresh_size)
+                input_method = self._click_farm_panel_control(row_bounds, fresh_size)
                 self._farm_expected_team_row = row_bounds
                 self._farm_team_selection_clicks += 1
                 self._farm_next_at = time.monotonic() + 1.2
@@ -1471,6 +1587,7 @@ class ProfileWorker:
                         "team": decision.team,
                         "badge_bounds": getattr(fresh_badges.get(decision.team), "bounds", None),
                         "row_bounds": row_bounds,
+                        "input": input_method,
                         "method": "inferred_first_row" if decision.team == 1 else "numbered_badge",
                     },
                 )
@@ -1484,11 +1601,11 @@ class ProfileWorker:
                     self._farm_next_at = time.monotonic() + 0.8
                     self._publish(WorkerState.RUNNING, "Auto Farm: panel điều quân thay đổi, đang nhận diện lại")
                     return
-                self.session.tap_farm_template(fresh_action.bounds, fresh_size)  # type: ignore[arg-type]
+                input_method = self._click_farm_panel_control(fresh_action.bounds, fresh_size)  # type: ignore[arg-type]
                 self._farm_dispatch_click_at = time.monotonic()
                 self._log_farm(
                     "tap_dispatch",
-                    {"team": decision.team, "bounds": fresh_action.bounds},
+                    {"team": decision.team, "bounds": fresh_action.bounds, "input": input_method},
                 )
                 self._publish(
                     WorkerState.RUNNING,
@@ -1500,6 +1617,79 @@ class ProfileWorker:
                 target_resource = decision.resource or ""
                 target_resource_button = resource_buttons.get(target_resource)
                 target_resource_active = resource_active_buttons.get(target_resource)
+                # The panel opens on the monster category shown by the red
+                # skull button. Always switch through the bottom category
+                # button before attempting any of the four resource icons.
+                # Previously this happened after resource matching, allowing
+                # monster artwork to stall or falsely satisfy a resource
+                # template before the intended category was opened.
+                if not self._farm_resource_panel_verified:
+                    if self._farm_resource_tab_clicked_at <= 0:
+                        fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
+                        fresh_tab = fresh.evidence_for(FarmTemplateId.BROWSER_RESOURCE_TAB_BUTTON)
+                        if fresh.state != DetectedGameState.RESOURCE_SEARCH_PANEL:
+                            self._farm_next_at = time.monotonic() + 0.5
+                            self._publish(WorkerState.RUNNING, "Auto Farm: đang xác minh panel trước khi chọn Tài nguyên")
+                            return
+                        tab_bounds = (
+                            fresh_tab.bounds
+                            if fresh_tab.actionable
+                            else self._resource_tab_layout_bounds(fresh_size)
+                        )
+                        method = "template" if fresh_tab.actionable else "verified_panel_layout_fallback"
+                        # The category strip is a WebGL game control. A
+                        # mouse click can leave the monster tab selected even
+                        # when its bounds were exact, while a canvas touch
+                        # reliably switches it to the four resources.
+                        input_method = self._tap_farm_game_control(tab_bounds, fresh_size)
+                        self._farm_resource_tab_clicked_at = time.monotonic()
+                        self._farm_next_at = self._farm_resource_tab_clicked_at + 2.0
+                        self._log_farm(
+                            "tap_resource_tab",
+                            {
+                                "bounds": tab_bounds,
+                                "method": method,
+                                "input": input_method,
+                                "target": target_resource,
+                            },
+                        )
+                        self._publish(WorkerState.RUNNING, "Auto Farm: đã bấm nút dưới cùng để mở 4 loại tài nguyên")
+                        return
+
+                    elapsed = time.monotonic() - self._farm_resource_tab_clicked_at
+                    resource_choices_visible = any(
+                        evidence.found
+                        for evidence in (*resource_buttons.values(), *resource_active_buttons.values())
+                    )
+                    if not resource_tab.found or resource_choices_visible:
+                        self._farm_resource_panel_verified = True
+                        self._farm_resource_tab_clicked_at = 0.0
+                        self._farm_resource_template_misses = 0
+                        self._farm_next_at = time.monotonic() + 0.35
+                        self._log_farm(
+                            "resource_tab_verified",
+                            {
+                                "next": "select_resource",
+                                "resource_choices_visible": resource_choices_visible,
+                            },
+                        )
+                        self._publish(
+                            WorkerState.RUNNING,
+                            f"Auto Farm: đã mở 4 loại tài nguyên; đang chọn {decision.resource} cấp {decision.level}",
+                        )
+                        return
+                    if elapsed >= 5.0:
+                        screenshot = self._save_farm_debug_capture("resource-tab-unverified")
+                        self._retry_farm_or_stop(
+                            "resource_tab_unverified",
+                            "nút dưới cùng chưa chuyển sang 4 loại tài nguyên",
+                            screenshot,
+                        )
+                        return
+                    self._farm_next_at = time.monotonic() + 0.6
+                    self._publish(WorkerState.RUNNING, "Auto Farm: đang chờ 4 loại tài nguyên hiển thị")
+                    return
+
                 # Do not skip a resource tap based only on the active-state
                 # artwork. In production the four active templates can all
                 # match the same panel background, which made the worker claim
@@ -1511,7 +1701,7 @@ class ProfileWorker:
                     # before this click can return a transient frame and lose
                     # the already confirmed Wood match. Use the same fresh
                     # evidence, then verify the next UI state after input.
-                    self.session.tap_farm_template(target_resource_button.bounds, image_size)  # type: ignore[arg-type]
+                    self._click_farm_panel_control(target_resource_button.bounds, image_size)  # type: ignore[arg-type]
                     self._farm_resource_selected_at = time.monotonic()
                     self._farm_resource_selected_by_layout = False
                     self._farm_resource_template_misses = 0
@@ -1535,9 +1725,14 @@ class ProfileWorker:
                     # both the panel and its enabled Search button are fresh,
                     # use the panel-relative slot immediately and verify the
                     # resulting panel state on the next frame.
-                    if find_resource.actionable:
+                    # The panel itself is already fresh and verified.  Do
+                    # not let a softer inactive icon or Search-button skin
+                    # stall the run indefinitely: after two short polls,
+                    # use this resource's fixed panel slot and verify its
+                    # supplied active-state template on the next frame.
+                    if self._farm_resource_template_misses >= 2:
                         layout_bounds = self._resource_button_layout_bounds(target_resource, image_size)
-                        self.session.tap_farm_template(layout_bounds, image_size)
+                        self._click_farm_panel_control(layout_bounds, image_size)
                         self._farm_resource_selected_at = time.monotonic()
                         self._farm_resource_selected_by_layout = True
                         self._farm_next_at = self._farm_resource_selected_at + 1.0
@@ -1596,12 +1791,25 @@ class ProfileWorker:
                         )
                         return
                     # The game's search option is opt-in.  Never hit Search
-                    # until the unchecked glyph has either been changed by a
-                    # verified tap or is absent on the freshly matched panel.
+                    # until the supplied checked-state tick is visible on a
+                    # freshly matched panel.
                     if not self._farm_target_checkbox_verified:
+                        if target_checkbox_checked.found:
+                            self._farm_target_checkbox_verified = True
+                            self._log_farm("search_target_checkbox_already_checked", {})
+                            self._publish(
+                                WorkerState.RUNNING,
+                                "Auto Farm: checkbox lọc mục tiêu đã được tick, đang tiếp tục tìm tài nguyên",
+                            )
+                            self._farm_next_at = time.monotonic() + 0.35
+                            return
                         if self._farm_target_checkbox_click_at > 0:
                             checkbox_elapsed = time.monotonic() - self._farm_target_checkbox_click_at
-                            if not target_checkbox_unchecked.found and find_resource.actionable:
+                            if (
+                                self._farm_target_checkbox_seen_unchecked
+                                and target_checkbox_checked.found
+                                and find_resource.actionable
+                            ):
                                 self._farm_target_checkbox_verified = True
                                 self._log_farm(
                                     "search_target_checkbox_verified",
@@ -1638,7 +1846,12 @@ class ProfileWorker:
                             checkbox_bounds = self._search_target_checkbox_layout_bounds(fresh_size)
                             method = "verified_panel_layout_fallback"
                         if checkbox_bounds is not None:
-                            self.session.tap_farm_template(checkbox_bounds, fresh_size)
+                            # Search is allowed only after an unchecked state
+                            # was actually observed and then changed.  This
+                            # prevents a missed template from being mistaken
+                            # for a ticked checkbox.
+                            self._farm_target_checkbox_seen_unchecked = fresh_checkbox.found
+                            self._click_farm_panel_control(checkbox_bounds, fresh_size)
                             self._farm_target_checkbox_click_at = time.monotonic()
                             self._farm_target_checkbox_clicks += 1
                             self._log_farm(
@@ -1666,7 +1879,7 @@ class ProfileWorker:
                         fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                         fresh_find_resource = fresh.evidence_for(FarmTemplateId.BROWSER_SEARCH_BUTTON_ENABLED)
                         if fresh_find_resource.actionable:
-                            self.session.tap_farm_template(fresh_find_resource.bounds, fresh_size)  # type: ignore[arg-type]
+                            self._click_farm_panel_control(fresh_find_resource.bounds, fresh_size)  # type: ignore[arg-type]
                             self._farm_find_resource_clicks += 1
                             self._farm_find_resource_click_at = time.monotonic()
                             self._farm_next_at = self._farm_find_resource_click_at + 0.6
@@ -1684,40 +1897,6 @@ class ProfileWorker:
                         return
                     self._farm_next_at = time.monotonic() + 0.8
                     self._publish(WorkerState.RUNNING, f"Auto Farm: đang chờ lựa chọn {decision.resource} cập nhật")
-                    return
-                if self._farm_resource_tab_clicked_at <= 0 and resource_tab.actionable:
-                    fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
-                    fresh_tab = fresh.evidence_for(FarmTemplateId.BROWSER_RESOURCE_TAB_BUTTON)
-                    if fresh_tab.actionable:
-                        self.session.tap_farm_template(fresh_tab.bounds, fresh_size)  # type: ignore[arg-type]
-                        self._farm_resource_tab_clicked_at = time.monotonic()
-                        self._farm_next_at = self._farm_resource_tab_clicked_at + 1.2
-                        self._log_farm("tap_resource_tab", {"bounds": fresh_tab.bounds})
-                        self._publish(WorkerState.RUNNING, "Auto Farm: đã chọn tab Tài nguyên, đang xác minh")
-                        return
-                if self._farm_resource_tab_clicked_at > 0:
-                    elapsed = time.monotonic() - self._farm_resource_tab_clicked_at
-                    if not resource_tab.found:
-                        self._farm_resource_panel_verified = True
-                        self._farm_resource_tab_clicked_at = 0.0
-                        self._farm_resource_template_misses = 0
-                        self._farm_next_at = time.monotonic() + 0.35
-                        self._log_farm("resource_tab_verified", {"next": "select_resource"})
-                        self._publish(
-                            WorkerState.RUNNING,
-                            f"Auto Farm: tab Tài nguyên đã xác minh; đang chọn {decision.resource} cấp {decision.level}",
-                        )
-                        return
-                    if elapsed >= 5.0:
-                        screenshot = self._save_farm_debug_capture("resource-tab-unverified")
-                        self._retry_farm_or_stop(
-                            "resource_tab_unverified",
-                            "tab Tài nguyên chưa được xác minh",
-                            screenshot,
-                        )
-                        return
-                    self._farm_next_at = time.monotonic() + 0.8
-                    self._publish(WorkerState.RUNNING, "Auto Farm: đang chờ tab Tài nguyên cập nhật")
                     return
                 screenshot = self._save_farm_debug_capture("resource-plan-pending")
                 self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
@@ -1862,8 +2041,10 @@ class ProfileWorker:
         self._farm_resource_template_misses = 0
         self._farm_resource_selected_at = 0.0
         self._farm_resource_selected_by_layout = False
+        self._farm_detected_resource_level = None
         self._farm_target_checkbox_click_at = 0.0
         self._farm_target_checkbox_verified = False
+        self._farm_target_checkbox_seen_unchecked = False
         self._farm_target_checkbox_clicks = 0
         self._farm_find_resource_clicks = 0
         self._farm_find_resource_click_at = 0.0
@@ -1929,9 +2110,11 @@ class ProfileWorker:
         if relocation == "moved":
             self._farm_resource_selected_at = 0.0
             self._farm_resource_selected_by_layout = False
+            self._farm_detected_resource_level = None
             self._farm_resource_template_misses = 0
             self._farm_target_checkbox_click_at = 0.0
             self._farm_target_checkbox_verified = False
+            self._farm_target_checkbox_seen_unchecked = False
             self._farm_target_checkbox_clicks = 0
             self._farm_find_resource_clicks = 0
             self._farm_find_resource_click_at = 0.0
@@ -2034,6 +2217,16 @@ class ProfileWorker:
         )
 
     @staticmethod
+    def _resource_tab_layout_bounds(image_size: tuple[int, int]) -> tuple[int, int, int, int]:
+        """Return the bottom category button of a verified search panel."""
+        return ProfileWorker._canvas_ratio_bounds(
+            image_size,
+            center=FARM_RESOURCE_TAB_CENTER,
+            size=FARM_RESOURCE_TAB_SIZE,
+            minimum_size=(44, 32),
+        )
+
+    @staticmethod
     def _is_dispatch_postcondition_verified(
         *,
         state: FarmGameState,
@@ -2079,6 +2272,113 @@ class ProfileWorker:
             size=FARM_WORLD_MAP_SEARCH_SIZE,
             minimum_size=(38, 36),
         )
+
+    @staticmethod
+    def _map_toggle_layout_bounds(
+        image_size: tuple[int, int]
+    ) -> tuple[int, int, int, int]:
+        """Return the shared City/Map slot from canvas-relative X/Y ratios.
+
+        Detection still verifies the expected screen first. The tap itself
+        uses the measured toggle slot so it cannot drift into nearby Mail.
+        """
+        return ProfileWorker._canvas_ratio_bounds(
+            image_size,
+            center=FARM_MAP_TOGGLE_CENTER,
+            size=FARM_MAP_TOGGLE_SIZE,
+            minimum_size=(60, 64),
+        )
+
+    def _click_map_toggle(
+        self,
+        bounds: tuple[int, int, int, int],
+        image_size: tuple[int, int],
+    ) -> None:
+        """Click City/Map as a real mouse input at its exact canvas ratio."""
+        if self.session is None:
+            raise RuntimeError("Profile chưa mở")
+        if not getattr(self, "_automation_renderer_locked", False):
+            raise RuntimeError("Nút Map/City chỉ được bấm sau khi renderer đã khóa ở 1280×720")
+        click_ratio = getattr(self.session, "click_game_surface_ratio", None)
+        if callable(click_ratio):
+            click_ratio(*FARM_MAP_TOGGLE_CENTER)
+        else:
+            click_mouse = getattr(self.session, "click_farm_template_mouse", None)
+            if callable(click_mouse):
+                click_mouse(bounds, image_size)
+            else:
+                # Compatibility for lightweight test doubles and older sessions.
+                self.session.tap_farm_template(bounds, image_size)
+        self._automation_renderer_hold_until = (
+            time.monotonic() + FARM_MAP_TRANSITION_RENDERER_HOLD_SECONDS
+        )
+
+    def _hold_automation_renderer_for_postcondition(self) -> None:
+        """Keep the leased 1280×720 canvas through the next control check."""
+        self._automation_renderer_hold_until = max(
+            getattr(self, "_automation_renderer_hold_until", 0.0),
+            time.monotonic() + FARM_CONTROL_POSTCONDITION_HOLD_SECONDS,
+        )
+
+    def _click_farm_panel_control(
+        self,
+        bounds: tuple[int, int, int, int],
+        image_size: tuple[int, int],
+    ) -> str:
+        """Click a portal search-panel control on the leased 720p canvas."""
+        if self.session is None:
+            raise RuntimeError("Profile chưa mở")
+        if not getattr(self, "_automation_renderer_locked", False):
+            raise RuntimeError("Panel Farm chỉ được bấm sau khi renderer đã khóa ở 1280×720")
+        click_mouse = getattr(self.session, "click_farm_template_mouse", None)
+        if callable(click_mouse):
+            click_mouse(bounds, image_size)
+            self._hold_automation_renderer_for_postcondition()
+            return "mouse_canvas_template"
+        # Compatibility for lightweight tests and older browser sessions.
+        self.session.tap_farm_template(bounds, image_size)
+        self._hold_automation_renderer_for_postcondition()
+        return "touch_template"
+
+    def _tap_farm_game_control(
+        self,
+        bounds: tuple[int, int, int, int],
+        image_size: tuple[int, int],
+    ) -> str:
+        """Tap a verified WebGL game control at its canvas-relative centre."""
+        if self.session is None:
+            raise RuntimeError("Profile chưa mở")
+        if not getattr(self, "_automation_renderer_locked", False):
+            raise RuntimeError("Control Farm chỉ được bấm sau khi renderer đã khóa ở 1280×720")
+        tap = getattr(self.session, "tap_farm_template", None)
+        if callable(tap):
+            tap(bounds, image_size)
+            self._hold_automation_renderer_for_postcondition()
+            return "touch_canvas_template"
+        return self._click_farm_panel_control(bounds, image_size)
+
+    def _click_farm_native_game_control(
+        self,
+        bounds: tuple[int, int, int, int],
+        image_size: tuple[int, int],
+    ) -> str:
+        """Use native input only as a second verified WebGL-control attempt."""
+        if self.session is None:
+            raise RuntimeError("Profile chưa mở")
+        if not getattr(self, "_automation_renderer_locked", False):
+            raise RuntimeError("Control Farm chỉ được bấm sau khi renderer đã khóa ở 1280×720")
+        left, top, width, height = bounds
+        image_width, image_height = image_size
+        native_click = getattr(self.session, "click_game_surface_native_ratio", None)
+        if callable(native_click) and image_width > 0 and image_height > 0:
+            native_click((left + width / 2) / image_width, (top + height / 2) / image_height)
+            self._hold_automation_renderer_for_postcondition()
+            return "native_canvas_ratio"
+        return self._tap_farm_game_control(bounds, image_size)
+
+    # Compatibility for tests/integrations that referenced the directional
+    # helper before both directions were unified onto the same physical slot.
+    _city_to_world_map_layout_bounds = _map_toggle_layout_bounds
 
     @staticmethod
     def _search_target_checkbox_layout_bounds(
@@ -2214,6 +2514,11 @@ class ProfileWorker:
             })
             return "unavailable"
         self._farm.step = FarmStep.OPEN_SEARCH
+        # Relocation closes the search panel. The next OPEN_SEARCH must enter
+        # the bottom resource category again before continuing the four-type
+        # round; a verification from the previous panel is no longer valid.
+        self._farm_resource_tab_clicked_at = 0.0
+        self._farm_resource_panel_verified = False
         self._farm_area_epoch += 1
         self._log_farm("resource_area_relocated", {
             "resource": resource, "level": level, "point": point,
@@ -2438,6 +2743,21 @@ class MultiProfileRunner:
 
     def submit(self, profile_id: str, kind: CommandKind, **payload: object) -> None:
         self.workers[profile_id].submit(WorkerCommand(kind, dict(payload)))
+
+    def enable_mail_monitor(self, profile_ids: set[str]) -> None:
+        for profile_id in profile_ids:
+            worker = self.workers.get(profile_id)
+            if worker is not None:
+                worker.enable_mail_monitor()
+
+    def cancel_mail_monitor(self, profile_ids: set[str] | None = None) -> None:
+        targets = self.workers if profile_ids is None else {
+            profile_id: self.workers[profile_id]
+            for profile_id in profile_ids
+            if profile_id in self.workers
+        }
+        for worker in targets.values():
+            worker.cancel_mail_monitor()
 
     def open_all(self) -> None:
         for profile in self.config.profiles:

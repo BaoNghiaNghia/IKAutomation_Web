@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 
 from ik_chrome_auto.mail_monitor import BrowserMailMonitor
+from ik_chrome_auto.mail_monitor import SCAN_CANCELLED
 from ik_chrome_auto.runner import (
     AUTOMATION_RENDERER_WINDOW_SIZE,
     AUTOMATION_RENDERER_SIZE,
@@ -204,6 +205,16 @@ def test_initial_monitor_pass_reads_all_notifications_before_combat_is_checked()
         ((252, 613, 2, 2), (1260, 674)),
         ((1188, 76, 2, 2), (1260, 674)),
     ]
+
+
+def test_cancelled_monitor_never_opens_or_reads_mail() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker.session = _TapSession()
+    worker._mail_monitor_cancelled = threading.Event()
+    worker._mail_monitor_cancelled.set()
+
+    assert worker._check_combat_mail(initial_scan=False) == SCAN_CANCELLED
+    assert worker.session.taps == []
 
 
 def test_mail_close_is_matched_only_in_its_scoped_region() -> None:

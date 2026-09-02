@@ -919,24 +919,91 @@ class ChromeProfileSession:
         normal mouse input.  Callers use this only after a verified touch has
         not changed state; gameplay controls continue to prefer touch.
         """
-        x, y = self._farm_template_center(bounds, image_size)
-        cdp = self._get_page_cdp_session(self.page)
-        for event_type, button, click_count in (
-            ("mouseMoved", "none", 0),
-            ("mousePressed", "left", 1),
-            ("mouseReleased", "left", 1),
-        ):
-            cdp.send(
-                "Input.dispatchMouseEvent",
-                {
-                    "type": event_type,
-                    "x": x,
-                    "y": y,
-                    "button": button,
-                    "clickCount": click_count,
-                    "pointerType": "mouse",
-                },
-            )
+        left, top, width, height = bounds
+        image_width, image_height = image_size
+        if width <= 0 or height <= 0 or image_width <= 0 or image_height <= 0:
+            raise ValueError("Farm template bounds không hợp lệ")
+        # A raw page-level CDP mouse/touch can use the wrong origin when the
+        # game canvas lives in an iframe. Resolve the canvas locator first and
+        # express the freshly matched screenshot centre as canvas ratios; the
+        # locator then applies the correct frame transform.
+        self.click_game_surface_ratio(
+            (left + width / 2) / image_width,
+            (top + height / 2) / image_height,
+        )
+
+    def click_game_surface_native_ratio(self, x_ratio: float, y_ratio: float) -> None:
+        """Send one native mouse click derived from a verified canvas ratio.
+
+        Some portal WebGL builds ignore both Playwright and CDP input even
+        though a fresh renderer capture matched the target.  This final
+        fallback still derives its screen point from the live canvas geometry,
+        never from a fixed desktop coordinate.
+        """
+        if sys.platform != "win32" or self.config.browser.headless:
+            self.click_game_surface_ratio(x_ratio, y_ratio)
+            return
+        if not 0.0 <= x_ratio <= 1.0 or not 0.0 <= y_ratio <= 1.0:
+            raise ValueError("Canvas ratios must be between 0 and 1")
+        hwnd = self.window_handle or self._bind_native_window(retries=3)
+        if hwnd is None:
+            raise RuntimeError(f"Không tìm thấy cửa sổ Chrome của {self.profile.name}")
+        frame = self.find_frame()
+        _canvas, surface = self._largest_canvas(frame)
+        renderer = get_renderer_rect(hwnd)
+        viewport = self.page.viewport_size or self.page.evaluate(
+            "() => ({width: window.innerWidth, height: window.innerHeight})"
+        )
+        viewport_width = max(1.0, float(viewport["width"]))
+        viewport_height = max(1.0, float(viewport["height"]))
+        page_x = float(surface["x"]) + float(surface["width"]) * float(x_ratio)
+        page_y = float(surface["y"]) + float(surface["height"]) * float(y_ratio)
+        screen_x = renderer.left + round(page_x * renderer.width / viewport_width)
+        screen_y = renderer.top + round(page_y * renderer.height / viewport_height)
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        # ``mouse_event`` sends a legacy, DPI-virtualised event on some
+        # Windows setups.  The game then receives a click at a different
+        # point even though the screen capture and matcher agree.  SendInput
+        # uses the virtual desktop's physical coordinate system, the same one
+        # used by the renderer rectangle captured just above.
+        user32.BringWindowToTop(int(hwnd))
+        user32.SetForegroundWindow(int(hwnd))
+        time.sleep(0.05)
+
+        class _MouseInput(ctypes.Structure):
+            _fields_ = [
+                ("dx", ctypes.c_long),
+                ("dy", ctypes.c_long),
+                ("mouseData", ctypes.c_ulong),
+                ("dwFlags", ctypes.c_ulong),
+                ("time", ctypes.c_ulong),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+            ]
+
+        class _InputUnion(ctypes.Union):
+            _fields_ = [("mi", _MouseInput)]
+
+        class _Input(ctypes.Structure):
+            _anonymous_ = ("data",)
+            _fields_ = [("type", ctypes.c_ulong), ("data", _InputUnion)]
+
+        virtual_left = user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
+        virtual_top = user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
+        virtual_width = max(1, user32.GetSystemMetrics(78))  # SM_CXVIRTUALSCREEN
+        virtual_height = max(1, user32.GetSystemMetrics(79))  # SM_CYVIRTUALSCREEN
+        absolute_x = round((screen_x - virtual_left) * 65535 / max(1, virtual_width - 1))
+        absolute_y = round((screen_y - virtual_top) * 65535 / max(1, virtual_height - 1))
+        move_flags = 0x0001 | 0x8000 | 0x4000  # MOVE | ABSOLUTE | VIRTUALDESK
+        inputs = (_Input * 3)(
+            _Input(type=0, mi=_MouseInput(absolute_x, absolute_y, 0, move_flags, 0, None)),
+            _Input(type=0, mi=_MouseInput(absolute_x, absolute_y, 0, 0x0002, 0, None)),
+            _Input(type=0, mi=_MouseInput(absolute_x, absolute_y, 0, 0x0004, 0, None)),
+        )
+        sent = user32.SendInput(3, ctypes.byref(inputs), ctypes.sizeof(_Input))
+        if sent != 3:
+            raise ctypes.WinError(ctypes.get_last_error())
 
     def _farm_template_center(
         self,
@@ -1053,6 +1120,27 @@ class ChromeProfileSession:
         cdp = self._get_page_cdp_session(self.page)
         cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [point]})
         cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+
+    def click_game_surface_ratio(self, x_ratio: float, y_ratio: float) -> None:
+        """Mouse-click an exact point through the canvas locator in its frame.
+
+        The game is hosted in an iframe on some portal variants. Raw page CDP
+        coordinates can then use a different origin from a renderer capture.
+        Playwright's canvas locator resolves the correct frame and transform,
+        while ``position`` remains the requested canvas ratio.
+        """
+        if not 0.0 <= x_ratio <= 1.0 or not 0.0 <= y_ratio <= 1.0:
+            raise ValueError("Canvas ratios must be between 0 and 1")
+        frame = self.find_frame()
+        canvas, surface = self._largest_canvas(frame)
+        canvas.click(
+            position={
+                "x": float(surface["width"]) * float(x_ratio),
+                "y": float(surface["height"]) * float(y_ratio),
+            },
+            force=True,
+            timeout=self.config.browser.startup_timeout_ms,
+        )
 
     def set_sync_source(self, enabled: bool) -> None:
         self._sync_source = bool(enabled)

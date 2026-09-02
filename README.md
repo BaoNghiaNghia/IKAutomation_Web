@@ -119,7 +119,12 @@ diện ảnh và giao diện Qt vẫn được giữ nguyên.
 Build giữ PyInstaller cache và snapshot profile tại `.build-cache`: lần build
 sau giữ nguyên `release\IK Auto\data`, chỉ thay file ứng dụng và chỉ đồng bộ
 lại profile khi `config.json` hoặc dữ liệu profile bản dev thực sự thay đổi.
-Khi cần tạo lại hoàn toàn, chạy `build.cmd -CleanCache`.
+Ngoài ra, nếu mã nguồn, asset, cấu hình đóng gói và phiên bản dependency không
+đổi, build tự bỏ qua PyInstaller (bước chậm nhất), nhưng vẫn chạy kiểm thử,
+đồng bộ profile và cập nhật ngày giờ build. Khi cần ép đóng gói lại ứng dụng,
+chạy `build.cmd -ForcePackage`; khi cần tạo lại hoàn toàn, chạy
+`build.cmd -CleanCache`. Chỉ dùng `build.cmd -SkipTests` cho lần build nhanh
+tạm thời sau khi bạn đã kiểm thử cùng mã nguồn.
 
 Build là một ảnh chụp profile ở thời điểm build. Password không nằm trong
 `config.json`: chúng ở Windows Credential Manager và chỉ dùng được với cùng tài

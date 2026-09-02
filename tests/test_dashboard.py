@@ -83,6 +83,7 @@ class FakeActionButton:
         self.text = ""
         self.enabled = False
         self.style = ""
+        self.icon = None
 
     def setText(self, text: str) -> None:
         self.text = text
@@ -92,6 +93,9 @@ class FakeActionButton:
 
     def setStyleSheet(self, style: str) -> None:
         self.style = style
+
+    def setIcon(self, icon) -> None:
+        self.icon = icon
 
 
 class FakeFarmRunner:
@@ -110,6 +114,9 @@ class FakeFarmRunner:
     def disable_sync(self) -> None:
         self.sync_enabled = False
         self.disable_sync_calls += 1
+
+    def cancel_mail_monitor(self) -> None:
+        self.mail_monitor_cancelled = True
 
 
 class FakeTelegramNotifier:
@@ -150,6 +157,22 @@ def test_roster_dots_show_each_team_with_its_current_status_color() -> None:
     assert dots.count("&#9679;") == 3
     assert dots.count("#f59e0b") == 2
     assert dots.count("#16a34a") == 1
+
+
+def test_labeled_action_state_style_keeps_base_icon_spacing() -> None:
+    button = FakeActionButton()
+    button._ik_labeled_base_style = "QPushButton[hasIcon=true] { padding-left: 36px; }"
+
+    Dashboard._set_labeled_action_style(
+        button,
+        "QPushButton { background: #2563eb; }",
+    )
+
+    assert "padding-left: 36px" in button.style
+    assert "background: #2563eb" in button.style
+
+    Dashboard._set_labeled_action_style(button)
+    assert button.style == button._ik_labeled_base_style
 
 
 def test_monitor_first_pass_builds_baseline_then_alerts_only_for_attack_mail() -> None:
@@ -314,6 +337,49 @@ def test_mouse_sync_section_is_collapsed_by_default_and_can_toggle() -> None:
     assert dashboard.sync_section_toggle.tooltip == "Mở rộng Đồng bộ chuột - bàn phím"
 
 
+def test_device_action_log_section_is_collapsed_by_default_and_can_toggle() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.device_log_section_expanded = False
+    dashboard.device_log_section = FakeCollapsibleWidget()
+    dashboard.device_log_toggle = FakeToggleButton()
+    dashboard._refresh_device_action_log = lambda: None
+
+    dashboard._toggle_device_log_section()
+    assert dashboard.device_log_section_expanded is True
+    assert dashboard.device_log_section.visible is True
+    assert dashboard.device_log_toggle.tooltip == "Thu gọn Log hành động thiết bị"
+
+    dashboard._toggle_device_log_section()
+    assert dashboard.device_log_section_expanded is False
+    assert dashboard.device_log_section.visible is False
+    assert dashboard.device_log_toggle.tooltip == "Mở rộng Log hành động thiết bị"
+
+
+def test_device_action_log_adds_each_profile_once() -> None:
+    class Combo:
+        def __init__(self) -> None:
+            self.items = []
+
+        def addItem(self, label, *, userData) -> None:
+            self.items.append((label, userData))
+
+        def currentData(self):
+            return self.items[0][1] if self.items else None
+
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard._device_action_logs = {}
+    dashboard._device_log_profile_ids = set()
+    dashboard.device_log_profile = Combo()
+    dashboard.config = SimpleNamespace(profile=lambda _profile_id: SimpleNamespace(name="Tài khoản 01"))
+    dashboard._refresh_device_action_log = lambda: None
+
+    dashboard._record_device_action("account-2", "đã bấm Tìm kiếm")
+    dashboard._record_device_action("account-2", "đang xác minh panel")
+
+    assert dashboard.device_log_profile.items == [("Tài khoản 01", "account-2")]
+    assert len(dashboard._device_action_logs["account-2"]) == 2
+
+
 def test_mouse_sync_status_indicator_changes_colour_and_tooltip() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     dashboard.sync_status_icon = FakeStatusIcon()
@@ -395,6 +461,7 @@ def test_bulk_farm_button_starts_and_stops_without_closing_open_tabs() -> None:
     assert dashboard.runner.disable_sync_calls == 1
     assert dashboard._farm_all_running is True
     assert dashboard.farm_all_button.text == "Dừng Farm"
+    assert dashboard.farm_all_button.icon == dashboard_module.FIF.PAUSE
     assert set(dashboard.runner.commands) == {
         ("account-1", CommandKind.START_FARM),
         ("account-2", CommandKind.START_FARM),
@@ -404,12 +471,37 @@ def test_bulk_farm_button_starts_and_stops_without_closing_open_tabs() -> None:
     dashboard._farm_all_action()
 
     assert dashboard._farm_all_running is False
-    assert dashboard.farm_all_button.text == "Farms"
+    assert dashboard.farm_all_button.text == "AutoFarms"
+    assert dashboard.farm_all_button.icon == dashboard_module.FIF.LEAF
     assert set(dashboard.runner.commands) == {
         ("account-1", CommandKind.STOP_FARM),
         ("account-2", CommandKind.STOP_FARM),
     }
     assert dashboard.runner.opened == {"account-1", "account-2"}
+
+
+def test_autofarms_does_not_stop_independent_monitoring() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.config = SimpleNamespace(
+        profiles=[SimpleNamespace(id="account-1"), SimpleNamespace(id="account-2")]
+    )
+    dashboard.runner = FakeFarmRunner({"account-1", "account-2"})
+    dashboard.rows = {}
+    dashboard.farm_profiles = set()
+    dashboard._farm_all_running = False
+    dashboard._farm_launcher_phase = "ready"
+    dashboard._monitoring_enabled = True
+    dashboard.farm_all_button = FakeActionButton()
+    dashboard._log_lines = deque(maxlen=10)
+    dashboard.log = FakeLogWidget()
+    dashboard._stop_monitoring = lambda: (_ for _ in ()).throw(AssertionError("must not stop monitoring"))
+
+    dashboard._farm_all_action()
+
+    assert set(dashboard.runner.commands) == {
+        ("account-1", CommandKind.START_FARM),
+        ("account-2", CommandKind.START_FARM),
+    }
 
 
 def test_monitoring_disables_input_sync_before_starting() -> None:
@@ -437,6 +529,7 @@ def test_monitoring_disables_input_sync_before_starting() -> None:
     assert dashboard.runner.disable_sync_calls == 1
     assert dashboard._monitoring_enabled is True
     assert dashboard.monitor_button.text == "Dừng giám sát"
+    assert dashboard.monitor_button.icon == dashboard_module.FIF.PAUSE
 
 
 def test_close_tabs_stops_individual_farm_before_serial_browser_shutdown() -> None:
@@ -466,6 +559,7 @@ def test_close_tabs_stops_individual_farm_before_serial_browser_shutdown() -> No
     assert len(dashboard.runner.commands) == 1
     assert dashboard._farm_launcher_phase == "quiescing"
     assert dashboard.farm_launcher.text == "Đang dừng tác vụ…"
+    assert dashboard.farm_launcher.icon == dashboard_module.FIF.PAUSE
     assert dashboard.farm_all_button.enabled is False
 
     # Chrome must not receive STOP until the worker confirms Farm has ended.
@@ -475,6 +569,7 @@ def test_close_tabs_stops_individual_farm_before_serial_browser_shutdown() -> No
     assert dashboard.runner.commands[1] == ("account-1", CommandKind.STOP)
     assert dashboard._farm_launcher_phase == "stopping"
     assert dashboard.farm_launcher.text == "Đang đóng tab…"
+    assert dashboard.farm_launcher.icon == dashboard_module.FIF.CLOSE
 
     dashboard._farm_close_deadline = 0.0
     dashboard._advance_farm_stopping()
@@ -529,6 +624,7 @@ def test_profile_launch_sends_an_open_command_even_when_memory_is_constrained(mo
             load_percent=94.0,
         ),
     )
+    monkeypatch.setattr(dashboard_module, "get_gpu_utilization_percent", lambda: 96.0)
 
     dashboard._advance_farm_opening()
 

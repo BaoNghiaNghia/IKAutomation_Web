@@ -44,13 +44,13 @@ def test_happy_path_completes_exactly_one_verified_dispatch() -> None:
 def test_search_fallback_rotates_resources_before_area_round() -> None:
     farm = FarmWorkflow(resource_order=("iron", "stone", "wood", "food"))
     assert farm.advance_search_plan() is True
-    assert farm._target() == ("stone", 6)
+    assert farm._target() == ("stone", 7)
     assert farm.advance_search_plan() is True
-    assert farm._target() == ("wood", 6)
+    assert farm._target() == ("wood", 7)
     assert farm.advance_search_plan() is True
-    assert farm._target() == ("food", 6)
+    assert farm._target() == ("food", 7)
     assert farm.advance_search_plan() is False
-    assert farm._target() == ("iron", 6)
+    assert farm._target() == ("iron", 7)
 
 
 def test_find_resource_keeps_the_planned_resource_and_level() -> None:
@@ -62,22 +62,29 @@ def test_find_resource_keeps_the_planned_resource_and_level() -> None:
     decision = farm.decide(FarmGameState.RESOURCE_SEARCH)
 
     assert decision.step == FarmStep.FIND_RESOURCE
-    assert (decision.resource, decision.level, decision.team) == ("iron", 6, 2)
+    assert (decision.resource, decision.level, decision.team) == ("iron", 7, 2)
 
 
 def test_resource_plan_is_randomized_once_then_advances_level_after_area_pool() -> None:
     farm = FarmWorkflow(resource_order=("wood", "food", "stone", "iron"))
 
-    assert farm._target() == ("wood", 6)
-    assert farm.advance_search_plan() is True
-    assert farm._target() == ("food", 6)
-    assert farm.advance_search_plan() is True
-    assert farm._target() == ("stone", 6)
-    assert farm.advance_search_plan() is True
-    assert farm._target() == ("iron", 6)
-    assert farm.advance_search_plan() is False
-    assert farm.advance_level_plan() is True
     assert farm._target() == ("wood", 7)
+    assert farm.advance_search_plan() is True
+    assert farm._target() == ("food", 7)
+    assert farm.advance_search_plan() is True
+    assert farm._target() == ("stone", 7)
+    assert farm.advance_search_plan() is True
+    assert farm._target() == ("iron", 7)
+    assert farm.advance_search_plan() is False
+    assert farm.advance_level_plan() is False
+
+
+def test_visible_resource_level_overrides_the_fallback_without_clicking_controls() -> None:
+    farm = FarmWorkflow(resource_order=("iron", "stone", "wood", "food"))
+
+    farm.set_observed_level(6)
+
+    assert farm.current_target() == ("iron", 6)
 
 
 def test_first_ready_team_from_initial_roster_is_locked_for_the_cycle() -> None:

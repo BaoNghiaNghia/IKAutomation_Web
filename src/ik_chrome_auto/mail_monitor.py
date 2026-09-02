@@ -10,6 +10,9 @@ NO_NEW_COMBAT_MAIL = "no_new_combat_mail"
 COMBAT_MAIL_OTHER = "combat_mail_other"
 TERRITORY_ATTACKED = "territory_attacked"
 SCAN_ERROR = "scan_error"
+# This non-alerting outcome lets the dashboard clear a scan that was cancelled
+# before its worker opened the mailbox.
+SCAN_CANCELLED = "scan_cancelled"
 
 
 @dataclass(frozen=True, slots=True)

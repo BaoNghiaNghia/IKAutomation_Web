@@ -57,9 +57,8 @@ copy /y "%PROJECT_DIR%config.example.json" "%PROJECT_DIR%config.json" >nul || go
 echo Created config.json from config.example.json.
 
 :doctor
-echo [4/5] Running Doctor and browser-session checks...
+echo [4/5] Running environment checks...
 "%VENV_PYTHON%" -m ik_chrome_auto.doctor --config "%PROJECT_DIR%config.json" || goto :failed
-"%VENV_PYTHON%" -m pytest "%PROJECT_DIR%tests\test_browser_worker.py" "%PROJECT_DIR%tests\test_credential_store.py" -q || goto :failed
 
 echo [5/5] Opening dashboard...
 set "IK_AUTO_MINIMIZE_CONSOLE=1"

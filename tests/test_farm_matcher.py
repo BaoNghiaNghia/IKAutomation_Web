@@ -2,20 +2,63 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+import pytest
 
 from ik_chrome_auto.farm_matcher import BrowserCanvasMatcher
+from ik_chrome_auto.farm_vision import TeamRowState
 
 
 def test_city_template_search_is_limited_to_bottom_left_corner() -> None:
     assert BrowserCanvasMatcher._region("city_corner", 835, 432) == (0, 324, 139, 108)
+    assert BrowserCanvasMatcher._region("map_corner", 1280, 720) == (0, 540, 153, 180)
 from ik_chrome_auto.farm_vision import FarmTemplateId
 
 
 def test_browser_map_toggle_templates_match_their_actual_direction() -> None:
     from ik_chrome_auto.farm_matcher import SPECS
 
-    assert SPECS[FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON].filename == "browser_map_to_city_tight.png"
-    assert SPECS[FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON].filename == "browser_city_icon_green_tight.png"
+    assert SPECS[FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON].filename == "browser_open_world_map_1280.png"
+    assert SPECS[FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON].filename == "browser_city_return_green_1280.png"
+
+
+@pytest.mark.parametrize(
+    ("filename", "left", "top"),
+    (
+        ("browser_city_return_green_1280.png", 28, 595),
+        ("browser_city_return_red_1280.png", 34, 587),
+    ),
+)
+def test_full_resolution_city_return_button_matches_green_and_red_skins(
+    filename: str,
+    left: int,
+    top: int,
+) -> None:
+    matcher = BrowserCanvasMatcher()
+    template = matcher._load(filename)
+    canvas = np.zeros((720, 1280, 3), dtype=np.uint8)
+    height, width = template.shape[:2]
+    canvas[top : top + height, left : left + width] = template
+
+    evidence = matcher._match(canvas, FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON)
+
+    assert evidence.found
+    assert evidence.bounds is not None
+    assert evidence.bounds[:2] == (left, top)
+
+
+def test_full_resolution_world_map_button_matches_city_canvas() -> None:
+    matcher = BrowserCanvasMatcher()
+    template = matcher._load("browser_open_world_map_1280.png")
+    canvas = np.zeros((720, 1280, 3), dtype=np.uint8)
+    top, left = 592, 20
+    height, width = template.shape[:2]
+    canvas[top : top + height, left : left + width] = template
+
+    evidence = matcher._match(canvas, FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
+
+    assert evidence.found
+    assert evidence.bounds is not None
+    assert evidence.bounds[:2] == (left, top)
 
 
 def test_matcher_scales_template_and_returns_canvas_relative_bounds(tmp_path) -> None:
@@ -50,6 +93,162 @@ def test_matcher_scales_height_independently_for_stretched_browser_canvas(tmp_pa
     assert evidence.found
     assert evidence.bounds is not None
     assert evidence.bounds[:2] == (100, 220)
+
+
+def test_full_renderer_roster_keeps_status_text_at_hud_pixel_size() -> None:
+    matcher = BrowserCanvasMatcher()
+    ready = matcher._load("browser_ready_team_label.png")
+    canvas = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    # The roster moves with the 1280x720 layout, while the game keeps this
+    # small status font at its native HUD pixel size.
+    for team in range(1, 5):
+        top = round(720 * 0.425) + (team - 1) * round(720 * 0.071) + 16
+        left = 78
+        height, width = ready.shape[:2]
+        canvas[top : top + height, left : left + width] = ready
+        portrait_top = round(720 * 0.425) + (team - 1) * round(720 * 0.071)
+        # Deterministic textured pixels model the dense edges in a real hero
+        # portrait (a one-pixel checkerboard is suppressed by Canny).
+        portrait = np.random.default_rng(team).integers(0, 256, (51, 52), dtype=np.uint8)
+        canvas[portrait_top : portrait_top + 51, 18:70] = portrait[..., None]
+
+    roster = matcher._team_roster(canvas)
+
+    assert tuple((row.team, row.state) for row in roster) == (
+        (1, TeamRowState.READY),
+        (2, TeamRowState.READY),
+        (3, TeamRowState.READY),
+        (4, TeamRowState.READY),
+    )
+
+
+def test_full_renderer_roster_uses_direct_busy_evidence_per_row() -> None:
+    matcher = BrowserCanvasMatcher()
+    ready = matcher._load("browser_ready_team_label.png")
+    busy = matcher._load("browser_busy_team_label.png")
+    canvas = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    for team, template in ((1, ready), (2, busy), (3, ready), (4, ready)):
+        top = round(720 * 0.425) + (team - 1) * round(720 * 0.071) + 16
+        left = 78
+        height, width = template.shape[:2]
+        canvas[top : top + height, left : left + width] = template
+        portrait_top = round(720 * 0.425) + (team - 1) * round(720 * 0.071)
+        portrait = np.random.default_rng(team).integers(0, 256, (51, 52), dtype=np.uint8)
+        canvas[portrait_top : portrait_top + 51, 18:70] = portrait[..., None]
+
+    roster = matcher._team_roster(canvas)
+
+    assert tuple((row.team, row.state) for row in roster) == (
+        (1, TeamRowState.READY),
+        (2, TeamRowState.BUSY),
+        (3, TeamRowState.READY),
+        (4, TeamRowState.READY),
+    )
+
+
+def test_active_resource_templates_are_locked_to_the_1280_renderer() -> None:
+    """Selected-resource templates include each supplied gold-ring state."""
+    import ik_chrome_auto.farm_matcher as matcher_module
+
+    expected = {
+        FarmTemplateId.BROWSER_FOOD_RESOURCE_ACTIVE: "browser_resource_food_active_1280.png",
+        FarmTemplateId.BROWSER_WOOD_RESOURCE_ACTIVE: "browser_resource_wood_active_1280.png",
+        FarmTemplateId.BROWSER_STONE_RESOURCE_ACTIVE: "browser_resource_stone_active_1280.png",
+        FarmTemplateId.BROWSER_IRON_RESOURCE_ACTIVE: "browser_resource_iron_active_1280.png",
+    }
+
+    for template_id, filename in expected.items():
+        spec = matcher_module.SPECS[template_id]
+        assert spec.filename == filename
+        assert (spec.reference_width, spec.reference_height) == (1280, 720)
+        assert spec.scale_variants == (1.0,)
+
+
+def test_search_button_uses_the_latest_supplied_live_capture() -> None:
+    import ik_chrome_auto.farm_matcher as matcher_module
+
+    spec = matcher_module.SPECS[FarmTemplateId.BROWSER_SEARCH_BUTTON_ENABLED]
+
+    assert spec.filename == "browser_search_button_enabled.png"
+    assert (spec.reference_width, spec.reference_height) == (1280, 720)
+    assert spec.uniform_width_scale is False
+
+
+def test_world_map_magnifier_uses_the_latest_supplied_crop_at_720p() -> None:
+    import ik_chrome_auto.farm_matcher as matcher_module
+
+    spec = matcher_module.SPECS[FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON]
+
+    assert spec.filename == "browser_resource_search_button.png"
+    assert (spec.reference_width, spec.reference_height) == (1280, 720)
+    assert spec.threshold == 0.76
+
+
+def test_checked_search_target_template_requires_positive_tick_evidence() -> None:
+    import ik_chrome_auto.farm_matcher as matcher_module
+
+    spec = matcher_module.SPECS[FarmTemplateId.BROWSER_SEARCH_TARGET_CHECKBOX_CHECKED]
+
+    assert spec.filename == "browser_search_target_checkbox_checked.png"
+    assert (spec.reference_width, spec.reference_height) == (1014, 275)
+    assert spec.uniform_width_scale is True
+    assert spec.threshold == 0.70
+
+
+def test_team_selection_templates_use_the_supplied_1280_renderer_capture() -> None:
+    import ik_chrome_auto.farm_matcher as matcher_module
+
+    for template_id in (
+        FarmTemplateId.BROWSER_GATHER_BUTTON_ENABLED,
+        FarmTemplateId.BROWSER_TEAM_SELECTION_PANEL,
+        FarmTemplateId.BROWSER_TEAM_ACTION_BUTTON,
+        FarmTemplateId.BROWSER_TEAM_2_BADGE,
+        FarmTemplateId.BROWSER_TEAM_3_BADGE,
+        FarmTemplateId.BROWSER_TEAM_4_BADGE,
+        FarmTemplateId.BROWSER_TEAM_SELECTED_BORDER,
+    ):
+        spec = matcher_module.SPECS[template_id]
+        assert (spec.reference_width, spec.reference_height) == (1280, 720)
+
+
+def test_expiring_resource_confirmation_uses_the_supplied_1280_dialog() -> None:
+    import ik_chrome_auto.farm_matcher as matcher_module
+
+    for template_id in (
+        FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_TOAST,
+        FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_CONFIRM,
+    ):
+        spec = matcher_module.SPECS[template_id]
+        assert (spec.reference_width, spec.reference_height) == (1280, 720)
+
+
+def test_status_like_footer_without_portrait_does_not_create_fourth_team() -> None:
+    matcher = BrowserCanvasMatcher()
+    ready = matcher._load("browser_ready_team_label.png")
+    canvas = np.zeros((720, 1280, 3), dtype=np.uint8)
+    portrait = np.random.default_rng(7).integers(0, 256, (51, 52), dtype=np.uint8)
+
+    for team in range(1, 4):
+        row_top = round(720 * 0.425) + (team - 1) * round(720 * 0.071)
+        height, width = ready.shape[:2]
+        canvas[row_top + 16 : row_top + 16 + height, 78 : 78 + width] = ready
+        canvas[row_top : row_top + 51, 18:70] = portrait[..., None]
+
+    # Reproduce a false Ready-like patch below the final portrait. The row is
+    # still absent and must not appear in the scheduler or dashboard dots.
+    fourth_top = round(720 * 0.425) + 3 * round(720 * 0.071)
+    height, width = ready.shape[:2]
+    canvas[fourth_top + 4 : fourth_top + 4 + height, 100 : 100 + width] = ready
+
+    roster = matcher._team_roster(canvas)
+
+    assert tuple((row.team, row.state) for row in roster) == (
+        (1, TeamRowState.READY),
+        (2, TeamRowState.READY),
+        (3, TeamRowState.READY),
+    )
 
 
 def test_matcher_honours_browser_template_reference_dimensions(tmp_path, monkeypatch) -> None:

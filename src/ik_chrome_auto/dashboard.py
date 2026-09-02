@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QColor, QCursor, QGuiApplication, QIcon, QPixmap
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
 from qfluentwidgets import CardWidget, CheckBox, ComboBox, FluentIcon as FIF, LineEdit, PasswordLineEdit, PrimaryPushButton, PrimaryToolButton, PushButton, StrongBodyLabel, SubtitleLabel, ToolButton
@@ -126,6 +126,10 @@ class Dashboard(QWidget):
         self.runner = MultiProfileRunner(self.config, self.updates.put, on_coordinate=lambda pid, event: self.coordinate_updates.put((pid, event)))
         self.rows: dict[str, ProfileRow] = {}
         self._log_lines: deque[str] = deque(maxlen=10)
+        # Keep the action stream separated by device so the operator can
+        # diagnose one stuck Farm without mixed messages from other profiles.
+        self._device_action_logs: dict[str, deque[str]] = {}
+        self._device_log_profile_ids: set[str] = set()
         self.last_coordinate: tuple[str, dict[str, object]] | None = None
         self.farm_profiles: set[str] = set()
         self._sync_target_profiles: set[str] = set()
@@ -226,10 +230,10 @@ class Dashboard(QWidget):
             cell = QWidget(); cl = QVBoxLayout(cell); cl.setContentsMargins(0,0,0,0); cl.setSpacing(1); caption = self._muted(label); caption.setStyleSheet(f"color:#62758e;background:transparent;font-size:{self._responsive_caption_font_pt}pt;"); value.setStyleSheet(f"font-size:{self._responsive_value_font_pt}pt;font-weight:700;"); self._overview_typography.append((caption, value)); cl.addWidget(caption); cl.addWidget(value); ol.addWidget(cell, index // 2, index % 2)
         ll.addWidget(overview)
         accounts = self._card(); al = QVBoxLayout(accounts); al.addWidget(StrongBodyLabel("Tài khoản Chrome")); al.addWidget(self._muted("Mỗi tài khoản có một phiên browser riêng, lưu cục bộ."))
-        manage = PushButton("Quản lý"); self._manage_button = manage; manage.setFixedHeight(self._responsive_control_height); manage.setStyleSheet(f"QPushButton {{ background:#ffffff; border:1px solid #8ad7d9; border-radius:{_ui_px(8)}px; color:#087f8c; }} QPushButton:hover {{ background:#effcfb; border-color:#0ea5a5; }}"); manage.clicked.connect(self._manage_accounts)
-        self.farm_launcher = PrimaryPushButton("Khởi động"); self.farm_launcher.setFixedHeight(self._responsive_control_height); self.farm_launcher.setStyleSheet(f"QPushButton {{ background:#2563eb; border:1px solid #2563eb; border-radius:{_ui_px(8)}px; color:#ffffff; font-weight:600; }} QPushButton:hover {{ background:#1d4ed8; border-color:#1d4ed8; }} QPushButton:disabled {{ background:#93c5fd; border-color:#93c5fd; color:#eff6ff; }}"); self.farm_launcher.clicked.connect(self._farm_launcher_action)
-        self.farm_all_button = PushButton("Farms"); self.farm_all_button.setFixedHeight(self._responsive_control_height); self.farm_all_button.setEnabled(False); self.farm_all_button.clicked.connect(self._farm_all_action)
-        self.monitor_button = PushButton("Giám sát"); self.monitor_button.setFixedHeight(self._responsive_control_height); self.monitor_button.setEnabled(False); self.monitor_button.clicked.connect(self._toggle_monitoring)
+        manage = PushButton(FIF.PEOPLE, "Quản lý"); self._manage_button = manage; self._configure_labeled_action_button(manage, FIF.PEOPLE, "#087f8c"); manage.setFixedHeight(self._responsive_control_height); self._set_labeled_action_style(manage, f"QPushButton {{ background:#ffffff; border:1px solid #8ad7d9; border-radius:{_ui_px(8)}px; color:#087f8c; }} QPushButton:hover {{ background:#effcfb; border-color:#0ea5a5; }}"); manage.clicked.connect(self._manage_accounts)
+        self.farm_launcher = PrimaryPushButton(FIF.PLAY, "Khởi động"); self._configure_labeled_action_button(self.farm_launcher, FIF.PLAY, "#ffffff"); self.farm_launcher.setFixedHeight(self._responsive_control_height); self._set_labeled_action_style(self.farm_launcher, f"QPushButton {{ background:#2563eb; border:1px solid #2563eb; border-radius:{_ui_px(8)}px; color:#ffffff; font-weight:600; }} QPushButton:hover {{ background:#1d4ed8; border-color:#1d4ed8; }} QPushButton:disabled {{ background:#93c5fd; border-color:#93c5fd; color:#eff6ff; }}"); self.farm_launcher.clicked.connect(self._farm_launcher_action)
+        self.farm_all_button = PushButton(FIF.LEAF, "AutoFarms"); self._configure_labeled_action_button(self.farm_all_button, FIF.LEAF, "#64748b"); self.farm_all_button.setFixedHeight(self._responsive_control_height); self.farm_all_button.setEnabled(False); self.farm_all_button.clicked.connect(self._farm_all_action)
+        self.monitor_button = PushButton(FIF.VIEW, "Giám sát"); self._configure_labeled_action_button(self.monitor_button, FIF.VIEW, "#64748b"); self.monitor_button.setFixedHeight(self._responsive_control_height); self.monitor_button.setEnabled(False); self.monitor_button.clicked.connect(self._toggle_monitoring)
         account_actions = QHBoxLayout(); account_actions.setSpacing(_ui_px(7)); account_actions.addWidget(manage, 1); account_actions.addWidget(self.farm_launcher, 1); al.addLayout(account_actions)
         runtime_actions = QHBoxLayout(); runtime_actions.setSpacing(_ui_px(7)); runtime_actions.addWidget(self.farm_all_button, 1); runtime_actions.addWidget(self.monitor_button, 1); al.addLayout(runtime_actions); ll.addWidget(accounts)
         arrange_card = self._card(); acl = QVBoxLayout(arrange_card); acl.addWidget(StrongBodyLabel("Sắp xếp cửa sổ")); row = QHBoxLayout(); row.addWidget(QLabel("Số cửa sổ / hàng")); row.addStretch(); self.windows_per_row = ComboBox(); self.windows_per_row.addItems(["2","3","4","5","6"]); self.windows_per_row.setCurrentText(str(self.config.browser.windows_per_row)); self.windows_per_row.currentTextChanged.connect(self._apply_windows_per_row); row.addWidget(self.windows_per_row); acl.addLayout(row)
@@ -267,6 +271,31 @@ class Dashboard(QWidget):
         self.sync_section.hide()
         au.addWidget(self.sync_section)
         ll.addWidget(automation)
+        device_log_card = self._card()
+        dl = QVBoxLayout(device_log_card)
+        device_log_header = QHBoxLayout()
+        device_log_header.addWidget(StrongBodyLabel("Log hành động thiết bị"))
+        device_log_header.addStretch()
+        self.device_log_toggle = self._icon_button(FIF.CHEVRON_RIGHT, "Mở rộng Log hành động thiết bị")
+        self.device_log_toggle.clicked.connect(self._toggle_device_log_section)
+        device_log_header.addWidget(self.device_log_toggle)
+        dl.addLayout(device_log_header)
+        self.device_log_section_expanded = False
+        self.device_log_section = QWidget()
+        device_log_layout = QVBoxLayout(self.device_log_section)
+        device_log_layout.setContentsMargins(0, 0, 0, 0)
+        device_log_layout.setSpacing(_ui_px(5))
+        self.device_log_profile = ComboBox()
+        self.device_log_profile.currentIndexChanged.connect(self._refresh_device_action_log)
+        device_log_layout.addWidget(self.device_log_profile)
+        self.device_action_log = QTextEdit()
+        self.device_action_log.setReadOnly(True)
+        self.device_action_log.setFixedHeight(_ui_px(118))
+        self.device_action_log.setPlaceholderText("Chưa có thao tác Auto Farm cho thiết bị này.")
+        device_log_layout.addWidget(self.device_action_log)
+        self.device_log_section.hide()
+        dl.addWidget(self.device_log_section)
+        ll.addWidget(device_log_card)
         ll.addStretch()
         right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(_ui_px(8)); body.addWidget(right,1)
         progress = self._card(); pl = QVBoxLayout(progress); ph = QHBoxLayout(); ph.addWidget(StrongBodyLabel("Tiến trình profile")); ph.addStretch(); self.open_badge = QLabel("0 đang mở"); self.open_badge.setStyleSheet(f"background:#e2edff;color:#2767bd;border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;"); ph.addWidget(self.open_badge); pl.addLayout(ph); self.table_layout = QGridLayout(); self.table_layout.setSpacing(_ui_px(8)); self.table_layout.setColumnStretch(0, 1); self.table_layout.setColumnStretch(1, 1); content=QWidget(); content.setLayout(self.table_layout); self.scroll=QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setWidget(content); pl.addWidget(self.scroll,1); rl.addWidget(progress,1)
@@ -401,6 +430,38 @@ class Dashboard(QWidget):
         button.setFixedSize(self._responsive_control_height, self._responsive_control_height)
         self._responsive_icon_buttons.append(button)
         return button
+
+    @staticmethod
+    def _configure_labeled_action_button(button: PushButton, icon: FIF, color: str = "#475569") -> None:
+        """Keep a semantic icon and label centred together on one row."""
+        button._ik_labeled_icon_color = color
+        button.setIcon(icon.icon(color=color))
+        button.setIconSize(QSize(_ui_px(16), _ui_px(16)))
+        button.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        # qfluentwidgets' own QSS reserves horizontal space for the icon. Keep
+        # it so later state colours do not make the icon overlap centred text.
+        button._ik_labeled_base_style = button.styleSheet()
+
+    @staticmethod
+    def _set_labeled_action_style(button: PushButton, state_style: str = "") -> None:
+        """Apply state colours while retaining qfluent's icon/text spacing."""
+        base_style = getattr(button, "_ik_labeled_base_style", "")
+        combined = f"{base_style}\n{state_style}" if state_style else base_style
+        button.setStyleSheet(combined)
+
+    @staticmethod
+    def _set_labeled_action_icon(button: PushButton, icon: FIF, color: str | None = None) -> None:
+        """Update a stateful action icon without disturbing its label/style."""
+        if color is not None:
+            button._ik_labeled_icon_color = color
+        set_icon = getattr(button, "setIcon", None)
+        if callable(set_icon):
+            # Keep lightweight test/integration button doubles compatible;
+            # actual Fluent buttons receive the colour-aware SVG icon.
+            if isinstance(button, PushButton):
+                set_icon(icon.icon(color=getattr(button, "_ik_labeled_icon_color", "#475569")))
+            else:
+                set_icon(icon)
 
     def _compact_profile_button(self, button: PushButton) -> PushButton:
         """Keep per-profile controls compact without shrinking global actions."""
@@ -627,6 +688,46 @@ class Dashboard(QWidget):
             else "Mở rộng Đồng bộ chuột - bàn phím"
         )
 
+    def _toggle_device_log_section(self) -> None:
+        self.device_log_section_expanded = not self.device_log_section_expanded
+        self.device_log_section.setVisible(self.device_log_section_expanded)
+        self.device_log_toggle.setIcon(
+            FIF.CHEVRON_DOWN_MED if self.device_log_section_expanded else FIF.CHEVRON_RIGHT
+        )
+        self.device_log_toggle.setToolTip(
+            "Thu gọn Log hành động thiết bị"
+            if self.device_log_section_expanded
+            else "Mở rộng Log hành động thiết bị"
+        )
+        if self.device_log_section_expanded:
+            self._refresh_device_action_log()
+
+    def _record_device_action(self, profile_id: str, message: str) -> None:
+        actions = self._device_action_logs.setdefault(profile_id, deque(maxlen=80))
+        actions.append(f"{time.strftime('%H:%M:%S')}  {message}")
+        if profile_id not in self._device_log_profile_ids:
+            try:
+                name = self.config.profile(profile_id).name
+            except KeyError:
+                name = profile_id
+            # qfluentwidgets reserves the second positional argument for an
+            # icon. Pass userData by name so the profile ID is retained and
+            # repeated status updates cannot create duplicate entries.
+            self.device_log_profile.addItem(name, userData=profile_id)
+            self._device_log_profile_ids.add(profile_id)
+        if self.device_log_profile.currentData() in {None, profile_id}:
+            self._refresh_device_action_log()
+
+    def _refresh_device_action_log(self, *_args: object) -> None:
+        profile_id = self.device_log_profile.currentData()
+        if not isinstance(profile_id, str):
+            self.device_action_log.setPlainText("")
+            return
+        self.device_action_log.setPlainText("\n".join(self._device_action_logs.get(profile_id, ())))
+        cursor = self.device_action_log.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self.device_action_log.setTextCursor(cursor)
+
     def _load_telegram_notifier(self) -> None:
         try:
             settings = load_telegram_settings()
@@ -747,6 +848,9 @@ class Dashboard(QWidget):
             )
             return
         self._disable_sync_for_automation("Giám sát")
+        enable_monitor = getattr(self.runner, "enable_mail_monitor", None)
+        if callable(enable_monitor):
+            enable_monitor(opened)
         self._monitoring_enabled = True
         self._monitor_queue.clear()
         self._monitor_in_flight.clear()
@@ -760,7 +864,8 @@ class Dashboard(QWidget):
         self._monitor_cycle_number = 0
         self._monitor_initialized_profiles.clear()
         self.monitor_button.setText("Dừng giám sát")
-        self.monitor_button.setStyleSheet(
+        self._set_labeled_action_icon(self.monitor_button, FIF.PAUSE, "#ffffff")
+        self._set_labeled_action_style(self.monitor_button,
             f"QPushButton {{ background:#ef4444; border:1px solid #ef4444; "
             f"border-radius:{_ui_px(8)}px; color:#ffffff; font-weight:600; }} "
             "QPushButton:hover { background:#dc2626; border-color:#dc2626; }"
@@ -772,6 +877,9 @@ class Dashboard(QWidget):
         self._advance_monitoring()
 
     def _stop_monitoring(self) -> None:
+        cancel_monitor = getattr(self.runner, "cancel_mail_monitor", None)
+        if callable(cancel_monitor):
+            cancel_monitor()
         self._monitoring_enabled = False
         self._monitor_queue.clear()
         self._monitor_in_flight.clear()
@@ -785,7 +893,8 @@ class Dashboard(QWidget):
         self._monitor_cycle_number = 0
         self._monitor_initialized_profiles.clear()
         self.monitor_button.setText("Giám sát")
-        self.monitor_button.setStyleSheet("")
+        self._set_labeled_action_icon(self.monitor_button, FIF.VIEW, "#64748b")
+        self._set_labeled_action_style(self.monitor_button)
         self.monitor_button.setEnabled(self._opened_profile_count() > 0)
         self._refresh_sync_control()
         self._append_log("Đã dừng giám sát thư Chiến đấu")
@@ -1004,12 +1113,12 @@ class Dashboard(QWidget):
             pending = len(self._farm_open_queue)
             self.farm_launcher.setEnabled(False)
             self.farm_launcher.setText("Đang mở...")
+            self._set_labeled_action_icon(self.farm_launcher, FIF.PLAY)
             self.farm_all_button.setEnabled(False)
             self._farm_launcher_phase = "opening"
             self._farm_next_open_at = 0.0
             self._farm_batch_profiles.clear()
             self._farm_batch_submitted = 0
-            self._farm_batch_limit = self._farm_launch_policy.batch_size
             self._farm_batch_resume_at = 0.0
             self._farm_resource_pause_started = 0.0
             self._farm_resource_pause_reason = None
@@ -1018,6 +1127,7 @@ class Dashboard(QWidget):
                 self._farm_launch_policy = FarmLaunchPolicy.for_total_memory(memory.total_bytes)
             except Exception:
                 self._farm_launch_policy = FarmLaunchPolicy.for_total_memory(32 * 1_073_741_824)
+            self._farm_batch_limit = self._farm_launch_policy.batch_size
             startup_timeout = self.config.browser.startup_timeout_ms / 1000
             self._farm_open_deadline = time.monotonic() + self._farm_launch_policy.estimated_timeout_seconds(
                 pending,
@@ -1069,6 +1179,7 @@ class Dashboard(QWidget):
                 return
             self.farm_launcher.setEnabled(False)
             self.farm_launcher.setText("Đang dừng tác vụ…")
+            self._set_labeled_action_icon(self.farm_launcher, FIF.PAUSE)
             self._farm_launcher_phase = "quiescing"
             self.farm_all_button.setEnabled(False)
             if hasattr(self, "sync"):
@@ -1093,14 +1204,15 @@ class Dashboard(QWidget):
         if len(opened) <= 1:
             self.farm_all_button.setEnabled(False)
             return
-        self._disable_sync_for_automation("Farms")
+        self._disable_sync_for_automation("AutoFarms")
         for profile_id in opened:
             if profile_id not in self.farm_profiles:
                 self.farm_profiles.add(profile_id)
                 self.runner.submit(profile_id, CommandKind.START_FARM)
         self._farm_all_running = True
         self.farm_all_button.setText("Dừng Farm")
-        self.farm_all_button.setStyleSheet(f"QPushButton {{ background:#ef4444; border:1px solid #ef4444; border-radius:{_ui_px(8)}px; color:#ffffff; font-weight:600; }} QPushButton:hover {{ background:#dc2626; border-color:#dc2626; }}")
+        self._set_labeled_action_icon(self.farm_all_button, FIF.PAUSE, "#ffffff")
+        self._set_labeled_action_style(self.farm_all_button, f"QPushButton {{ background:#ef4444; border:1px solid #ef4444; border-radius:{_ui_px(8)}px; color:#ffffff; font-weight:600; }} QPushButton:hover {{ background:#dc2626; border-color:#dc2626; }}")
         self._append_log(f"Đã gửi lệnh chạy Farm cho {len(opened)} profile")
         self._notify_telegram(f"🌾 Đã bắt đầu Farm trên {len(opened)} profile.")
 
@@ -1109,8 +1221,9 @@ class Dashboard(QWidget):
             self.runner.submit(profile_id, CommandKind.STOP_FARM)
         self.farm_profiles.clear()
         self._farm_all_running = False
-        self.farm_all_button.setText("Farms")
-        self.farm_all_button.setStyleSheet("")
+        self.farm_all_button.setText("AutoFarms")
+        self._set_labeled_action_icon(self.farm_all_button, FIF.LEAF, "#64748b")
+        self._set_labeled_action_style(self.farm_all_button)
         self.farm_all_button.setEnabled(
             self._farm_launcher_phase not in {"opening", "quiescing", "stopping"}
             and self._opened_profile_count() > 1
@@ -1163,6 +1276,7 @@ class Dashboard(QWidget):
         self._farm_launcher_phase = "ready"
         self.farm_launcher.setEnabled(True)
         self.farm_launcher.setText("Đóng tabs")
+        self._set_labeled_action_icon(self.farm_launcher, FIF.CLOSE)
         self.farm_all_button.setEnabled(self._opened_profile_count() > 1)
         self._append_log(
             f"Đã mở và xếp {count} tab theo {columns} cột (trái → phải, trên → dưới)"
@@ -1201,10 +1315,12 @@ class Dashboard(QWidget):
         reason: str | None = None
         try:
             memory = get_system_memory_status()
+            gpu_percent = get_gpu_utilization_percent()
             reason = policy.resource_block_reason(
                 available_memory_bytes=memory.available_bytes,
                 memory_load_percent=memory.load_percent,
                 profile_cpu_percent=self._latest_profile_cpu_percent,
+                gpu_utilization_percent=gpu_percent,
             )
         except Exception as error:
             self._append_log(f"Không đọc được tài nguyên hệ thống: {error}")
@@ -1224,12 +1340,14 @@ class Dashboard(QWidget):
             if self._farm_batch_submitted == 0:
                 self._farm_batch_limit = 1
             self.farm_launcher.setText("Đang mở chậm")
+            self._set_labeled_action_icon(self.farm_launcher, FIF.PLAY)
         if self._farm_resource_pause_started:
             if not reason:
                 self._append_log(f"Tài nguyên đã ổn định; tiếp tục mở tab (trước đó: {self._farm_resource_pause_reason})")
                 self._farm_resource_pause_started = 0.0
                 self._farm_resource_pause_reason = None
                 self.farm_launcher.setText("Đang mở...")
+                self._set_labeled_action_icon(self.farm_launcher, FIF.PLAY)
         profile_id = self._farm_open_queue.popleft()
         self.runner.submit(profile_id, CommandKind.OPEN)
         self._farm_batch_profiles.add(profile_id)
@@ -1265,6 +1383,7 @@ class Dashboard(QWidget):
         self._farm_all_running = False
         self.farm_launcher.setEnabled(True)
         self.farm_launcher.setText("Khởi động")
+        self._set_labeled_action_icon(self.farm_launcher, FIF.PLAY, "#ffffff")
         self.farm_all_button.setEnabled(False)
         self._set_farm_launcher_launch_style()
         (self._error if critical else self._warning)(title, message)
@@ -1318,6 +1437,7 @@ class Dashboard(QWidget):
             return
         self._farm_launcher_phase = "stopping"
         self.farm_launcher.setText("Đang đóng tab…")
+        self._set_labeled_action_icon(self.farm_launcher, FIF.CLOSE)
         self._append_log(
             f"Các tác vụ đã dừng; đang đóng lần lượt {len(self._farm_close_queue)} tab profile"
         )
@@ -1363,16 +1483,18 @@ class Dashboard(QWidget):
         self._farm_launcher_phase = "launch"
         self.farm_launcher.setEnabled(True)
         self.farm_launcher.setText("Khởi động")
+        self._set_labeled_action_icon(self.farm_launcher, FIF.PLAY)
         self._farm_all_running = False
-        self.farm_all_button.setText("Farms")
-        self.farm_all_button.setStyleSheet("")
+        self.farm_all_button.setText("AutoFarms")
+        self._set_labeled_action_icon(self.farm_all_button, FIF.LEAF, "#64748b")
+        self._set_labeled_action_style(self.farm_all_button)
         self.farm_all_button.setEnabled(False)
         self._set_farm_launcher_launch_style()
         self._append_log("Đã đóng toàn bộ tab profile")
         self._notify_telegram(f"⬛ Đã đóng tổng cộng {closed_total} profile.")
 
     def _set_farm_launcher_launch_style(self) -> None:
-        self.farm_launcher.setStyleSheet(f"QPushButton {{ background:#2563eb; border:1px solid #2563eb; border-radius:{_ui_px(8)}px; color:#ffffff; font-weight:600; }} QPushButton:hover {{ background:#1d4ed8; border-color:#1d4ed8; }} QPushButton:disabled {{ background:#93c5fd; border-color:#93c5fd; color:#eff6ff; }}")
+        self._set_labeled_action_style(self.farm_launcher, f"QPushButton {{ background:#2563eb; border:1px solid #2563eb; border-radius:{_ui_px(8)}px; color:#ffffff; font-weight:600; }} QPushButton:hover {{ background:#1d4ed8; border-color:#1d4ed8; }} QPushButton:disabled {{ background:#93c5fd; border-color:#93c5fd; color:#eff6ff; }}")
 
     def _choose_farm_profiles(self) -> set[str]:
         """Return profiles chosen for the next Farm run, without starting them."""
@@ -1508,6 +1630,7 @@ class Dashboard(QWidget):
                         event_key=f"profile-error:{snap.profile_id}:{snap.message}",
                         cooldown_seconds=300.0,
                     )
+                self._record_device_action(snap.profile_id, snap.message)
                 self._append_log(f"[{snap.profile_id}] {snap.message}")
         except queue.Empty: pass
         try:
