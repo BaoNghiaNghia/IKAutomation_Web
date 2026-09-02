@@ -103,6 +103,10 @@ FARM_CONTROL_POSTCONDITION_HOLD_SECONDS = 2.2
 # the portal loads.  The transition has already been clicked exactly once, so
 # wait for an explicit map control instead of aborting mid-load.
 FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS = 35.0
+# The game can leave World Map visible while it streams the resource popup.
+# Do not rotate to another resource during that transition: a late popup is a
+# valid positive result and must still reach its Gather button.
+FARM_SEARCH_RESULT_SETTLE_SECONDS = 10.0
 # Controls the capped retry backoff, not whether Farm may stop. A Farm run is
 # intentionally persistent and ends only through the user's Stop Farm command.
 FARM_MAX_RECOVERY_ATTEMPTS = 3
@@ -1070,6 +1074,16 @@ class ProfileWorker:
                 # consume its normal state transition.
                 if state == FarmGameState.RESOURCE_POPUP:
                     self._farm_find_resource_click_at = 0.0
+                elif (
+                    state != FarmGameState.RESOURCE_SEARCH
+                    and toast_elapsed < FARM_SEARCH_RESULT_SETTLE_SECONDS
+                ):
+                    self._farm_next_at = time.monotonic() + 0.35
+                    self._publish(
+                        WorkerState.RUNNING,
+                        "Auto Farm: đang chờ popup tài nguyên tải xong sau Tìm kiếm",
+                    )
+                    return
                 elif toast_elapsed < 4.0:
                     self._farm_next_at = time.monotonic() + 0.35
                     self._publish(WorkerState.RUNNING, "Auto Farm: đang quan sát toast hoặc popup sau Tìm kiếm")

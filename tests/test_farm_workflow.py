@@ -65,6 +65,21 @@ def test_find_resource_keeps_the_planned_resource_and_level() -> None:
     assert (decision.resource, decision.level, decision.team) == ("iron", 7, 2)
 
 
+def test_delayed_resource_popup_recovers_after_search_plan_was_provisionally_rotated() -> None:
+    farm = FarmWorkflow(resource_order=("iron", "stone", "wood", "food"))
+    farm.decide(FarmGameState.CITY)
+    farm.decide(FarmGameState.WORLD_MAP, ready_teams=(3,))
+    # A timeout after Search can temporarily return the workflow to this
+    # stage. A real popup arriving late must still authorise Gather.
+    farm.step = FarmStep.OPEN_SEARCH
+
+    decision = farm.decide(FarmGameState.RESOURCE_POPUP, target_verified=True)
+
+    assert decision.step == FarmStep.OPEN_TEAM_SELECTION
+    assert decision.team == 3
+    assert decision.input_allowed is True
+
+
 def test_resource_plan_is_randomized_once_then_advances_level_after_area_pool() -> None:
     farm = FarmWorkflow(resource_order=("wood", "food", "stone", "iron"))
 

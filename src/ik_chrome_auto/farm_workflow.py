@@ -153,6 +153,20 @@ class FarmWorkflow:
             return FarmDecision(self.step, f"Đội {self.team} sẵn sàng; mở tìm tài nguyên", team=self.team, input_allowed=target_verified)
         resource, level = self._target()
         if self.step == FarmStep.OPEN_SEARCH:
+            # A result popup can arrive after the runner has rotated the
+            # search plan because the World Map briefly remained visible.
+            # The popup is stronger, current evidence than that provisional
+            # timeout, so resume directly at its guarded Gather action.
+            if state == FarmGameState.RESOURCE_POPUP:
+                self.step = FarmStep.OPEN_TEAM_SELECTION
+                return FarmDecision(
+                    self.step,
+                    "Tài nguyên xuất hiện muộn; mở chọn đội",
+                    resource,
+                    level,
+                    self.team,
+                    target_verified,
+                )
             if state != FarmGameState.RESOURCE_SEARCH:
                 return FarmDecision(self.step, "Chờ panel tìm tài nguyên được xác minh")
             self.step = FarmStep.FIND_RESOURCE
