@@ -1425,15 +1425,44 @@ class ChromeProfileSession:
     def _frame_for_input(self, event: dict[str, Any]) -> Frame:
         source_url = str(event.get("frame_url", ""))
         source_host = urlsplit(source_url).hostname or ""
-        if source_host:
-            matches = [
-                frame
-                for frame in self.page.frames
-                if (urlsplit(frame.url).hostname or "").lower() == source_host.lower()
-            ]
-            if matches:
-                return matches[-1]
+        frames = list(self.page.frames)
+        exact_matches = [frame for frame in frames if source_url and frame.url == source_url]
+        host_matches = [
+            frame
+            for frame in frames
+            if source_host
+            and (urlsplit(frame.url).hostname or "").lower() == source_host.lower()
+        ]
+        # A portal may contain several same-host frames. Selecting the last
+        # one can route a valid game event into a wrapper/advert frame. Pick
+        # the exact URL first and, for canvas input, require the candidate
+        # with the largest visible canvas.
+        for candidates in (exact_matches, host_matches):
+            resolved = self._best_input_frame(candidates, event)
+            if resolved is not None:
+                return resolved
         return self.find_frame()
+
+    @staticmethod
+    def _best_input_frame(frames: list[Frame], event: dict[str, Any]) -> Frame | None:
+        if not frames:
+            return None
+        if not isinstance(event.get("canvas"), dict):
+            return frames[-1]
+        scored: list[tuple[float, Frame]] = []
+        for frame in frames:
+            try:
+                canvases = frame.locator("canvas")
+                areas = []
+                for index in range(canvases.count()):
+                    box = canvases.nth(index).bounding_box()
+                    if box and box["width"] > 0 and box["height"] > 0:
+                        areas.append(float(box["width"]) * float(box["height"]))
+                if areas:
+                    scored.append((max(areas), frame))
+            except Exception:
+                continue
+        return max(scored, key=lambda item: item[0])[1] if scored else None
 
     def _canvas_box(self, frame: Frame, index: int) -> dict[str, float]:
         canvases = frame.locator("canvas")

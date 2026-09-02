@@ -708,7 +708,20 @@ class ProfileWorker:
                     continue
                 if command.kind == CommandKind.SYNC_INPUT:
                     if self.session is not None:
-                        self.session.apply_synced_input(dict(command.payload["event"]))
+                        sync_event = dict(command.payload["event"])
+                        try:
+                            self.session.apply_synced_input(sync_event)
+                        except Exception as error:
+                            # One transient frame navigation must not mark the
+                            # whole profile Error or disable subsequent input.
+                            self.event_log.write(
+                                "sync_input_error",
+                                {
+                                    "profile_id": self.profile.id,
+                                    "type": str(sync_event.get("type", "")),
+                                    "message": f"{type(error).__name__}: {error}",
+                                },
+                            )
                     continue
                 if command.kind == CommandKind.RESIZE:
                     width = int(command.payload["width"])
@@ -2867,6 +2880,10 @@ class MultiProfileRunner:
             self.sync_enabled = True
             self.sync_master_id = master_id
             self.sync_target_ids = targets
+        self.event_log.write(
+            "sync_enabled",
+            {"master_profile_id": master_id, "target_profile_ids": sorted(targets)},
+        )
         for profile_id in self.workers:
             self.submit(
                 profile_id,
@@ -2876,9 +2893,16 @@ class MultiProfileRunner:
 
     def disable_sync(self) -> None:
         with self._sync_lock:
+            was_enabled = self.sync_enabled
+            previous_master = self.sync_master_id
             self.sync_enabled = False
             self.sync_master_id = None
             self.sync_target_ids.clear()
+        if was_enabled:
+            self.event_log.write(
+                "sync_disabled",
+                {"master_profile_id": previous_master},
+            )
         for profile_id in self.workers:
             self.submit(profile_id, CommandKind.SET_SYNC_SOURCE, enabled=False)
 
@@ -3112,10 +3136,22 @@ class MultiProfileRunner:
             target_ids = set(self.sync_target_ids)
         if not enabled or source_profile_id != master_id:
             return
+        delivered = 0
         for profile_id, worker in self.workers.items():
             if profile_id not in target_ids or worker.session is None:
                 continue
             worker.submit(WorkerCommand(CommandKind.SYNC_INPUT, {"event": event}))
+            delivered += 1
+        event_type = str(event.get("type", ""))
+        if event_type in {"pointerdown", "pointerup", "keydown", "keyup"}:
+            self.event_log.write(
+                "sync_input_dispatched",
+                {
+                    "master_profile_id": source_profile_id,
+                    "type": event_type,
+                    "target_count": delivered,
+                },
+            )
 
     def stop_all(self) -> None:
         for worker in self.workers.values():

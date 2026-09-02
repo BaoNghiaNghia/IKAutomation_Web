@@ -26,6 +26,7 @@ def make_runner() -> MultiProfileRunner:
     runner.sync_master_id = "master"
     runner.sync_target_ids = {"follower-open", "follower-closed"}
     runner._sync_lock = threading.Lock()
+    runner.event_log = SimpleNamespace(write=lambda _event, _payload: None)
     runner.workers = {
         "master": FakeWorker(object()),
         "follower-open": FakeWorker(object()),

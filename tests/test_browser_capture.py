@@ -272,6 +272,42 @@ def test_synced_ctrl_shortcut_does_not_inject_printable_text() -> None:
     assert "text" not in params
 
 
+def test_synced_canvas_event_selects_largest_matching_game_frame() -> None:
+    class Locator:
+        def __init__(self, boxes: list[dict[str, float]]) -> None:
+            self.boxes = boxes
+
+        def count(self) -> int:
+            return len(self.boxes)
+
+        def nth(self, index: int) -> Any:
+            return SimpleNamespace(bounding_box=lambda: self.boxes[index])
+
+    class Frame:
+        def __init__(self, url: str, boxes: list[dict[str, float]]) -> None:
+            self.url = url
+            self.boxes = boxes
+
+        def locator(self, _selector: str) -> Locator:
+            return Locator(self.boxes)
+
+    wrapper = Frame(
+        "https://game.example/frame",
+        [{"x": 0.0, "y": 0.0, "width": 20.0, "height": 20.0}],
+    )
+    game = Frame(
+        "https://game.example/frame",
+        [{"x": 0.0, "y": 0.0, "width": 1280.0, "height": 720.0}],
+    )
+
+    resolved = ChromeProfileSession._best_input_frame(
+        [wrapper, game],
+        {"type": "pointerdown", "canvas": {"ratio_x": 0.5, "ratio_y": 0.5}},
+    )
+
+    assert resolved is game
+
+
 def test_mouse_fallback_click_uses_the_template_center() -> None:
     session, _canvas, context, _page = make_session()
 
