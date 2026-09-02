@@ -337,49 +337,6 @@ def test_mouse_sync_section_is_collapsed_by_default_and_can_toggle() -> None:
     assert dashboard.sync_section_toggle.tooltip == "Mở rộng Đồng bộ chuột - bàn phím"
 
 
-def test_device_action_log_section_is_collapsed_by_default_and_can_toggle() -> None:
-    dashboard = Dashboard.__new__(Dashboard)
-    dashboard.device_log_section_expanded = False
-    dashboard.device_log_section = FakeCollapsibleWidget()
-    dashboard.device_log_toggle = FakeToggleButton()
-    dashboard._refresh_device_action_log = lambda: None
-
-    dashboard._toggle_device_log_section()
-    assert dashboard.device_log_section_expanded is True
-    assert dashboard.device_log_section.visible is True
-    assert dashboard.device_log_toggle.tooltip == "Thu gọn Log hành động thiết bị"
-
-    dashboard._toggle_device_log_section()
-    assert dashboard.device_log_section_expanded is False
-    assert dashboard.device_log_section.visible is False
-    assert dashboard.device_log_toggle.tooltip == "Mở rộng Log hành động thiết bị"
-
-
-def test_device_action_log_adds_each_profile_once() -> None:
-    class Combo:
-        def __init__(self) -> None:
-            self.items = []
-
-        def addItem(self, label, *, userData) -> None:
-            self.items.append((label, userData))
-
-        def currentData(self):
-            return self.items[0][1] if self.items else None
-
-    dashboard = Dashboard.__new__(Dashboard)
-    dashboard._device_action_logs = {}
-    dashboard._device_log_profile_ids = set()
-    dashboard.device_log_profile = Combo()
-    dashboard.config = SimpleNamespace(profile=lambda _profile_id: SimpleNamespace(name="Tài khoản 01"))
-    dashboard._refresh_device_action_log = lambda: None
-
-    dashboard._record_device_action("account-2", "đã bấm Tìm kiếm")
-    dashboard._record_device_action("account-2", "đang xác minh panel")
-
-    assert dashboard.device_log_profile.items == [("Tài khoản 01", "account-2")]
-    assert len(dashboard._device_action_logs["account-2"]) == 2
-
-
 def test_mouse_sync_status_indicator_changes_colour_and_tooltip() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     dashboard.sync_status_icon = FakeStatusIcon()

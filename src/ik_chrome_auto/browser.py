@@ -5,12 +5,14 @@ import json
 import os
 import random
 import re
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
+from urllib.request import urlopen
 
 from ik_chrome_auto.interaction import (
     INTERACTION_PROBE,
@@ -43,6 +45,28 @@ KNOWN_CHROME_PATHS = (
     Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
     Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
 )
+
+_PROFILE_CDP_PORT_MIN = 21000
+_PROFILE_CDP_PORT_SPAN = 20_000
+
+
+def _profile_cdp_port(profile_id: str) -> int:
+    """Return a stable local DevTools port without persisting runtime state."""
+    # ``hash()`` is intentionally randomised between Python processes.  A
+    # stable digest lets a newly updated tool reconnect to Chrome launched by
+    # the previous version.
+    import hashlib
+
+    digest = hashlib.sha256(profile_id.encode("utf-8")).digest()
+    return _PROFILE_CDP_PORT_MIN + int.from_bytes(digest[:4], "big") % _PROFILE_CDP_PORT_SPAN
+
+
+def _cdp_endpoint_is_ready(endpoint: str) -> bool:
+    try:
+        with urlopen(f"{endpoint.rstrip('/')}/json/version", timeout=0.5) as response:
+            return response.status == 200
+    except Exception:
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +189,10 @@ class ChromeProfileSession:
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._managed = profile.mode == ProfileMode.MANAGED
+        # Managed profiles are launched as independent Chrome processes and
+        # controlled through CDP.  Unlike Playwright's persistent-context
+        # launch, disconnecting this tool must never close their windows.
+        self._owns_browser_process = False
         self._sync_source = False
         self._inspector_enabled = False
         self._drag_item_visible = False
@@ -253,24 +281,21 @@ class ChromeProfileSession:
         chrome = find_chrome(self.config.browser.chrome_executable)
         if chrome is None:
             raise RuntimeError("Không tìm thấy Google Chrome; sửa browser.chrome_executable")
-        options: dict[str, Any] = {
-            "user_data_dir": str(self.profile.user_data_dir),
-            "executable_path": str(chrome),
-            "headless": self.config.browser.headless,
-            "slow_mo": self.config.browser.slow_mo_ms,
-            "locale": "vi-VN",
-            "accept_downloads": False,
-            # Playwright disables Chromium's sandbox unless this is explicitly
-            # enabled.  On Windows Chrome supports its normal sandbox, so keep
-            # it on: this removes Chrome's visible --no-sandbox warning and is
-            # safer for a browser that signs into game accounts.
-            "chromium_sandbox": True,
-        }
+        port = _profile_cdp_port(self.profile.id)
+        endpoint = f"http://127.0.0.1:{port}"
         args: list[str] = [
+            str(chrome),
+            f"--user-data-dir={self.profile.user_data_dir}",
+            f"--remote-debugging-port={port}",
+            "--remote-debugging-address=127.0.0.1",
+            "--remote-allow-origins=*",
             "--disable-notifications",
             "--no-default-browser-check",
             "--no-first-run",
+            "--lang=vi-VN",
         ]
+        if self.config.browser.headless:
+            args.append("--headless=new")
         if self.config.browser.app_mode:
             args.append(f"--app={self.config.target_url}")
         if self.config.browser.low_memory_mode:
@@ -302,27 +327,45 @@ class ChromeProfileSession:
                 f"--window-size={self.config.browser.viewport_width},"
                 f"{self.config.browser.viewport_height}"
             )
-        if args:
-            options["args"] = args
-        # In headed app mode a fixed Playwright viewport does not follow a
-        # native mouse resize. That leaves a white document strip below the
-        # WebGL canvas. Let Chromium own the viewport and resize the native
-        # renderer HWND to the requested dimensions in resize().
-        if self.config.browser.auto_resize and self.config.browser.headless:
-            options["viewport"] = {
-                "width": self.config.browser.viewport_width,
-                "height": self.config.browser.viewport_height,
-            }
-        else:
-            options["no_viewport"] = True
-        self._context = self._playwright.chromium.launch_persistent_context(**options)
+        if not _cdp_endpoint_is_ready(endpoint):
+            # Detach Chrome from the tool process.  The browser survives an
+            # application close/update and is reused by the next launch.
+            creationflags = (
+                getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
+            try:
+                subprocess.Popen(
+                    args,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=creationflags,
+                    close_fds=True,
+                )
+            except OSError as error:
+                raise RuntimeError(f"Không thể mở Chrome cho profile {self.profile.name}: {error}") from error
+
+        deadline = time.monotonic() + self.config.browser.startup_timeout_ms / 1000
+        while not _cdp_endpoint_is_ready(endpoint):
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Chrome của profile {self.profile.name} không mở cổng điều khiển. "
+                    "Hãy đóng riêng cửa sổ Chrome của profile này rồi thử lại."
+                )
+            time.sleep(0.2)
+        self._connect_cdp(endpoint)
 
     def _start_cdp(self) -> None:
         assert self._playwright is not None
         if not self.profile.cdp_url:
             raise RuntimeError(f"Profile {self.profile.id} thiếu cdp_url")
+        self._connect_cdp(self.profile.cdp_url)
+
+    def _connect_cdp(self, endpoint: str) -> None:
+        assert self._playwright is not None
         self._browser = self._playwright.chromium.connect_over_cdp(
-            self.profile.cdp_url,
+            endpoint,
             timeout=self.config.browser.startup_timeout_ms,
             slow_mo=self.config.browser.slow_mo_ms,
         )
@@ -1432,7 +1475,11 @@ class ChromeProfileSession:
         self._closing = True
         try:
             self._detach_page_cdp_session()
-            if self._managed and self._context is not None:
+            # Some focused vision tests construct a lightweight session with
+            # ``__new__`` and therefore do not run ``__init__``.  Treat those
+            # sessions as externally owned, the same safe default used for a
+            # detached profile Chrome.
+            if getattr(self, "_owns_browser_process", False) and self._context is not None:
                 try:
                     self._context.close()
                 except Exception:

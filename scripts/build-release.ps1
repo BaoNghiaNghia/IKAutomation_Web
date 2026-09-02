@@ -4,7 +4,11 @@ param(
     [switch]$NoDesktopShortcut,
     [switch]$Archive,
     [switch]$CleanCache,
-    [switch]$ForcePackage
+    [switch]$ForcePackage,
+    # Used by the in-app updater: Chrome profile files can remain locked while
+    # the executable is rebuilt, so leave the existing release profile data
+    # untouched and package code only.
+    [switch]$SkipProfileSync
 )
 
 $ErrorActionPreference = 'Stop'
@@ -354,7 +358,11 @@ try {
     }
     if (-not (Test-Path -LiteralPath $applicationExe)) { throw "Build file not found: $applicationExe" }
 
-    Sync-DevProfilesToRelease -Destination $applicationDir
+    if ($SkipProfileSync) {
+        Write-Host 'Skipping profile sync: keeping currently open Chrome profiles untouched.' -ForegroundColor DarkCyan
+    } else {
+        Sync-DevProfilesToRelease -Destination $applicationDir
+    }
 
     $buildInfoPath = Join-Path $applicationDir 'build-info.json'
     $buildInfo = @{
@@ -410,7 +418,11 @@ try {
         $shortcut.Save()
     }
     Write-Host "Build complete: $applicationExe ($sizeText)" -ForegroundColor Green
-    Write-Host 'Đã cập nhật ứng dụng; profile release dùng snapshot cache của bản dev.' -ForegroundColor Green
+    if ($SkipProfileSync) {
+        Write-Host 'Đã cập nhật code ứng dụng; không đụng đến profile Chrome đang mở.' -ForegroundColor Green
+    } else {
+        Write-Host 'Đã cập nhật ứng dụng; profile release dùng snapshot cache của bản dev.' -ForegroundColor Green
+    }
     Write-Host 'Next builds reuse the application and profile caches. Use -ForcePackage to force PyInstaller, or -CleanCache for a clean build.' -ForegroundColor DarkCyan
     if (-not $NoDesktopShortcut) { Write-Host "Desktop shortcut created: $applicationName" -ForegroundColor Green }
 } finally { Pop-Location }

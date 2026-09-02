@@ -6,13 +6,17 @@ from ik_chrome_auto import browser
 from ik_chrome_auto.models import AppConfig, BrowserSettings, CaptureSettings, ProfileConfig
 
 
+class _FakeBrowser:
+    contexts = [object()]
+
+
 class _FakeChromium:
     def __init__(self) -> None:
-        self.options: dict[str, object] | None = None
+        self.endpoint: str | None = None
 
-    def launch_persistent_context(self, **options: object) -> object:
-        self.options = options
-        return object()
+    def connect_over_cdp(self, endpoint: str, **_options: object) -> _FakeBrowser:
+        self.endpoint = endpoint
+        return _FakeBrowser()
 
 
 class _FakePlaywright:
@@ -20,7 +24,7 @@ class _FakePlaywright:
         self.chromium = _FakeChromium()
 
 
-def test_managed_chrome_launch_keeps_chromium_sandbox_enabled(
+def test_managed_chrome_launches_detached_and_connects_over_stable_cdp(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = AppConfig(
@@ -40,9 +44,9 @@ def test_managed_chrome_launch_keeps_chromium_sandbox_enabled(
     fake_playwright = _FakePlaywright()
     session._playwright = fake_playwright  # type: ignore[assignment]
     monkeypatch.setattr(browser, "find_chrome", lambda _configured: Path("chrome.exe"))
+    monkeypatch.setattr(browser, "_cdp_endpoint_is_ready", lambda _endpoint: True)
 
     session._start_managed()
 
-    assert fake_playwright.chromium.options is not None
-    assert fake_playwright.chromium.options["chromium_sandbox"] is True
-    assert "--force-device-scale-factor=1" in fake_playwright.chromium.options["args"]
+    expected = f"http://127.0.0.1:{browser._profile_cdp_port('main')}"
+    assert fake_playwright.chromium.endpoint == expected

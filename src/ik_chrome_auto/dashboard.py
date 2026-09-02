@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import subprocess
 import threading
 import time
 from io import BytesIO
@@ -39,6 +40,7 @@ from ik_chrome_auto.mail_monitor import (
     TERRITORY_ATTACKED,
 )
 from ik_chrome_auto.two_factor import TwoFactorEnrollment, TwoFactorService
+from ik_chrome_auto.update_check import GitUpdateCheckError, GitUpdateStatus, check_for_git_updates
 from ik_chrome_auto.windows import get_gpu_utilization_percent, get_system_memory_status
 
 # Windows Hello implementation remains available in windows_auth.py, but is
@@ -126,14 +128,11 @@ class Dashboard(QWidget):
         self.runner = MultiProfileRunner(self.config, self.updates.put, on_coordinate=lambda pid, event: self.coordinate_updates.put((pid, event)))
         self.rows: dict[str, ProfileRow] = {}
         self._log_lines: deque[str] = deque(maxlen=10)
-        # Keep the action stream separated by device so the operator can
-        # diagnose one stuck Farm without mixed messages from other profiles.
-        self._device_action_logs: dict[str, deque[str]] = {}
-        self._device_log_profile_ids: set[str] = set()
         self.last_coordinate: tuple[str, dict[str, object]] | None = None
         self.farm_profiles: set[str] = set()
         self._sync_target_profiles: set[str] = set()
         self._telegram_results: queue.Queue[tuple[bool, str]] = queue.Queue()
+        self._update_check_results: queue.Queue[GitUpdateStatus | Exception] = queue.Queue()
         self._resource_alert_samples: queue.Queue[tuple[float, float | None]] = queue.Queue()
         self._telegram_notifier: TelegramNotifier | None = None
         self._telegram_event_at: dict[str, float] = {}
@@ -211,7 +210,7 @@ class Dashboard(QWidget):
         self._apply_responsive_geometry(active_screen)
         root = QVBoxLayout(self); root.setContentsMargins(*self._responsive_margins); root.setSpacing(self._responsive_spacing)
         self._root_layout = root
-        head = QHBoxLayout(); title = SubtitleLabel("IK Auto"); self._dashboard_title = title; title.setStyleSheet(f"font-size:{self._responsive_title_font_pt}pt;font-weight:700;"); head.addWidget(title); head.addWidget(QLabel("Browser control")); head.addStretch(); self.telegram_status = QLabel("●"); self.telegram_status.setFixedWidth(_ui_px(12)); self.telegram_status.setAlignment(Qt.AlignmentFlag.AlignCenter); head.addWidget(self.telegram_status); telegram_config = PushButton("Telegram"); telegram_config.setToolTip("Cấu hình Bot Token và Chat ID Telegram"); telegram_config.clicked.connect(self._configure_telegram); head.addWidget(telegram_config)
+        head = QHBoxLayout(); title = SubtitleLabel("IK Auto"); self._dashboard_title = title; title.setStyleSheet(f"font-size:{self._responsive_title_font_pt}pt;font-weight:700;"); head.addWidget(title); head.addWidget(QLabel("Browser control")); head.addStretch(); self.telegram_status = QLabel("●"); self.telegram_status.setFixedWidth(_ui_px(12)); self.telegram_status.setAlignment(Qt.AlignmentFlag.AlignCenter); head.addWidget(self.telegram_status); telegram_config = PushButton("Telegram"); telegram_config.setToolTip("Cấu hình Bot Token và Chat ID Telegram"); telegram_config.clicked.connect(self._configure_telegram); head.addWidget(telegram_config); self.update_button = PushButton("Check for Updates"); self.update_button.setToolTip("Kiểm tra code mới trên Git"); self.update_button.clicked.connect(self._check_for_updates); head.addWidget(self.update_button)
         build_label = release_build_label()
         if build_label:
             build_time = QLabel(build_label)
@@ -271,31 +270,6 @@ class Dashboard(QWidget):
         self.sync_section.hide()
         au.addWidget(self.sync_section)
         ll.addWidget(automation)
-        device_log_card = self._card()
-        dl = QVBoxLayout(device_log_card)
-        device_log_header = QHBoxLayout()
-        device_log_header.addWidget(StrongBodyLabel("Log hành động thiết bị"))
-        device_log_header.addStretch()
-        self.device_log_toggle = self._icon_button(FIF.CHEVRON_RIGHT, "Mở rộng Log hành động thiết bị")
-        self.device_log_toggle.clicked.connect(self._toggle_device_log_section)
-        device_log_header.addWidget(self.device_log_toggle)
-        dl.addLayout(device_log_header)
-        self.device_log_section_expanded = False
-        self.device_log_section = QWidget()
-        device_log_layout = QVBoxLayout(self.device_log_section)
-        device_log_layout.setContentsMargins(0, 0, 0, 0)
-        device_log_layout.setSpacing(_ui_px(5))
-        self.device_log_profile = ComboBox()
-        self.device_log_profile.currentIndexChanged.connect(self._refresh_device_action_log)
-        device_log_layout.addWidget(self.device_log_profile)
-        self.device_action_log = QTextEdit()
-        self.device_action_log.setReadOnly(True)
-        self.device_action_log.setFixedHeight(_ui_px(118))
-        self.device_action_log.setPlaceholderText("Chưa có thao tác Auto Farm cho thiết bị này.")
-        device_log_layout.addWidget(self.device_action_log)
-        self.device_log_section.hide()
-        dl.addWidget(self.device_log_section)
-        ll.addWidget(device_log_card)
         ll.addStretch()
         right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(_ui_px(8)); body.addWidget(right,1)
         progress = self._card(); pl = QVBoxLayout(progress); ph = QHBoxLayout(); ph.addWidget(StrongBodyLabel("Tiến trình profile")); ph.addStretch(); self.open_badge = QLabel("0 đang mở"); self.open_badge.setStyleSheet(f"background:#e2edff;color:#2767bd;border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;"); ph.addWidget(self.open_badge); pl.addLayout(ph); self.table_layout = QGridLayout(); self.table_layout.setSpacing(_ui_px(8)); self.table_layout.setColumnStretch(0, 1); self.table_layout.setColumnStretch(1, 1); content=QWidget(); content.setLayout(self.table_layout); self.scroll=QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setWidget(content); pl.addWidget(self.scroll,1); rl.addWidget(progress,1)
@@ -688,46 +662,6 @@ class Dashboard(QWidget):
             else "Mở rộng Đồng bộ chuột - bàn phím"
         )
 
-    def _toggle_device_log_section(self) -> None:
-        self.device_log_section_expanded = not self.device_log_section_expanded
-        self.device_log_section.setVisible(self.device_log_section_expanded)
-        self.device_log_toggle.setIcon(
-            FIF.CHEVRON_DOWN_MED if self.device_log_section_expanded else FIF.CHEVRON_RIGHT
-        )
-        self.device_log_toggle.setToolTip(
-            "Thu gọn Log hành động thiết bị"
-            if self.device_log_section_expanded
-            else "Mở rộng Log hành động thiết bị"
-        )
-        if self.device_log_section_expanded:
-            self._refresh_device_action_log()
-
-    def _record_device_action(self, profile_id: str, message: str) -> None:
-        actions = self._device_action_logs.setdefault(profile_id, deque(maxlen=80))
-        actions.append(f"{time.strftime('%H:%M:%S')}  {message}")
-        if profile_id not in self._device_log_profile_ids:
-            try:
-                name = self.config.profile(profile_id).name
-            except KeyError:
-                name = profile_id
-            # qfluentwidgets reserves the second positional argument for an
-            # icon. Pass userData by name so the profile ID is retained and
-            # repeated status updates cannot create duplicate entries.
-            self.device_log_profile.addItem(name, userData=profile_id)
-            self._device_log_profile_ids.add(profile_id)
-        if self.device_log_profile.currentData() in {None, profile_id}:
-            self._refresh_device_action_log()
-
-    def _refresh_device_action_log(self, *_args: object) -> None:
-        profile_id = self.device_log_profile.currentData()
-        if not isinstance(profile_id, str):
-            self.device_action_log.setPlainText("")
-            return
-        self.device_action_log.setPlainText("\n".join(self._device_action_logs.get(profile_id, ())))
-        cursor = self.device_action_log.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        self.device_action_log.setTextCursor(cursor)
-
     def _load_telegram_notifier(self) -> None:
         try:
             settings = load_telegram_settings()
@@ -778,6 +712,70 @@ class Dashboard(QWidget):
             self._append_log("Đã lưu cấu hình Telegram an toàn trong Windows Credential Manager")
         except Exception as error:
             self._error("Không lưu được Telegram", str(error))
+
+    def _check_for_updates(self) -> None:
+        """Check remote Git state without blocking the dashboard event loop."""
+        button = self.update_button
+        button.setEnabled(False)
+        button.setText("Đang kiểm tra…")
+
+        def check() -> None:
+            try:
+                self._update_check_results.put(check_for_git_updates(self.config.root))
+            except Exception as error:
+                self._update_check_results.put(error)
+
+        threading.Thread(target=check, name="git-update-check", daemon=True).start()
+
+    def _handle_update_check_result(self, result: GitUpdateStatus | Exception) -> None:
+        self.update_button.setEnabled(True)
+        self.update_button.setText("Check for Updates")
+        if isinstance(result, Exception):
+            message = str(result)
+            if not isinstance(result, GitUpdateCheckError):
+                message = f"Không thể kiểm tra cập nhật: {message}"
+            self._warning("Không kiểm tra được cập nhật", message)
+            return
+        if not result.update_available:
+            QMessageBox.information(self, "Không có cập nhật", "Không có bản cập nhật mới.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Có bản cập nhật mới",
+            f"Git có {result.commits_behind} commit mới trên {result.branch}.\n"
+            "Bạn có muốn tải code mới và build lại tool không?\n\n"
+            "Các profile Chrome vẫn mở; AutoFarm không tự chạy lại.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._start_update_build(result.workspace)
+
+    def _start_update_build(self, root: Path) -> None:
+        """Open an auditable build terminal after explicit user confirmation."""
+        root = root.resolve()
+        escaped_root = str(root).replace("'", "''")
+        command = (
+            "$ErrorActionPreference='Stop'; "
+            f"Set-Location -LiteralPath '{escaped_root}'; "
+            "git pull --ff-only; "
+            "& .\\scripts\\build-release.ps1 -NoDesktopShortcut -SkipProfileSync"
+        )
+        try:
+            subprocess.Popen(
+                ["powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", command],
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            )
+        except OSError as error:
+            self._error("Không khởi chạy được build", str(error))
+            return
+        self._append_log("Đã mở cửa sổ tải code và build bản cập nhật.")
+        QMessageBox.information(
+            self,
+            "Đang build bản mới",
+            "Đã mở cửa sổ build. Sau khi hoàn tất, hãy mở lại IK Auto từ file build mới. "
+            "Các profile Chrome hiện tại vẫn được giữ mở.",
+        )
 
     def _notify_telegram(
         self,
@@ -1630,7 +1628,6 @@ class Dashboard(QWidget):
                         event_key=f"profile-error:{snap.profile_id}:{snap.message}",
                         cooldown_seconds=300.0,
                     )
-                self._record_device_action(snap.profile_id, snap.message)
                 self._append_log(f"[{snap.profile_id}] {snap.message}")
         except queue.Empty: pass
         try:
@@ -1641,6 +1638,11 @@ class Dashboard(QWidget):
                     self._append_log(f"Telegram: {message}")
                 elif self._telegram_notifier is not None:
                     self._set_telegram_status("Đã bật")
+        except queue.Empty:
+            pass
+        try:
+            while True:
+                self._handle_update_check_result(self._update_check_results.get_nowait())
         except queue.Empty:
             pass
         try:
