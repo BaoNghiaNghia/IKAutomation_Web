@@ -752,14 +752,34 @@ class Dashboard(QWidget):
             self._start_update_build(result.workspace)
 
     def _start_update_build(self, root: Path) -> None:
-        """Open an auditable build terminal after explicit user confirmation."""
+        """Build, replace and restart the tool without closing Chrome profiles.
+
+        The dashboard must exit before ``build-release.ps1`` deploys its
+        staged executable.  Otherwise Windows correctly rejects replacing the
+        running ``IK Auto.exe``.  ``closeEvent`` performs the graceful worker
+        shutdown, whose SHUTDOWN mode detaches but preserves profile Chrome.
+        """
         root = root.resolve()
         escaped_root = str(root).replace("'", "''")
+        release_dir = root / "release" / "IK Auto"
+        release_exe = release_dir / "IK Auto.exe"
+        escaped_release_dir = str(release_dir).replace("'", "''")
+        escaped_release_exe = str(release_exe).replace("'", "''")
         command = (
             "$ErrorActionPreference='Stop'; "
             f"Set-Location -LiteralPath '{escaped_root}'; "
             "git pull --ff-only; "
-            "& .\\scripts\\build-release.ps1 -NoDesktopShortcut -SkipProfileSync"
+            "if ($LASTEXITCODE -ne 0) { throw 'Git pull failed.' }; "
+            "& .\\scripts\\build-release.ps1 -NoDesktopShortcut -SkipProfileSync; "
+            "if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }; "
+            f"Start-Process -FilePath '{escaped_release_exe}' "
+            f"-WorkingDirectory '{escaped_release_dir}'"
+        )
+        QMessageBox.information(
+            self,
+            "Bắt đầu cập nhật",
+            "IK Auto sẽ đóng để Windows có thể thay file chương trình, sau đó tự mở lại. "
+            "Các profile Chrome vẫn được giữ mở; AutoFarm sẽ ở trạng thái dừng.",
         )
         try:
             subprocess.Popen(
@@ -769,13 +789,12 @@ class Dashboard(QWidget):
         except OSError as error:
             self._error("Không khởi chạy được build", str(error))
             return
-        self._append_log("Đã mở cửa sổ tải code và build bản cập nhật.")
-        QMessageBox.information(
-            self,
-            "Đang build bản mới",
-            "Đã mở cửa sổ build. Sau khi hoàn tất, hãy mở lại IK Auto từ file build mới. "
-            "Các profile Chrome hiện tại vẫn được giữ mở.",
-        )
+        self._append_log("Đã mở updater; đang đóng tool để nhả file executable.")
+        app = QApplication.instance()
+        if app is not None:
+            QTimer.singleShot(0, app.quit)
+        else:
+            self.close()
 
     def _notify_telegram(
         self,

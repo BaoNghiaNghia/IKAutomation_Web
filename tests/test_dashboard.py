@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from pathlib import Path
 from types import SimpleNamespace
 import time
 
@@ -588,3 +589,44 @@ def test_profile_launch_sends_an_open_command_even_when_memory_is_constrained(mo
     assert dashboard.runner.commands == [("account-1", CommandKind.OPEN)]
     assert dashboard._farm_batch_limit == 1
     assert dashboard.farm_launcher.text == "Đang mở chậm"
+
+
+def test_in_app_update_quits_before_deploy_and_restarts_release(monkeypatch) -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    logs: list[str] = []
+    popen_calls: list[tuple[list[str], int]] = []
+    quit_calls: list[bool] = []
+    dashboard._append_log = logs.append
+
+    monkeypatch.setattr(
+        dashboard_module.QMessageBox,
+        "information",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        dashboard_module.subprocess,
+        "Popen",
+        lambda args, creationflags=0: popen_calls.append((args, creationflags)),
+    )
+    fake_app = SimpleNamespace(quit=lambda: quit_calls.append(True))
+    monkeypatch.setattr(
+        dashboard_module,
+        "QApplication",
+        SimpleNamespace(instance=lambda: fake_app),
+    )
+    monkeypatch.setattr(
+        dashboard_module,
+        "QTimer",
+        SimpleNamespace(singleShot=lambda _delay, callback: callback()),
+    )
+
+    dashboard._start_update_build(Path(r"D:\IKAutomation_Web"))
+
+    assert len(popen_calls) == 1
+    command = popen_calls[0][0][-1]
+    assert "git pull --ff-only" in command
+    assert "build-release.ps1 -NoDesktopShortcut -SkipProfileSync" in command
+    assert command.index("build-release.ps1") < command.index("Start-Process")
+    assert r"release\IK Auto\IK Auto.exe" in command
+    assert quit_calls == [True]
+    assert "nhả file executable" in logs[-1]
