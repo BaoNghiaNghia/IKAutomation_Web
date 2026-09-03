@@ -39,6 +39,17 @@ def test_new_cycle_without_ready_team_waits_directly_on_world_map() -> None:
     assert farm.waiting_for_ready_team is True
 
 
+def test_preflight_adopts_an_already_open_resource_search_panel() -> None:
+    farm = FarmWorkflow(resource_order=("iron", "stone", "wood", "food"))
+
+    decision = farm.decide(FarmGameState.RESOURCE_SEARCH, target_verified=True)
+
+    assert decision.step == FarmStep.FIND_RESOURCE
+    assert (decision.resource, decision.level) == ("iron", 7)
+    assert decision.input_allowed is True
+    assert farm.step == FarmStep.FIND_RESOURCE
+
+
 def test_happy_path_completes_exactly_one_verified_dispatch() -> None:
     farm = FarmWorkflow()
     assert farm.decide(FarmGameState.CITY).step == FarmStep.ENTER_WORLD_MAP

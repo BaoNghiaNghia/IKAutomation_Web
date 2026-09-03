@@ -1966,12 +1966,59 @@ class ProfileWorker:
                                 )
                                 self._farm_next_at = time.monotonic() + 0.35
                                 return
+                            if (
+                                checkbox_elapsed >= 2.0
+                                and self._farm_target_checkbox_clicks == 1
+                                and target_checkbox_unchecked.actionable
+                                and find_resource.actionable
+                            ):
+                                # The portal occasionally ignores a
+                                # Playwright/canvas click even though the
+                                # unchecked control remains visible. Capture
+                                # has just re-verified that exact state, so a
+                                # single native click at the freshly matched
+                                # bounds is safe; never click stale pixels.
+                                input_method = self._click_farm_native_game_control(
+                                    target_checkbox_unchecked.bounds,  # type: ignore[arg-type]
+                                    image_size,
+                                )
+                                self._farm_target_checkbox_click_at = time.monotonic()
+                                self._farm_target_checkbox_clicks += 1
+                                self._log_farm(
+                                    "retry_search_target_checkbox_native",
+                                    {
+                                        "bounds": target_checkbox_unchecked.bounds,
+                                        "input": input_method,
+                                    },
+                                )
+                                self._publish(
+                                    WorkerState.RUNNING,
+                                    "Auto Farm: checkbox chưa nhận lần đầu; đã bấm lại bằng chuột native",
+                                )
+                                self._farm_next_at = self._farm_target_checkbox_click_at + 0.8
+                                return
                             if checkbox_elapsed >= 4.0:
                                 screenshot = self._save_farm_debug_capture("search-target-checkbox-unverified")
-                                self._retry_farm_or_stop(
-                                    "search_target_checkbox_unverified",
-                                    "chưa xác minh được checkbox lọc mục tiêu trước Tìm kiếm",
-                                    screenshot,
+                                # Keep the verified panel, selected resource,
+                                # level and team. Resetting the whole workflow
+                                # here used to leave PREFLIGHT staring at an
+                                # open panel and reporting that it was waiting
+                                # for City/World Map forever.
+                                self._farm_target_checkbox_click_at = 0.0
+                                self._farm_target_checkbox_clicks = 0
+                                self._farm_target_checkbox_seen_unchecked = False
+                                self._log_farm(
+                                    "retry_search_target_checkbox_in_panel",
+                                    {
+                                        "screenshot": str(screenshot) if screenshot else None,
+                                        "delay_seconds": 3.0,
+                                    },
+                                )
+                                self._farm_next_at = time.monotonic() + 3.0
+                                self._publish(
+                                    WorkerState.RUNNING,
+                                    "Auto Farm: checkbox chưa đổi trạng thái; giữ panel và thử lại",
+                                    f"Ảnh debug: {screenshot}" if screenshot else "",
                                 )
                                 return
                             self._farm_next_at = time.monotonic() + 0.5
@@ -1996,12 +2043,16 @@ class ProfileWorker:
                             # prevents a missed template from being mistaken
                             # for a ticked checkbox.
                             self._farm_target_checkbox_seen_unchecked = fresh_checkbox.found
-                            self._click_farm_panel_control(checkbox_bounds, fresh_size)
+                            input_method = self._click_farm_panel_control(checkbox_bounds, fresh_size)
                             self._farm_target_checkbox_click_at = time.monotonic()
                             self._farm_target_checkbox_clicks += 1
                             self._log_farm(
                                 "tap_search_target_checkbox",
-                                {"bounds": checkbox_bounds, "method": method},
+                                {
+                                    "bounds": checkbox_bounds,
+                                    "method": method,
+                                    "input": input_method,
+                                },
                             )
                             self._publish(
                                 WorkerState.RUNNING,

@@ -126,6 +126,13 @@ class FarmWorkflow:
                 # toggling City and immediately reopening Map only adds a
                 # destructive transition between consecutive farm cycles.
                 self.step = FarmStep.CHECK_TEAMS
+            elif state == FarmGameState.RESOURCE_SEARCH:
+                # The tool may be restarted, or a guarded input recovery may
+                # leave the already verified search panel open. Adopting that
+                # current state is safer than waiting forever for a City/Map
+                # screen hidden behind the panel. Continue with a fresh
+                # resource selection and checkbox verification.
+                self.step = FarmStep.OPEN_SEARCH
             else:
                 return FarmDecision(self.step, "Chờ City hoặc World Map đã được xác minh")
         if self.step == FarmStep.RETURN_TO_CITY:
