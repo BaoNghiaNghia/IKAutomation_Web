@@ -2650,28 +2650,6 @@ class ProfileWorker:
                 return "unavailable"
             detected, _surface, size = prepared
 
-        if detected.state == DetectedGameState.CONTINENT_MAP:
-            # A retained pending relocation means the prior attempt reached
-            # this screen but failed to focus an input. Escape once, verify a
-            # known City/World Map state, and re-enter using the same point.
-            # This avoids both blind coordinate input and a dead PREFLIGHT.
-            self.session.press_escape()
-            self._log_farm("recover_continent_map_for_coordinate_retry", {})
-            prepared = self._wait_for_farm_detection(
-                lambda frame: frame.state in {
-                    DetectedGameState.WORLD_MAP,
-                    DetectedGameState.CITY,
-                },
-                timeout_seconds=6.0,
-            )
-            if prepared is None:
-                self._log_farm(
-                    "resource_area_navigation_blocked",
-                    {"reason": "continent_map_close_unverified"},
-                )
-                return "unavailable"
-            detected, _surface, size = prepared
-
         # The supplied Map icon is present on World Map itself. Returning via
         # the bottom-left castle first changes the HUD to City and removes that
         # control, which was the reason relocation remained stuck. A resumed
@@ -2680,6 +2658,7 @@ class ProfileWorker:
         if detected.state not in {
             DetectedGameState.WORLD_MAP,
             DetectedGameState.CITY,
+            DetectedGameState.CONTINENT_MAP,
         }:
             self._log_farm("resource_area_navigation_blocked", {
                 "reason": "world_map_or_city_unverified",
@@ -2706,76 +2685,88 @@ class ProfileWorker:
             return "exhausted"
         point = selection.point
         assert point is not None
-        map_frame, map_size = detected, size
-        map_button = map_frame.evidence_for(FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON)
-        if not map_button.actionable:
-            map_button_result = self._wait_for_farm_detection(
-                lambda frame: (
-                    frame.state in {
+        if detected.state == DetectedGameState.CONTINENT_MAP:
+            # Opening this heavy screen can finish just after the previous
+            # verification timeout. A pending relocation already owns the
+            # selected point, so continue at X/Y from this fresh verified
+            # frame. Escaping and opening Continent Map again caused the
+            # observed endless retry loop and never reached coordinate input.
+            continent_result = (detected, _surface, size)
+            self._log_farm(
+                "resume_coordinate_input_on_verified_continent_map",
+                {"point": point, "attempt": selection.attempt},
+            )
+        else:
+            map_frame, map_size = detected, size
+            map_button = map_frame.evidence_for(FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON)
+            if not map_button.actionable:
+                map_button_result = self._wait_for_farm_detection(
+                    lambda frame: (
+                        frame.state in {
+                            DetectedGameState.WORLD_MAP,
+                            DetectedGameState.CITY,
+                        }
+                        and frame.evidence_for(
+                            FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON
+                        ).actionable
+                    ),
+                    timeout_seconds=8.0,
+                )
+                if map_button_result is None:
+                    self._log_farm("resource_area_navigation_blocked", {
+                        "reason": "continent_map_button_unverified", "point": point,
+                        "attempt": selection.attempt,
+                    })
+                    return "map_button_waiting"
+                map_frame, _surface, map_size = map_button_result
+                map_button = map_frame.evidence_for(
+                    FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON
+                )
+            input_method = self._tap_farm_game_control(map_button.bounds, map_size)  # type: ignore[arg-type]
+            self._log_farm(
+                "tap_continent_map_button",
+                {
+                    "bounds": map_button.bounds,
+                    "point": point,
+                    "input": input_method,
+                    "from_state": map_frame.state.value,
+                },
+            )
+            continent_result = self._wait_for_farm_detection(
+                lambda frame: frame.state == DetectedGameState.CONTINENT_MAP,
+                timeout_seconds=4.0,
+            )
+            if continent_result is None:
+                # WebGL touch can occasionally be ignored. Never retry at stale
+                # coordinates: capture again and require the same actionable icon
+                # on the same verified map state before background compositor input.
+                retry_frame, _surface, retry_size = self.session.detect_farm_state()
+                retry_button = retry_frame.evidence_for(
+                    FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON
+                )
+                if (
+                    retry_frame.state in {
                         DetectedGameState.WORLD_MAP,
                         DetectedGameState.CITY,
                     }
-                    and frame.evidence_for(
-                        FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON
-                    ).actionable
-                ),
-                timeout_seconds=8.0,
-            )
-            if map_button_result is None:
-                self._log_farm("resource_area_navigation_blocked", {
-                    "reason": "continent_map_button_unverified", "point": point,
-                    "attempt": selection.attempt,
-                })
-                return "map_button_waiting"
-            map_frame, _surface, map_size = map_button_result
-            map_button = map_frame.evidence_for(
-                FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON
-            )
-        input_method = self._tap_farm_game_control(map_button.bounds, map_size)  # type: ignore[arg-type]
-        self._log_farm(
-            "tap_continent_map_button",
-            {
-                "bounds": map_button.bounds,
-                "point": point,
-                "input": input_method,
-                "from_state": map_frame.state.value,
-            },
-        )
-        continent_result = self._wait_for_farm_detection(
-            lambda frame: frame.state == DetectedGameState.CONTINENT_MAP,
-            timeout_seconds=4.0,
-        )
-        if continent_result is None:
-            # WebGL touch can occasionally be ignored. Never retry at stale
-            # coordinates: capture again and require the same actionable icon
-            # on the same verified map state before background compositor input.
-            retry_frame, _surface, retry_size = self.session.detect_farm_state()
-            retry_button = retry_frame.evidence_for(
-                FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON
-            )
-            if (
-                retry_frame.state in {
-                    DetectedGameState.WORLD_MAP,
-                    DetectedGameState.CITY,
-                }
-                and retry_button.actionable
-            ):
-                input_method = self._click_farm_background_game_control(
-                    retry_button.bounds, retry_size  # type: ignore[arg-type]
-                )
-                self._log_farm(
-                    "retry_continent_map_button_background",
-                    {
-                        "bounds": retry_button.bounds,
-                        "point": point,
-                        "input": input_method,
-                        "from_state": retry_frame.state.value,
-                    },
-                )
-                continent_result = self._wait_for_farm_detection(
-                    lambda frame: frame.state == DetectedGameState.CONTINENT_MAP,
-                    timeout_seconds=8.0,
-                )
+                    and retry_button.actionable
+                ):
+                    input_method = self._click_farm_background_game_control(
+                        retry_button.bounds, retry_size  # type: ignore[arg-type]
+                    )
+                    self._log_farm(
+                        "retry_continent_map_button_background",
+                        {
+                            "bounds": retry_button.bounds,
+                            "point": point,
+                            "input": input_method,
+                            "from_state": retry_frame.state.value,
+                        },
+                    )
+                    continent_result = self._wait_for_farm_detection(
+                        lambda frame: frame.state == DetectedGameState.CONTINENT_MAP,
+                        timeout_seconds=8.0,
+                    )
         if continent_result is None:
             self._log_farm("resource_area_navigation_blocked", {
                 "reason": "continent_map_unverified", "point": point, "attempt": selection.attempt,

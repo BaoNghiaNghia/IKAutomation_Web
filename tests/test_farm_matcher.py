@@ -160,6 +160,10 @@ def test_busy_resource_text_cannot_become_ready_from_grayscale_correlation_alone
     assert classify(0.7785, 0.2424, 0.5451) is False
     assert classify(0.8186, 0.2610, 0.0660) is True
     assert classify(0.8563, 0.2584, 0.1045) is True
+    # Post-dispatch account-2 capture: the antialiased World Map label has
+    # weaker edges than City, but its tone is strong and no busy prefix exists.
+    assert classify(0.8200, 0.2167, 0.0735) is True
+    assert classify(0.7556, 0.2512, 0.6734) is False
 
 
 def test_roster_is_refreshed_on_stable_city_and_world_map_only() -> None:
@@ -335,6 +339,31 @@ def test_status_like_footer_without_portrait_does_not_create_fourth_team() -> No
         (1, TeamRowState.READY),
         (2, TeamRowState.READY),
         (3, TeamRowState.READY),
+    )
+
+
+def test_roster_length_comes_from_visible_portraits_not_status_match_count() -> None:
+    matcher = BrowserCanvasMatcher()
+    ready = matcher._load("browser_ready_team_label.png")
+    canvas = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    # The screenshot contains three unlocked team portraits, but only the
+    # first status label is stable in this frame. Rows 2/3 must remain in the
+    # roster as conservatively Busy instead of collapsing its length to one.
+    for team in range(1, 4):
+        row_top = round(720 * 0.425) + (team - 1) * round(720 * 0.071)
+        portrait = np.random.default_rng(team + 30).integers(0, 256, (51, 52), dtype=np.uint8)
+        canvas[row_top : row_top + 51, 18:70] = portrait[..., None]
+    height, width = ready.shape[:2]
+    first_top = round(720 * 0.425)
+    canvas[first_top + 16 : first_top + 16 + height, 78 : 78 + width] = ready
+
+    roster = matcher._team_roster(canvas)
+
+    assert tuple((row.team, row.state) for row in roster) == (
+        (1, TeamRowState.READY),
+        (2, TeamRowState.BUSY),
+        (3, TeamRowState.BUSY),
     )
 
 

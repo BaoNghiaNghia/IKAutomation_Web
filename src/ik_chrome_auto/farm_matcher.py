@@ -34,7 +34,7 @@ _BUSY_TEAM_INDICATOR_WIDTH = 26
 # pattern.  Its glyph edges must also match before a row becomes schedulable.
 # The live false-positive reported on account 2 scored 0.2205 here, while its
 # two genuine Ready rows scored 0.2610 and 0.2584.
-_READY_TEAM_MIN_EDGE_SCORE = 0.25
+_READY_TEAM_MIN_EDGE_SCORE = 0.21
 _READY_TEAM_MIN_GRAYSCALE_SCORE = 0.80
 # Browser screenshots have their own HUD scaling. These are stable roster
 # layout proportions, not gameplay click coordinates. A matched Ready label
@@ -47,7 +47,6 @@ _ROSTER_LABEL_RIGHT_RATIO = 0.145
 _ROSTER_PORTRAIT_LEFT_RATIO = 0.014
 _ROSTER_PORTRAIT_RIGHT_RATIO = 0.055
 _ROSTER_PORTRAIT_MIN_EDGE_DENSITY = 0.155
-_MAX_TEAM_ROWS = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,8 +456,8 @@ class BrowserCanvasMatcher:
         row_height = max(1, round(image_height * _ROSTER_ROW_HEIGHT_RATIO))
         # Never infer a row from the count/order of all template matches. A
         # match in the city HUD or another row caused exactly that bug. Probe
-        # the label slot in each of the four fixed rows independently: top to
-        # bottom is game team 1 → 4 and only a local `Sẵn sàng` match is Ready.
+        # each complete row visible inside the roster panel independently;
+        # portrait evidence determines the actual team count in this frame.
         label_left = round(image_width * _ROSTER_LABEL_LEFT_RATIO)
         label_right = min(round(image_width * _ROSTER_LABEL_RIGHT_RATIO), image_width)
         portrait_left = round(image_width * _ROSTER_PORTRAIT_LEFT_RATIO)
@@ -471,7 +470,9 @@ class BrowserCanvasMatcher:
         busy_indicator = status_busy[:, : min(_BUSY_TEAM_INDICATOR_WIDTH, status_busy.shape[1])]
         busy_gray = cv2.cvtColor(busy_indicator, cv2.COLOR_BGR2GRAY)
         states: dict[int, TeamRowState] = {}
-        for team in range(1, _MAX_TEAM_ROWS + 1):
+        visible_teams: list[int] = []
+        visible_row_count = max(0, (roster_bottom - roster_top) // row_height)
+        for team in range(1, visible_row_count + 1):
             row_top = roster_top + (team - 1) * row_height
             row_bottom = min(roster_bottom, row_top + row_height)
             # A status-like patch alone cannot create a team row. On a
@@ -487,6 +488,7 @@ class BrowserCanvasMatcher:
             portrait_edge_density = cv2.countNonZero(portrait_edges) / portrait_gray.size
             if portrait_edge_density < _ROSTER_PORTRAIT_MIN_EDGE_DENSITY:
                 continue
+            visible_teams.append(team)
             search = image[row_top:row_bottom, label_left:label_right]
             if any(template.shape[1] > search.shape[1] or template.shape[0] > search.shape[0] for template in status_ready):
                 continue
@@ -529,9 +531,13 @@ class BrowserCanvasMatcher:
                 states[team] = TeamRowState.READY
             elif busy_score >= 0.55 and busy_score >= ready_score + 0.05:
                 states[team] = TeamRowState.BUSY
-        if not states:
+        if not visible_teams:
             return ()
-        highest_confirmed = max(states)
+        # Team slots unlock in order. Use the final portrait actually visible
+        # in this screenshot as the roster length. A visible row whose status
+        # text is mid-animation remains conservatively Busy rather than being
+        # dropped and changing the apparent number of teams.
+        highest_visible = max(visible_teams)
         return tuple(
             TeamRosterRow(
                 team=team,
@@ -544,7 +550,7 @@ class BrowserCanvasMatcher:
                     else "InferredPrecedingRow"
                 ),
             )
-            for team in range(1, highest_confirmed + 1)
+            for team in range(1, highest_visible + 1)
         )
 
     @staticmethod
@@ -567,7 +573,7 @@ class BrowserCanvasMatcher:
         # A label is vertically centered within its row.  Offset half a row,
         # then use integer division so the four visual rows stay 1→2→3→4.
         team = ((label_top - roster_top) + row_height // 2) // row_height + 1
-        return team if 1 <= team <= _MAX_TEAM_ROWS else None
+        return team if team >= 1 else None
 
     def _match(self, image: object, template_id: FarmTemplateId) -> TemplateEvidence:
         spec = SPECS.get(template_id)

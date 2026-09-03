@@ -162,6 +162,69 @@ def test_area_relocation_resumed_on_city_clicks_only_continent_map() -> None:
     assert any(event == "tap_continent_map_button" for event, _payload in logs)
 
 
+def test_area_relocation_resumes_coordinate_input_on_verified_continent_map() -> None:
+    continent_pin = TemplateEvidence(
+        FarmTemplateId.CONTINENT_MAP_PIN_BUTTON,
+        True,
+        1.0,
+        (191, 107, 38, 38),
+    )
+
+    class Session:
+        def __init__(self) -> None:
+            self.detect_calls = 0
+            self.escape_calls = 0
+            self.coordinate_reads = 0
+
+        def detect_farm_state(self):
+            self.detect_calls += 1
+            return (
+                GameDetectionResult(DetectedGameState.CONTINENT_MAP, (continent_pin,)),
+                {},
+                (1280, 720),
+            )
+
+        def press_escape(self) -> None:
+            self.escape_calls += 1
+
+        def read_focused_numeric_farm_input(self, _bounds, _size):
+            self.coordinate_reads += 1
+            return None
+
+    session = Session()
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker.session = session
+    worker.profile = SimpleNamespace(id="account-3")
+    worker.stop_event = threading.Event()
+    worker._farm = FarmWorkflow()
+    worker._automation_renderer_locked = True
+    worker._farm_run_id = "run"
+    worker._farm_area_epoch = 0
+    worker._farm_area_pending_selection = SimpleNamespace(
+        point=(688, 907),
+        exhausted=False,
+        attempt=1,
+        max_attempts=3,
+        city_levels=(7, 8),
+    )
+    logs = []
+    worker._log_farm = lambda event, payload: logs.append((event, payload))
+    worker._tap_farm_game_control = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("Verified Continent Map must continue at X/Y without another map tap")
+    )
+
+    result = worker._try_resource_area_relocation("wood", 6)
+
+    assert result == "unavailable"
+    assert session.detect_calls == 1
+    assert session.escape_calls == 0
+    assert session.coordinate_reads == 2
+    assert (
+        "resume_coordinate_input_on_verified_continent_map",
+        {"point": (688, 907), "attempt": 1},
+    ) in logs
+
+
 def test_missing_continent_map_icon_stays_in_relocation_instead_of_preflight() -> None:
     worker = ProfileWorker.__new__(ProfileWorker)
     worker._farm = FarmWorkflow()
