@@ -34,7 +34,8 @@ _BUSY_TEAM_INDICATOR_WIDTH = 26
 # pattern.  Its glyph edges must also match before a row becomes schedulable.
 # The live false-positive reported on account 2 scored 0.2205 here, while its
 # two genuine Ready rows scored 0.2610 and 0.2584.
-_READY_TEAM_MIN_EDGE_SCORE = 0.24
+_READY_TEAM_MIN_EDGE_SCORE = 0.25
+_READY_TEAM_MIN_GRAYSCALE_SCORE = 0.80
 # Browser screenshots have their own HUD scaling. These are stable roster
 # layout proportions, not gameplay click coordinates. A matched Ready label
 # is mapped to its actual row before any scheduler decision is made.
@@ -554,7 +555,7 @@ class BrowserCanvasMatcher:
     ) -> bool:
         """Require both the tone and glyph shape of the Vietnamese label."""
         return (
-            grayscale_score >= 0.55
+            grayscale_score >= _READY_TEAM_MIN_GRAYSCALE_SCORE
             and edge_score >= _READY_TEAM_MIN_EDGE_SCORE
             and grayscale_score >= busy_score + 0.06
         )

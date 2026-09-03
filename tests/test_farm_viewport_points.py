@@ -18,7 +18,7 @@ from ik_chrome_auto.runner import (
     FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS,
     ProfileWorker,
 )
-from ik_chrome_auto.farm_workflow import FarmStep, FarmWorkflow
+from ik_chrome_auto.farm_workflow import FarmGameState, FarmStep, FarmWorkflow
 from ik_chrome_auto.models import WorkerState
 
 
@@ -391,6 +391,23 @@ def test_farm_can_yield_the_high_resolution_renderer_during_completed_waits() ->
 
 def test_no_ready_team_wait_is_two_minutes_before_the_next_scan() -> None:
     assert FARM_NO_READY_TEAM_RESCAN_SECONDS == 120.0
+
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker._farm = FarmWorkflow()
+    decision = worker._farm.decide(FarmGameState.WORLD_MAP, ready_teams=())
+
+    assert decision.step == FarmStep.WAITING
+    assert worker._farm.waiting_for_ready_team is True
+    assert worker._world_map_decision_delay(decision, open_search_delay=0.35) == 120.0
+
+
+def test_ready_team_keeps_the_short_world_map_follow_up() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker._farm = FarmWorkflow()
+    decision = worker._farm.decide(FarmGameState.WORLD_MAP, ready_teams=(2,))
+
+    assert decision.step == FarmStep.OPEN_SEARCH
+    assert worker._world_map_decision_delay(decision, open_search_delay=0.35) == 0.35
 
 
 def test_farm_yields_720p_renderer_during_long_postcondition_wait(monkeypatch) -> None:

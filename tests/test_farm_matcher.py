@@ -155,6 +155,9 @@ def test_busy_resource_text_cannot_become_ready_from_grayscale_correlation_alone
     classify = BrowserCanvasMatcher._is_ready_team_label
 
     assert classify(0.7738, 0.2205, 0.5448) is False
+    # Live account-2 row 1 (busy) previously slipped through by only 0.002 on
+    # the edge threshold and made all three dashboard dots green.
+    assert classify(0.7785, 0.2424, 0.5451) is False
     assert classify(0.8186, 0.2610, 0.0660) is True
     assert classify(0.8563, 0.2584, 0.1045) is True
 

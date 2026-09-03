@@ -110,7 +110,7 @@ class FarmWorkflow:
         if self.step == FarmStep.WAITING and self.waiting_for_ready_team:
             if state != FarmGameState.WORLD_MAP or not ready_teams:
                 return FarmDecision(self.step, "Không có đội sẵn sàng; chờ lượt tiếp theo")
-            # The runner scans the World Map again after the bounded 15-second
+            # The runner scans the World Map again after the bounded two-minute
             # delay. Resume the interrupted initial cycle as soon as that
             # fresh scan contains at least one verified Ready row.
             self.step = FarmStep.CHECK_TEAMS

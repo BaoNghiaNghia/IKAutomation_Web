@@ -1334,7 +1334,8 @@ class ProfileWorker:
                     FarmGameState.WORLD_MAP,
                     ready_teams=self._farm_ready_teams,
                 )
-                self._farm_next_at = time.monotonic() + 0.35
+                delay = self._world_map_decision_delay(decision, open_search_delay=0.35)
+                self._farm_next_at = time.monotonic() + delay
                 self._log_farm(
                     "world_map_verified",
                     {
@@ -1451,7 +1452,8 @@ class ProfileWorker:
                     FarmGameState.WORLD_MAP,
                     ready_teams=self._farm_ready_teams or ready_teams,
                 )
-                self._farm_next_at = time.monotonic() + 0.35
+                delay = self._world_map_decision_delay(decision, open_search_delay=0.35)
+                self._farm_next_at = time.monotonic() + delay
                 self._log_farm(
                     "world_map_verified",
                     {
@@ -2512,9 +2514,14 @@ class ProfileWorker:
             raise RuntimeError("Profile chưa mở")
         if not getattr(self, "_automation_renderer_locked", False):
             raise RuntimeError("Nút Map/City chỉ được bấm sau khi renderer đã khóa ở 1280×720")
+        background_tap = getattr(self.session, "tap_game_surface_ratio", None)
         background_click = getattr(self.session, "dispatch_game_surface_mouse_ratio", None)
         click_ratio = getattr(self.session, "click_game_surface_ratio", None)
-        if callable(background_click):
+        if callable(background_tap):
+            # This WebGL control is touch-driven on the affected portal build.
+            # CDP touch remains profile-local and works behind other windows.
+            background_tap(*FARM_MAP_TOGGLE_CENTER)
+        elif callable(background_click):
             background_click(*FARM_MAP_TOGGLE_CENTER)
         elif callable(click_ratio):
             click_ratio(*FARM_MAP_TOGGLE_CENTER)
