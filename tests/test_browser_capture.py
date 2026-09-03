@@ -312,6 +312,31 @@ def test_sync_probe_is_rearmed_for_a_retained_browser_frame() -> None:
     assert id(frame) in session._configured_frames
 
 
+def test_unchanged_follower_sync_mode_does_not_reconfigure_slow_frames() -> None:
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session._sync_source = False
+    calls: list[bool] = []
+    session._configure_interaction_frames = lambda **_kwargs: calls.append(True)
+
+    assert session.set_sync_source(False) == 0
+    assert calls == []
+
+
+def test_synced_pointer_falls_back_to_viewport_while_canvas_is_navigating() -> None:
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session._page = SimpleNamespace(
+        viewport_size={"width": 640, "height": 360},
+        is_closed=lambda: False,
+    )
+    session._frame_for_input = lambda _event: (_ for _ in ()).throw(
+        RuntimeError("frame detached")
+    )
+
+    box = session._synced_pointer_target_box({"canvas": {"index": 0}})
+
+    assert box == {"x": 0.0, "y": 0.0, "width": 640.0, "height": 360.0}
+
+
 def test_synced_pointer_uses_largest_target_canvas_not_source_canvas_index() -> None:
     class Locator:
         def __init__(self) -> None:

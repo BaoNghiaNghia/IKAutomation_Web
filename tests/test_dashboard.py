@@ -161,6 +161,7 @@ class FakeFarmRunner:
         self.commands: list[tuple[str, CommandKind]] = []
         self.sync_enabled = False
         self.disable_sync_calls = 0
+        self.restore_calls: list[set[str] | None] = []
 
     def has_open_session(self, profile_id: str) -> bool:
         return profile_id in self.opened
@@ -174,6 +175,10 @@ class FakeFarmRunner:
 
     def cancel_mail_monitor(self) -> None:
         self.mail_monitor_cancelled = True
+
+    def restore_profile_windows(self, profile_ids: set[str] | None = None) -> int:
+        self.restore_calls.append(None if profile_ids is None else set(profile_ids))
+        return 0
 
 
 class FakeTelegramNotifier:
@@ -545,6 +550,7 @@ def test_bulk_farm_button_starts_and_stops_without_closing_open_tabs() -> None:
     assert dashboard.runner.sync_enabled is False
     assert dashboard.runner.disable_sync_calls == 1
     assert dashboard._farm_all_running is True
+    assert dashboard.runner.restore_calls == [{"account-1", "account-2"}]
     assert dashboard.farm_all_button.text == "Dừng Farm"
     assert dashboard.farm_all_button.icon == dashboard_module.FIF.PAUSE
     assert set(dashboard.runner.commands) == {

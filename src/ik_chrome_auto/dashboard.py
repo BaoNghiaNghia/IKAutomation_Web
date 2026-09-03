@@ -193,6 +193,7 @@ class Dashboard(QWidget):
         self._responsive_profile_buttons: list[PushButton] = []
         self._overview_typography: list[tuple[QLabel, QLabel]] = []
         self._last_resources = self._last_trim = 0.0
+        self._last_farm_window_restore = 0.0
         self._build()
         self._draw_rows()
         self._load_telegram_notifier()
@@ -1159,7 +1160,9 @@ class Dashboard(QWidget):
             self._notify_telegram(f"⏹️ Đã dừng Farm: {self.config.profile(pid).name}")
         else:
             self._disable_sync_for_automation("Farm")
-            self.farm_profiles.add(pid); self.runner.submit(pid, CommandKind.START_FARM)
+            self.farm_profiles.add(pid)
+            self.runner.restore_profile_windows({pid})
+            self.runner.submit(pid, CommandKind.START_FARM)
             self._notify_telegram(f"🌾 Đã bắt đầu Farm: {self.config.profile(pid).name}")
 
     def _farm_launcher_action(self) -> None:
@@ -1275,6 +1278,7 @@ class Dashboard(QWidget):
             self.farm_all_button.setEnabled(False)
             return
         self._disable_sync_for_automation("AutoFarms")
+        self.runner.restore_profile_windows(opened)
         for profile_id in opened:
             if profile_id not in self.farm_profiles:
                 self.farm_profiles.add(profile_id)
@@ -1736,6 +1740,12 @@ class Dashboard(QWidget):
         self._advance_farm_stopping()
         self._advance_monitoring()
         now=time.monotonic()
+        if self.farm_profiles and now-self._last_farm_window_restore >= 1.0:
+            restored = self.runner.restore_profile_windows(set(self.farm_profiles))
+            self._last_farm_window_restore = now
+            if restored and hasattr(self, "window_visibility"):
+                self.window_visibility.setIcon(FIF.MINIMIZE)
+                self.window_visibility.setToolTip("Thu gọn tất cả cửa sổ xuống taskbar")
         self._drain_resource_overview()
         # Sampling every five seconds for large installations avoids process
         # enumeration churn. It runs off the Qt thread in all cases.

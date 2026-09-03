@@ -97,6 +97,40 @@ def test_sync_ignores_non_master_event() -> None:
     assert all(not worker.commands for worker in runner.workers.values())
 
 
+def test_follower_input_repairs_stale_runtime_and_retries_once() -> None:
+    class FlakySession:
+        def __init__(self) -> None:
+            self.attempts = 0
+            self.repairs = 0
+
+        def apply_synced_input(self, _event: dict[str, object]) -> None:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("frame detached")
+
+        def repair_synced_input_runtime(self) -> None:
+            self.repairs += 1
+
+    events: list[tuple[str, dict[str, object]]] = []
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker.session = FlakySession()
+    worker.profile = SimpleNamespace(id="follower")
+    worker.event_log = SimpleNamespace(
+        write=lambda event, payload: events.append((event, payload))
+    )
+
+    worker._apply_synced_input_with_retry({"type": "pointerdown"})
+
+    assert worker.session.attempts == 2
+    assert worker.session.repairs == 1
+    assert events == [
+        (
+            "sync_input_recovered",
+            {"profile_id": "follower", "type": "pointerdown"},
+        )
+    ]
+
+
 def test_global_drag_toggle_routes_to_every_profile() -> None:
     runner = make_runner()
     runner.config = type(
@@ -235,6 +269,38 @@ def test_window_toggle_minimizes_all_when_any_window_is_visible(monkeypatch) -> 
 
     assert runner.toggle_all_profile_windows() == (True, 2)
     assert calls == [(101, True), (202, True)]
+
+
+def test_restore_profile_windows_only_restores_minimized_farm_targets(monkeypatch) -> None:
+    runner = make_runner()
+    runner.config = SimpleNamespace(
+        profiles=[
+            SimpleNamespace(id="farm-minimized"),
+            SimpleNamespace(id="farm-visible"),
+            SimpleNamespace(id="other-minimized"),
+        ]
+    )
+    runner.workers = {
+        "farm-minimized": FakeWorker(SimpleNamespace(window_handle=101)),
+        "farm-visible": FakeWorker(SimpleNamespace(window_handle=202)),
+        "other-minimized": FakeWorker(SimpleNamespace(window_handle=303)),
+    }
+    monkeypatch.setattr(
+        runner_module,
+        "is_window_minimized",
+        lambda hwnd: hwnd in {101, 303},
+    )
+    calls: list[tuple[int, bool]] = []
+    monkeypatch.setattr(
+        runner_module,
+        "set_window_minimized",
+        lambda hwnd, minimized: calls.append((hwnd, minimized)) or True,
+    )
+
+    restored = runner.restore_profile_windows({"farm-minimized", "farm-visible"})
+
+    assert restored == 1
+    assert calls == [(101, False)]
 
 
 def test_arrange_windows_balances_profiles_across_two_monitors(monkeypatch) -> None:

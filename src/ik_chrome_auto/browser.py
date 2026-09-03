@@ -33,8 +33,10 @@ from ik_chrome_auto.windows import (
     get_window_rect,
     get_renderer_rect,
     is_window,
+    is_window_minimized,
     move_window_position,
     move_window_renderer,
+    set_window_minimized,
     set_taskbar_group,
     set_topmost as set_native_topmost,
 )
@@ -649,6 +651,9 @@ class ChromeProfileSession:
         hwnd = self.window_handle or self._bind_native_window(retries=10)
         if hwnd is None:
             raise RuntimeError(f"Không tìm thấy cửa sổ Chrome của {self.profile.name}")
+        if is_window_minimized(hwnd):
+            set_window_minimized(hwnd, False)
+            self.pump(80)
         outer = get_window_rect(hwnd)
         renderer = get_renderer_rect(hwnd)
         resized = renderer.width < width or renderer.height < height
@@ -677,6 +682,11 @@ class ChromeProfileSession:
         hwnd = self.window_handle or self._bind_native_window(retries=3)
         if hwnd is None:
             return
+        # Never persist iconic geometry (-32000, -32000 on Windows) or leave
+        # an active Farm profile represented only by its taskbar button.
+        if is_window_minimized(hwnd):
+            set_window_minimized(hwnd, False)
+            self.pump(80)
         move_window_renderer(
             hwnd,
             layout.outer.left,
@@ -1201,9 +1211,24 @@ class ChromeProfileSession:
         )
 
     def set_sync_source(self, enabled: bool) -> int:
-        self._sync_source = bool(enabled)
+        enabled = bool(enabled)
+        if self._sync_source == enabled:
+            # Followers already start with capture disabled. Reconfiguring all
+            # of their frames when Sync is enabled can block a slow profile's
+            # worker long enough for its input commands to pile up behind it.
+            return self.sync_capture_frame_count() if enabled else 0
+        self._sync_source = enabled
         self._configure_interaction_frames(force=True)
         return self._repair_and_count_sync_frames() if self._sync_source else 0
+
+    def repair_synced_input_runtime(self) -> None:
+        """Reconnect input dispatch after a follower frame/page navigation."""
+        page = self.page
+        self._detach_page_cdp_session()
+        self._runtime_page = None
+        self._configured_frames.clear()
+        self._ensure_page_runtime(page)
+        self._configure_interaction_frames(force=True)
 
     def _repair_and_count_sync_frames(self) -> int:
         """Re-arm input capture in retained/reconnected Chrome documents."""
@@ -1363,12 +1388,7 @@ class ChromeProfileSession:
         if event_type in {"keydown", "keyup"}:
             self._apply_synced_keyboard_input(event, event_type)
             return
-        frame = self._frame_for_input(event)
-        canvas = event.get("canvas")
-        if isinstance(canvas, dict):
-            box = self._canvas_box(frame, int(canvas.get("index", 0)))
-        else:
-            box = self._frame_box(frame)
+        box = self._synced_pointer_target_box(event)
         x, y = calculate_target_point(event, box)
         button_number = int(event.get("pointer", {}).get("button", 0))
         button = {0: "left", 1: "middle", 2: "right"}.get(button_number, "left")
@@ -1387,6 +1407,32 @@ class ChromeProfileSession:
                 float(wheel.get("delta_x", 0.0)),
                 float(wheel.get("delta_y", 0.0)),
             )
+
+    def _synced_pointer_target_box(self, event: dict[str, Any]) -> dict[str, float]:
+        """Resolve the follower canvas, falling back to its live viewport.
+
+        During iframe navigation Chrome can visibly retain the game frame
+        while Playwright temporarily cannot enumerate its canvas. The game is
+        fitted to the full renderer, so viewport-ratio dispatch is a safe
+        fallback and prevents one slow follower from dropping the click.
+        """
+        try:
+            frame = self._frame_for_input(event)
+            canvas = event.get("canvas")
+            if isinstance(canvas, dict):
+                return self._canvas_box(frame, int(canvas.get("index", 0)))
+            return self._frame_box(frame)
+        except Exception:
+            page = self.page
+            viewport = page.viewport_size or page.evaluate(
+                "() => ({width: window.innerWidth, height: window.innerHeight})"
+            )
+            return {
+                "x": 0.0,
+                "y": 0.0,
+                "width": float(viewport["width"]),
+                "height": float(viewport["height"]),
+            }
 
     def _apply_synced_keyboard_input(self, event: dict[str, Any], event_type: str) -> None:
         keyboard = event.get("keyboard")

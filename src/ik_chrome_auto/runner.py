@@ -722,7 +722,7 @@ class ProfileWorker:
                     if self.session is not None:
                         sync_event = dict(command.payload["event"])
                         try:
-                            self.session.apply_synced_input(sync_event)
+                            self._apply_synced_input_with_retry(sync_event)
                         except Exception as error:
                             # One transient frame navigation must not mark the
                             # whole profile Error or disable subsequent input.
@@ -789,6 +789,30 @@ class ProfileWorker:
         elif navigate:
             self.session.goto()
         return self.session
+
+    def _apply_synced_input_with_retry(self, event: dict[str, Any]) -> None:
+        """Retry once after repairing a follower's stale frame/CDP runtime."""
+        if self.session is None:
+            return
+        try:
+            self.session.apply_synced_input(event)
+            return
+        except Exception as first_error:
+            repair = getattr(self.session, "repair_synced_input_runtime", None)
+            if not callable(repair):
+                raise
+            repair()
+            try:
+                self.session.apply_synced_input(event)
+            except Exception:
+                raise first_error
+            self.event_log.write(
+                "sync_input_recovered",
+                {
+                    "profile_id": self.profile.id,
+                    "type": str(event.get("type", "")),
+                },
+            )
 
     def _poll_browser_events(self) -> None:
         if self.session is None:
@@ -3004,6 +3028,23 @@ class MultiProfileRunner:
             1 for hwnd in handles if set_window_minimized(hwnd, minimize)
         )
         return minimize, changed
+
+    def restore_profile_windows(self, profile_ids: set[str] | None = None) -> int:
+        """Restore only minimized profile windows without changing geometry."""
+        restored = 0
+        for profile in self.config.profiles:
+            if profile_ids is not None and profile.id not in profile_ids:
+                continue
+            worker = self.workers.get(profile.id)
+            session = worker.session if worker else None
+            if session is None:
+                continue
+            hwnd = session.window_handle
+            if hwnd is None or not is_window_minimized(hwnd):
+                continue
+            if set_window_minimized(hwnd, False):
+                restored += 1
+        return restored
 
     def arrange_windows(
         self,
