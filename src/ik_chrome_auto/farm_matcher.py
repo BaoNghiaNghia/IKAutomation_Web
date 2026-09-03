@@ -279,7 +279,7 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
         # panel's tight lower-right region and must disappear after the tap,
         # so 0.50 remains a bounded, safe gate.
         threshold=0.50,
-        region="lower_right",
+        region="search_checkbox",
         reference_width=836,
         reference_height=433,
         alternatives=("browser_search_target_checkbox_unchecked_green.png",),
@@ -293,7 +293,7 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
         # result while retaining the tight checkbox-only region.
         "browser_search_target_checkbox_checked.png",
         threshold=0.70,
-        region="lower_right",
+        region="search_checkbox",
         reference_width=1014,
         reference_height=275,
         uniform_width_scale=True,
@@ -655,6 +655,15 @@ class BrowserCanvasMatcher:
         if name == "lower_left": return 0, height // 2, width // 2, height - height // 2
         if name == "lower": return 0, height // 2, width, height - height // 2
         if name == "lower_right": return width // 2, height // 2, width - width // 2, height - height // 2
+        # The resource-search checkbox occupies a fixed, compact slot around
+        # (941, 512) on the leased 1280x720 renderer.  A generic lower-right
+        # search also matched circular HUD art near (1125, 393), causing a
+        # click far away from the option. Keep both unchecked and checked
+        # evidence inside the actual checkbox/label row.
+        if name == "search_checkbox":
+            left = width * 7 // 10
+            top = height * 2 // 3
+            return left, top, width // 10, height // 9
         # The search level readout (``Cấp: n / n``) is centered above the
         # slider in the resource panel. Restricting the two digit templates
         # to this slot prevents similar HUD numbers elsewhere from becoming

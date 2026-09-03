@@ -250,6 +250,21 @@ def test_checked_search_target_template_requires_positive_tick_evidence() -> Non
     assert (spec.reference_width, spec.reference_height) == (1014, 275)
     assert spec.uniform_width_scale is True
     assert spec.threshold == 0.70
+    assert spec.region == "search_checkbox"
+
+
+def test_unchecked_search_target_template_uses_the_same_tight_checkbox_region() -> None:
+    import ik_chrome_auto.farm_matcher as matcher_module
+
+    spec = matcher_module.SPECS[FarmTemplateId.BROWSER_SEARCH_TARGET_CHECKBOX_UNCHECKED]
+
+    assert spec.region == "search_checkbox"
+    assert matcher_module.BrowserCanvasMatcher._region("search_checkbox", 1280, 720) == (
+        896,
+        480,
+        128,
+        80,
+    )
 
 
 def test_resource_level_templates_use_the_renderer_and_exact_panel_slot() -> None:

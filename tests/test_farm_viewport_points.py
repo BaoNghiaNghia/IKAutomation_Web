@@ -30,7 +30,7 @@ def test_farm_layout_fallbacks_use_relative_canvas_positions_at_16_by_9() -> Non
     assert ProfileWorker._map_toggle_layout_bounds((1280, 720)) == (13, 621, 80, 90)
     assert ProfileWorker._city_to_world_map_layout_bounds((1280, 720)) == (13, 621, 80, 90)
     assert ProfileWorker._world_map_search_layout_bounds((1280, 720)) == (425, 552, 57, 57)
-    assert ProfileWorker._search_target_checkbox_layout_bounds((1280, 720)) == (996, 494, 51, 47)
+    assert ProfileWorker._search_target_checkbox_layout_bounds((1280, 720)) == (915, 488, 51, 47)
 
 
 def test_area_relocation_closes_search_panel_and_opens_continent_map_directly() -> None:
@@ -296,7 +296,7 @@ def test_farm_layout_fallbacks_scale_for_a_compact_five_profile_viewport() -> No
     assert ProfileWorker._resource_button_layout_bounds("wood", (384, 216)) == (138, 139, 36, 39)
     assert ProfileWorker._city_to_world_map_layout_bounds((384, 216)) == (0, 152, 60, 64)
     assert ProfileWorker._world_map_search_layout_bounds((384, 216)) == (117, 156, 38, 36)
-    assert ProfileWorker._search_target_checkbox_layout_bounds((384, 216)) == (297, 145, 20, 20)
+    assert ProfileWorker._search_target_checkbox_layout_bounds((384, 216)) == (272, 144, 20, 20)
 
 
 def test_farm_map_toggle_uses_exact_canvas_percentage_and_excludes_mail() -> None:

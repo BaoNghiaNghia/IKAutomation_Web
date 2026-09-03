@@ -126,10 +126,10 @@ FARM_WORLD_MAP_SEARCH_SIZE = (57 / 1280, 57 / 720)
 # fallback only after the resource-search panel itself has been verified.
 FARM_RESOURCE_TAB_CENTER = (210 / 1280, 670.5 / 720)
 FARM_RESOURCE_TAB_SIZE = (92 / 1280, 47 / 720)
-# Measured from the supplied resource panel: the round checkbox is above the
-# Search button's left edge, at x≈1022 on the real 1280×720 renderer.  The old
-# 0.717 ratio landed on explanatory text instead of the toggle.
-FARM_SEARCH_TARGET_CHECKBOX_CENTER = (1022 / 1280, 517 / 720)
+# Measured again from the account-2 1280x720 diagnostic: the checkbox itself
+# is at (941, 512).  The previous x=1022 fallback landed in the label text to
+# its right whenever the unchecked template was temporarily unavailable.
+FARM_SEARCH_TARGET_CHECKBOX_CENTER = (941 / 1280, 512 / 720)
 FARM_SEARCH_TARGET_CHECKBOX_SIZE = (0.04, 0.065)
 FARM_TEAM_ROW_WIDTH_RATIO = 0.172
 FARM_TEAM_ROW_HEIGHT_RATIO = 0.19
@@ -2020,7 +2020,7 @@ class ProfileWorker:
                                 # has just re-verified that exact state, so a
                                 # second compositor click at the freshly
                                 # matched bounds is safe; never click stale pixels.
-                                input_method = self._click_farm_background_game_control(
+                                input_method = self._tap_farm_game_control(
                                     target_checkbox_unchecked.bounds,  # type: ignore[arg-type]
                                     image_size,
                                 )
@@ -2085,7 +2085,11 @@ class ProfileWorker:
                             # prevents a missed template from being mistaken
                             # for a ticked checkbox.
                             self._farm_target_checkbox_seen_unchecked = fresh_checkbox.found
-                            input_method = self._click_farm_panel_control(checkbox_bounds, fresh_size)
+                            # This round WebGL checkbox is touch-driven on the
+                            # affected portal profile. CDP touch also maps the
+                            # screenshot centre directly onto the game surface
+                            # without a desktop/iframe offset.
+                            input_method = self._tap_farm_game_control(checkbox_bounds, fresh_size)
                             self._farm_target_checkbox_click_at = time.monotonic()
                             self._farm_target_checkbox_clicks += 1
                             self._log_farm(
