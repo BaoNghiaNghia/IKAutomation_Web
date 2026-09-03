@@ -44,6 +44,8 @@ ik_chrome_auto = [
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+addopts = "--basetemp=.build-cache/pytest-tmp"
+cache_dir = ".build-cache/pytest-cache"
 
 [tool.ruff]
 line-length = 100
