@@ -3,6 +3,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 import ik_chrome_auto.browser as browser_module
 from ik_chrome_auto.browser import (
     GAME_FRAME_FIT_SCRIPT,
@@ -87,6 +89,27 @@ def test_numeric_farm_input_uses_background_renderer_focus_before_reading() -> N
 
     assert value == 592
     assert clicks == [(64 / 1280, 93 / 720)]
+
+
+def test_farm_click_helper_uses_exact_fresh_capture_center_for_touch() -> None:
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    taps: list[tuple[float, float]] = []
+    session.tap_game_surface_ratio = lambda x, y: taps.append((x, y))
+
+    method = session.click_farm_control((433, 560, 41, 41), (1280, 720), input_kind="touch")
+
+    assert method == "cdp_touch_canvas_ratio"
+    assert taps == [(453.5 / 1280, 580.5 / 720)]
+
+
+def test_farm_click_helper_rejects_bounds_outside_latest_capture() -> None:
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session.dispatch_game_surface_mouse_ratio = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("invalid bounds must never dispatch input")
+    )
+
+    with pytest.raises(ValueError, match="ngoài ảnh game"):
+        session.click_farm_control((1270, 700, 20, 30), (1280, 720), input_kind="mouse")
 
 
 def test_background_renderer_click_dispatches_cdp_mouse_without_native_window() -> None:

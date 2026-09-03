@@ -1154,13 +1154,33 @@ class ChromeProfileSession:
         image = decode_png(png)
         return image.width, image.height
 
+    def click_farm_control(
+        self,
+        bounds: tuple[int, int, int, int],
+        image_size: tuple[int, int],
+        *,
+        input_kind: str = "touch",
+    ) -> str:
+        """Click the exact centre of a control found in the latest farm capture.
+
+        Farm detection coordinates always belong to the captured game surface,
+        never to the desktop or outer iframe.  Convert them once to normalized
+        canvas ratios and let the renderer input path resolve the current
+        1280x720 surface.  This works for covered/minimized profiles and avoids
+        every caller inventing its own iframe or window offset.
+        """
+        x_ratio, y_ratio = self._farm_control_center_ratio(bounds, image_size)
+        if input_kind == "touch":
+            self.tap_game_surface_ratio(x_ratio, y_ratio)
+            return "cdp_touch_canvas_ratio"
+        if input_kind == "mouse":
+            self.dispatch_game_surface_mouse_ratio(x_ratio, y_ratio)
+            return "cdp_mouse_canvas_ratio"
+        raise ValueError(f"Farm input kind không được hỗ trợ: {input_kind}")
+
     def tap_farm_template(self, bounds: tuple[int, int, int, int], image_size: tuple[int, int]) -> None:
-        """Send one CDP touch at freshly matched screenshot-relative bounds."""
-        x, y = self._farm_template_center(bounds, image_size)
-        point = {"x": x, "y": y, "radiusX": 2, "radiusY": 2, "force": 1, "id": 1}
-        cdp = self._get_page_cdp_session(self.page)
-        cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [point]})
-        cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        """Compatibility wrapper for the centralized farm click helper."""
+        self.click_farm_control(bounds, image_size, input_kind="touch")
 
     def read_focused_numeric_farm_input(
         self,
@@ -1239,15 +1259,21 @@ class ChromeProfileSession:
         normal mouse input.  Callers use this only after a verified touch has
         not changed state; gameplay controls continue to prefer touch.
         """
+        self.click_farm_control(bounds, image_size, input_kind="mouse")
+
+    @staticmethod
+    def _farm_control_center_ratio(
+        bounds: tuple[int, int, int, int],
+        image_size: tuple[int, int],
+    ) -> tuple[float, float]:
+        """Validate fresh detection bounds and return their canvas ratios."""
         left, top, width, height = bounds
         image_width, image_height = image_size
         if width <= 0 or height <= 0 or image_width <= 0 or image_height <= 0:
             raise ValueError("Farm template bounds không hợp lệ")
-        # A raw page-level CDP mouse/touch can use the wrong origin when the
-        # game canvas lives in an iframe. Resolve the canvas locator first and
-        # express the freshly matched screenshot centre as canvas ratios; the
-        # locator then applies the correct frame transform.
-        self.click_game_surface_ratio(
+        if left < 0 or top < 0 or left + width > image_width or top + height > image_height:
+            raise ValueError("Farm template bounds nằm ngoài ảnh game vừa chụp")
+        return (
             (left + width / 2) / image_width,
             (top + height / 2) / image_height,
         )
@@ -1257,13 +1283,10 @@ class ChromeProfileSession:
         bounds: tuple[int, int, int, int],
         image_size: tuple[int, int],
     ) -> tuple[float, float]:
-        left, top, width, height = bounds
-        image_width, image_height = image_size
-        if width <= 0 or height <= 0 or image_width <= 0 or image_height <= 0:
-            raise ValueError("Farm template bounds không hợp lệ")
+        x_ratio, y_ratio = self._farm_control_center_ratio(bounds, image_size)
         _canvas, surface = self._canvas_or_viewport()
-        x = float(surface["width"]) * (left + width / 2) / image_width
-        y = float(surface["height"]) * (top + height / 2) / image_height
+        x = float(surface["width"]) * x_ratio
+        y = float(surface["height"]) * y_ratio
         return x, y
 
     def _capture_visible_canvas_png(

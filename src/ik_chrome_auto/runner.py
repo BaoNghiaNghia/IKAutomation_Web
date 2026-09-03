@@ -1466,6 +1466,39 @@ class ProfileWorker:
                     f"Auto Farm: World Map đã xác minh; {decision.message}",
                 )
                 return
+            if self._farm.step == FarmStep.OPEN_SEARCH and state == FarmGameState.CITY:
+                # A WebGL search tap can be interpreted as the neighbouring
+                # City/Map transition while the World Map HUD is animating.
+                # OPEN_SEARCH used to wait forever because this verified City
+                # could never satisfy its Resource Search postcondition.
+                # Re-check City, return to World Map once, then retry Search
+                # with the same workflow target and selected team.
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
+                fresh_city = fresh.evidence_for(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
+                if fresh.state == DetectedGameState.CITY and fresh_city.actionable:
+                    click_bounds = self._map_toggle_layout_bounds(fresh_size)
+                    self._click_map_toggle(click_bounds, fresh_size)
+                    self._farm_world_map_click_at = time.monotonic()
+                    self._farm_search_clicks = 0
+                    self._farm_next_at = self._farm_world_map_click_at + 1.2
+                    self._log_farm(
+                        "recover_open_search_from_city",
+                        {
+                            "bounds": click_bounds,
+                            "method": "cdp_touch_canvas_ratio",
+                        },
+                    )
+                    self._publish(
+                        WorkerState.RUNNING,
+                        "Auto Farm: panel tìm kiếm chuyển nhầm về City; đang trở lại World Map",
+                    )
+                    return
+                self._farm_next_at = time.monotonic() + 0.6
+                self._publish(
+                    WorkerState.RUNNING,
+                    "Auto Farm: đang xác minh City trước khi khôi phục panel tìm kiếm",
+                )
+                return
             decision = self._farm.decide(
                 state,
                 ready_teams=ready_teams,
@@ -1610,13 +1643,11 @@ class ProfileWorker:
                     )
                     self._publish(WorkerState.RUNNING, "Auto Farm: nút tìm tài nguyên thay đổi, đang nhận diện lại")
                     return
-                # Use a renderer-level compositor mouse event first. It is
-                # independent of window overlap/z-order and reaches the game
-                # iframe without moving the user's physical cursor.
-                if self._farm_search_clicks == 0:
-                    input_method = self._click_farm_background_game_control(click_bounds, fresh_size)
-                else:
-                    input_method = self._click_farm_panel_control(click_bounds, fresh_size)
+                # The magnifier is a WebGL HUD control. On the affected portal
+                # build compositor/native mouse events either did nothing or
+                # switched screens, while CDP touch opened the panel reliably.
+                # Keep both bounded attempts profile-local and touch-driven.
+                input_method = self._tap_farm_game_control(click_bounds, fresh_size)
                 self._farm_search_clicks += 1
                 self._farm_next_at = time.monotonic() + 2.0
                 self._log_farm(
@@ -2510,28 +2541,7 @@ class ProfileWorker:
         call without forwarding it to the WebGL HUD. The compositor path is
         resolution-safe and remains usable while this window is covered.
         """
-        if self.session is None:
-            raise RuntimeError("Profile chưa mở")
-        if not getattr(self, "_automation_renderer_locked", False):
-            raise RuntimeError("Nút Map/City chỉ được bấm sau khi renderer đã khóa ở 1280×720")
-        background_tap = getattr(self.session, "tap_game_surface_ratio", None)
-        background_click = getattr(self.session, "dispatch_game_surface_mouse_ratio", None)
-        click_ratio = getattr(self.session, "click_game_surface_ratio", None)
-        if callable(background_tap):
-            # This WebGL control is touch-driven on the affected portal build.
-            # CDP touch remains profile-local and works behind other windows.
-            background_tap(*FARM_MAP_TOGGLE_CENTER)
-        elif callable(background_click):
-            background_click(*FARM_MAP_TOGGLE_CENTER)
-        elif callable(click_ratio):
-            click_ratio(*FARM_MAP_TOGGLE_CENTER)
-        else:
-            click_mouse = getattr(self.session, "click_farm_template_mouse", None)
-            if callable(click_mouse):
-                click_mouse(bounds, image_size)
-            else:
-                # Compatibility for lightweight test doubles and older sessions.
-                self.session.tap_farm_template(bounds, image_size)
+        self._click_farm_control(bounds, image_size, input_kind="touch")
         self._automation_renderer_hold_until = (
             time.monotonic() + FARM_MAP_TRANSITION_RENDERER_HOLD_SECONDS
         )
@@ -2549,19 +2559,7 @@ class ProfileWorker:
         image_size: tuple[int, int],
     ) -> str:
         """Click a portal search-panel control on the leased 720p canvas."""
-        if self.session is None:
-            raise RuntimeError("Profile chưa mở")
-        if not getattr(self, "_automation_renderer_locked", False):
-            raise RuntimeError("Panel Farm chỉ được bấm sau khi renderer đã khóa ở 1280×720")
-        click_mouse = getattr(self.session, "click_farm_template_mouse", None)
-        if callable(click_mouse):
-            click_mouse(bounds, image_size)
-            self._hold_automation_renderer_for_postcondition()
-            return "mouse_canvas_template"
-        # Compatibility for lightweight tests and older browser sessions.
-        self.session.tap_farm_template(bounds, image_size)
-        self._hold_automation_renderer_for_postcondition()
-        return "touch_template"
+        return self._click_farm_control(bounds, image_size, input_kind="mouse")
 
     def _tap_farm_game_control(
         self,
@@ -2569,16 +2567,7 @@ class ProfileWorker:
         image_size: tuple[int, int],
     ) -> str:
         """Tap a verified WebGL game control at its canvas-relative centre."""
-        if self.session is None:
-            raise RuntimeError("Profile chưa mở")
-        if not getattr(self, "_automation_renderer_locked", False):
-            raise RuntimeError("Control Farm chỉ được bấm sau khi renderer đã khóa ở 1280×720")
-        tap = getattr(self.session, "tap_farm_template", None)
-        if callable(tap):
-            tap(bounds, image_size)
-            self._hold_automation_renderer_for_postcondition()
-            return "touch_canvas_template"
-        return self._click_farm_panel_control(bounds, image_size)
+        return self._click_farm_control(bounds, image_size, input_kind="touch")
 
     def _click_farm_background_game_control(
         self,
@@ -2586,18 +2575,73 @@ class ProfileWorker:
         image_size: tuple[int, int],
     ) -> str:
         """Use background compositor input for a verified WebGL control."""
+        return self._click_farm_control(bounds, image_size, input_kind="mouse")
+
+    def _click_farm_control(
+        self,
+        bounds: tuple[int, int, int, int],
+        image_size: tuple[int, int],
+        *,
+        input_kind: str,
+    ) -> str:
+        """Route every Farm click through one renderer-relative helper.
+
+        The bounds must come from the latest canvas capture (or a guarded
+        layout slot on that same capture). Production sessions normalize the
+        centre and dispatch profile-local CDP input without any iframe offset.
+        """
         if self.session is None:
             raise RuntimeError("Profile chưa mở")
         if not getattr(self, "_automation_renderer_locked", False):
             raise RuntimeError("Control Farm chỉ được bấm sau khi renderer đã khóa ở 1280×720")
+
+        click = getattr(self.session, "click_farm_control", None)
+        if callable(click):
+            method = str(click(bounds, image_size, input_kind=input_kind))
+        elif input_kind == "touch":
+            tap_ratio = getattr(self.session, "tap_game_surface_ratio", None)
+            left, top, width, height = bounds
+            image_width, image_height = image_size
+            if callable(tap_ratio) and image_width > 0 and image_height > 0:
+                tap_ratio(
+                    (left + width / 2) / image_width,
+                    (top + height / 2) / image_height,
+                )
+                method = "cdp_touch_canvas_ratio"
+            else:
+                tap = getattr(self.session, "tap_farm_template", None)
+                if callable(tap):
+                    tap(bounds, image_size)
+                    method = "touch_canvas_template"
+                else:
+                    method = self._legacy_farm_mouse_click(bounds, image_size)
+        elif input_kind == "mouse":
+            method = self._legacy_farm_mouse_click(bounds, image_size)
+        else:
+            raise ValueError(f"Farm input kind không được hỗ trợ: {input_kind}")
+
+        self._hold_automation_renderer_for_postcondition()
+        return method
+
+    def _legacy_farm_mouse_click(
+        self,
+        bounds: tuple[int, int, int, int],
+        image_size: tuple[int, int],
+    ) -> str:
+        """Compatibility path for test doubles and older browser sessions."""
+        assert self.session is not None
+        click_mouse = getattr(self.session, "click_farm_template_mouse", None)
+        if callable(click_mouse):
+            click_mouse(bounds, image_size)
+            return "mouse_canvas_template"
         left, top, width, height = bounds
         image_width, image_height = image_size
         background_click = getattr(self.session, "dispatch_game_surface_mouse_ratio", None)
         if callable(background_click) and image_width > 0 and image_height > 0:
             background_click((left + width / 2) / image_width, (top + height / 2) / image_height)
-            self._hold_automation_renderer_for_postcondition()
             return "cdp_canvas_ratio"
-        return self._click_farm_panel_control(bounds, image_size)
+        self.session.tap_farm_template(bounds, image_size)
+        return "touch_template"
 
     # Compatibility for tests/integrations that referenced the directional
     # helper before both directions were unified onto the same physical slot.
