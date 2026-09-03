@@ -344,8 +344,8 @@ def test_farm_yields_720p_after_postcondition_even_for_a_short_next_poll(monkeyp
 def test_farm_rejects_tiny_renderer_captures_before_team_or_resource_input() -> None:
     """A tiny canvas cannot safely distinguish Ready from Busy labels."""
     assert AUTOMATION_RENDERER_SIZE == (1280, 720)
-    assert AUTOMATION_RENDERER_CANVAS_GUTTER == (16, 16)
-    assert AUTOMATION_RENDERER_WINDOW_SIZE == (1296, 736)
+    assert AUTOMATION_RENDERER_CANVAS_GUTTER == (0, 0)
+    assert AUTOMATION_RENDERER_WINDOW_SIZE == (1280, 720)
     assert FARM_MINIMUM_CANVAS_SIZE == (1280, 720)
     assert ProfileWorker._farm_canvas_is_usable((1280, 720)) is True
     assert ProfileWorker._farm_canvas_is_usable((640, 360)) is False

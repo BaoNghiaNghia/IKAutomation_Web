@@ -70,12 +70,12 @@ FARM_REFERENCE_ASPECT_RATIO = 16 / 9
 # recognition.  The worker therefore temporarily renders a single active
 # profile at this true 16:9 size; it never upscales a compact screenshot.
 AUTOMATION_RENDERER_SIZE = (1280, 720)
-# Chrome's native renderer includes an 8 px game-surface gutter on every edge
-# in app mode.  Therefore a native 1280×720 renderer produces only a
-# 1264×704 CDP game-canvas capture and Farm remains blocked.  Size the native
-# window slightly larger, while keeping 1280×720 as the required *captured*
-# automation canvas and all coordinate/template references.
-AUTOMATION_RENDERER_CANVAS_GUTTER = (16, 16)
+# The browser bootstrap now removes the portal/iframe document's default 8 px
+# body margin. The native renderer must therefore be exactly 1280×720 too;
+# retaining the old +16 compensation makes the game itself render at
+# 1296×736, drops all template scores, and causes the lease/restore cycle to
+# look like repeated zooming.
+AUTOMATION_RENDERER_CANVAS_GUTTER = (0, 0)
 AUTOMATION_RENDERER_WINDOW_SIZE = tuple(
     canvas + gutter
     for canvas, gutter in zip(
