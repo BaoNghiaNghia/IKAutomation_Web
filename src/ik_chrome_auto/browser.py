@@ -833,28 +833,6 @@ class ChromeProfileSession:
                     raise RuntimeError("Chrome returned a black game screenshot")
         return png, box
 
-    def wait_for_game_surface(self, timeout_seconds: float = 45.0) -> None:
-        """Wait until the game canvas has produced a real, non-black frame.
-
-        DOM readiness is too early for WebGL-heavy profiles: Chrome can expose
-        CDP and a canvas element several seconds before the compositor has a
-        usable frame. Keeping the worker in STARTING state here makes the
-        dashboard's launch batches a true renderer barrier.
-        """
-        deadline = time.monotonic() + max(1.0, float(timeout_seconds))
-        last_error = "canvas chưa xuất hiện"
-        while time.monotonic() < deadline:
-            try:
-                self.capture_game_surface_png()
-                return
-            except Exception as error:
-                last_error = str(error) or type(error).__name__
-            self.pump(250)
-        raise RuntimeError(
-            "Màn hình game chưa render được sau khi mở profile "
-            f"({last_error})"
-        )
-
     def capture_game_region_png(
         self,
         region: tuple[float, float, float, float],

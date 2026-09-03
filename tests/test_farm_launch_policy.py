@@ -55,18 +55,3 @@ def test_timeout_budget_includes_all_batch_pauses() -> None:
     timeout = policy.estimated_timeout_seconds(50, 90)
 
     assert timeout >= 90 + (49 * policy.resource_constrained_interval_seconds) + 180
-
-
-def test_large_profile_workload_limits_concurrent_webgl_startups() -> None:
-    policy = FarmLaunchPolicy.for_workload(96 * GIB, 45)
-
-    assert policy.batch_size == 2
-    assert policy.profile_interval_seconds >= 4.5
-    assert policy.batch_pause_seconds >= 20.0
-    assert policy.max_gpu_utilization_percent <= 72.0
-
-
-def test_small_profile_workload_keeps_normal_launch_speed() -> None:
-    assert FarmLaunchPolicy.for_workload(96 * GIB, 12) == FarmLaunchPolicy.for_total_memory(
-        96 * GIB
-    )

@@ -788,15 +788,6 @@ class ProfileWorker:
                 self.session.set_topmost(True)
         elif navigate:
             self.session.goto()
-        if navigate:
-            wait_for_game = getattr(self.session, "wait_for_game_surface", None)
-            if callable(wait_for_game):
-                wait_for_game(
-                    timeout_seconds=min(
-                        45.0,
-                        max(10.0, self.config.browser.startup_timeout_ms / 1000),
-                    )
-                )
         return self.session
 
     def _poll_browser_events(self) -> None:

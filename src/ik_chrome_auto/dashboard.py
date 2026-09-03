@@ -1194,15 +1194,9 @@ class Dashboard(QWidget):
             self._farm_resource_pause_reason = None
             try:
                 memory = get_system_memory_status()
-                self._farm_launch_policy = FarmLaunchPolicy.for_workload(
-                    memory.total_bytes,
-                    pending,
-                )
+                self._farm_launch_policy = FarmLaunchPolicy.for_total_memory(memory.total_bytes)
             except Exception:
-                self._farm_launch_policy = FarmLaunchPolicy.for_workload(
-                    32 * 1_073_741_824,
-                    pending,
-                )
+                self._farm_launch_policy = FarmLaunchPolicy.for_total_memory(32 * 1_073_741_824)
             self._farm_batch_limit = self._farm_launch_policy.batch_size
             startup_timeout = self.config.browser.startup_timeout_ms / 1000
             self._farm_open_deadline = time.monotonic() + self._farm_launch_policy.estimated_timeout_seconds(

@@ -469,16 +469,6 @@ def test_locator_screenshot_is_only_the_last_fallback() -> None:
     assert context.new_session_calls == 1
 
 
-def test_startup_renderer_barrier_accepts_only_a_visible_game_frame() -> None:
-    session = ChromeProfileSession.__new__(ChromeProfileSession)
-    calls: list[bool] = []
-    session.capture_game_surface_png = lambda: calls.append(True) or (ASSET_PNG, BOX)
-
-    session.wait_for_game_surface(timeout_seconds=1)
-
-    assert calls == [True]
-
-
 def test_close_detaches_page_cdp_even_for_external_profile() -> None:
     session, _canvas, context, page = make_session()
     cdp = session._get_page_cdp_session(page)

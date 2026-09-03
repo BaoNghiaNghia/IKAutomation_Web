@@ -1,7 +1,7 @@
 """Adaptive startup policy for opening many browser farm profiles safely."""
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from math import ceil
 
 _GIB = 1_073_741_824
@@ -54,27 +54,6 @@ class FarmLaunchPolicy:
             max_memory_load_percent=78.0,
             max_profile_cpu_percent=68.0,
             max_gpu_utilization_percent=72.0,
-        )
-
-    @classmethod
-    def for_workload(
-        cls,
-        total_memory_bytes: int,
-        profile_count: int,
-    ) -> "FarmLaunchPolicy":
-        """Add a stricter GPU startup envelope for very large launches."""
-        policy = cls.for_total_memory(total_memory_bytes)
-        if int(profile_count) < 30:
-            return policy
-        return replace(
-            policy,
-            batch_size=min(policy.batch_size, 2),
-            profile_interval_seconds=max(policy.profile_interval_seconds, 4.5),
-            batch_pause_seconds=max(policy.batch_pause_seconds, 20.0),
-            max_gpu_utilization_percent=min(
-                policy.max_gpu_utilization_percent,
-                72.0,
-            ),
         )
 
     def estimated_timeout_seconds(self, profile_count: int, startup_timeout_seconds: float) -> float:
