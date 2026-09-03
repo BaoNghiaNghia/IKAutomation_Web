@@ -42,7 +42,9 @@ from ik_chrome_auto.windows import (
     get_visible_window_rect,
     get_window_rect,
     get_window_process_tree_usage,
+    is_window_minimized,
     move_window_outer,
+    set_window_minimized,
     snapshot_process_parents,
     trim_window_process_tree,
     WindowRect,
@@ -2978,6 +2980,30 @@ class MultiProfileRunner:
             if worker.session is not None:
                 count += 1
         return count
+
+    def toggle_all_profile_windows(self) -> tuple[bool, int]:
+        """Minimize all open profile windows, or restore them when all are minimized.
+
+        The returned boolean is the resulting minimized state. Reading the
+        native state on every click keeps the toggle correct when a user has
+        manually minimized or restored individual Chrome windows.
+        """
+        handles: list[int] = []
+        for profile in self.config.profiles:
+            worker = self.workers.get(profile.id)
+            session = worker.session if worker else None
+            if session is None:
+                continue
+            hwnd = session.window_handle
+            if hwnd is not None:
+                handles.append(hwnd)
+        if not handles:
+            return False, 0
+        minimize = not all(is_window_minimized(hwnd) for hwnd in handles)
+        changed = sum(
+            1 for hwnd in handles if set_window_minimized(hwnd, minimize)
+        )
+        return minimize, changed
 
     def arrange_windows(
         self,

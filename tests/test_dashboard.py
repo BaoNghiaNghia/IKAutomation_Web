@@ -60,6 +60,21 @@ class FakeToggleButton:
         self.tooltip = tooltip
 
 
+def test_profile_window_toggle_updates_icon_tooltip_and_log() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.runner = SimpleNamespace(
+        toggle_all_profile_windows=lambda: (True, 3)
+    )
+    dashboard.window_visibility = FakeToggleButton()
+    logs: list[str] = []
+    dashboard._append_log = logs.append
+
+    dashboard._toggle_profile_windows()
+
+    assert dashboard.window_visibility.tooltip == "Mở tất cả cửa sổ từ taskbar"
+    assert "thu gọn 3 cửa sổ" in logs[-1]
+
+
 class FakeStatusIcon:
     def __init__(self) -> None:
         self.style = ""
@@ -98,6 +113,46 @@ class FakeActionButton:
 
     def setIcon(self, icon) -> None:
         self.icon = icon
+
+
+def test_sync_control_stays_available_while_farm_is_running() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.sync = FakeActionButton()
+    dashboard.farm_profiles = {"account-1", "account-2"}
+    dashboard._monitoring_enabled = True
+    dashboard._farm_launcher_phase = "ready"
+
+    dashboard._refresh_sync_control()
+
+    assert dashboard.sync.enabled
+
+
+def test_sync_control_is_locked_only_while_tabs_are_transitioning() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.sync = FakeActionButton()
+    dashboard.farm_profiles = set()
+    dashboard._monitoring_enabled = False
+    dashboard._farm_launcher_phase = "stopping"
+
+    dashboard._refresh_sync_control()
+
+    assert not dashboard.sync.enabled
+
+
+def test_enabling_sync_stops_automation_modes_first() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.farm_profiles = {"account-1"}
+    dashboard._monitoring_enabled = True
+    calls: list[str] = []
+    logs: list[str] = []
+    dashboard._stop_all_farms = lambda: calls.append("farm")
+    dashboard._stop_monitoring = lambda: calls.append("monitor")
+    dashboard._append_log = logs.append
+
+    dashboard._stop_automation_for_sync()
+
+    assert calls == ["farm", "monitor"]
+    assert "AutoFarm và Giám sát" in logs[-1]
 
 
 class FakeFarmRunner:

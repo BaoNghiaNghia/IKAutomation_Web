@@ -289,6 +289,28 @@ def is_window(hwnd: int | None) -> bool:
     return bool(sys.platform == "win32" and hwnd and _user32.IsWindow(wintypes.HWND(hwnd)))
 
 
+def is_window_minimized(hwnd: int | None) -> bool:
+    """Return whether a valid native window is currently minimized."""
+    return bool(
+        sys.platform == "win32"
+        and is_window(hwnd)
+        and _user32.IsIconic(wintypes.HWND(hwnd))
+    )
+
+
+def set_window_minimized(hwnd: int, minimized: bool) -> bool:
+    """Minimize or restore a window without blocking the dashboard thread."""
+    if not is_window(hwnd):
+        return False
+    command = 6 if minimized else 9  # SW_MINIMIZE / SW_RESTORE
+    show_async = getattr(_user32, "ShowWindowAsync", None)
+    if show_async is not None:
+        show_async(wintypes.HWND(hwnd), command)
+    else:
+        _user32.ShowWindow(wintypes.HWND(hwnd), command)
+    return True
+
+
 def descendant_process_ids(
     root_pid: int,
     parent_by_pid: dict[int, int],

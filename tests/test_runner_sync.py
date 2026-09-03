@@ -193,6 +193,50 @@ def test_trim_ram_routes_each_open_window_once(monkeypatch) -> None:
     assert calls == [101, 202]
 
 
+def test_window_toggle_restores_all_when_every_window_is_minimized(monkeypatch) -> None:
+    runner = make_runner()
+    runner.config = SimpleNamespace(
+        profiles=[SimpleNamespace(id="one"), SimpleNamespace(id="two")]
+    )
+    runner.workers = {
+        "one": FakeWorker(SimpleNamespace(window_handle=101)),
+        "two": FakeWorker(SimpleNamespace(window_handle=202)),
+    }
+    monkeypatch.setattr(runner_module, "is_window_minimized", lambda _hwnd: True)
+    calls: list[tuple[int, bool]] = []
+    monkeypatch.setattr(
+        runner_module,
+        "set_window_minimized",
+        lambda hwnd, minimized: calls.append((hwnd, minimized)) or True,
+    )
+
+    assert runner.toggle_all_profile_windows() == (False, 2)
+    assert calls == [(101, False), (202, False)]
+
+
+def test_window_toggle_minimizes_all_when_any_window_is_visible(monkeypatch) -> None:
+    runner = make_runner()
+    runner.config = SimpleNamespace(
+        profiles=[SimpleNamespace(id="one"), SimpleNamespace(id="two")]
+    )
+    runner.workers = {
+        "one": FakeWorker(SimpleNamespace(window_handle=101)),
+        "two": FakeWorker(SimpleNamespace(window_handle=202)),
+    }
+    monkeypatch.setattr(
+        runner_module, "is_window_minimized", lambda hwnd: hwnd == 101
+    )
+    calls: list[tuple[int, bool]] = []
+    monkeypatch.setattr(
+        runner_module,
+        "set_window_minimized",
+        lambda hwnd, minimized: calls.append((hwnd, minimized)) or True,
+    )
+
+    assert runner.toggle_all_profile_windows() == (True, 2)
+    assert calls == [(101, True), (202, True)]
+
+
 def test_arrange_windows_balances_profiles_across_two_monitors(monkeypatch) -> None:
     runner = make_runner()
     runner.config = SimpleNamespace(

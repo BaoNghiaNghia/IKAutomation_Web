@@ -247,7 +247,7 @@ class Dashboard(QWidget):
         account_actions = QHBoxLayout(); account_actions.setSpacing(_ui_px(7)); account_actions.addWidget(manage, 1); account_actions.addWidget(self.farm_launcher, 1); al.addLayout(account_actions)
         runtime_actions = QHBoxLayout(); runtime_actions.setSpacing(_ui_px(7)); runtime_actions.addWidget(self.farm_all_button, 1); runtime_actions.addWidget(self.monitor_button, 1); al.addLayout(runtime_actions); ll.addWidget(accounts)
         arrange_card = self._card(); acl = QVBoxLayout(arrange_card); acl.addWidget(StrongBodyLabel("Sắp xếp cửa sổ")); row = QHBoxLayout(); row.addWidget(QLabel("Số cửa sổ / hàng")); row.addStretch(); self.windows_per_row = ComboBox(); self.windows_per_row.addItems(["2","3","4","5","6"]); self.windows_per_row.setCurrentText(str(self.config.browser.windows_per_row)); self.windows_per_row.currentTextChanged.connect(self._apply_windows_per_row); row.addWidget(self.windows_per_row); acl.addLayout(row)
-        arrange_actions = QHBoxLayout(); arrange_actions.setSpacing(_ui_px(7)); apply = PrimaryPushButton("Sắp xếp"); apply.clicked.connect(self._arrange); arrange_actions.addWidget(apply, 1); self.drag = self._icon_button(FIF.MOVE, "Hiện nút kéo"); self.drag.clicked.connect(self._toggle_drag); arrange_actions.addWidget(self.drag); self.scrollbars = self._icon_button(FIF.SCROLL, "Hiện thanh cuộn"); self.scrollbars.clicked.connect(self._toggle_scrollbars); arrange_actions.addWidget(self.scrollbars); acl.addLayout(arrange_actions)
+        arrange_actions = QHBoxLayout(); arrange_actions.setSpacing(_ui_px(7)); apply = PrimaryPushButton("Sắp xếp"); apply.clicked.connect(self._arrange); arrange_actions.addWidget(apply, 1); self.window_visibility = self._icon_button(FIF.MINIMIZE, "Thu gọn tất cả cửa sổ xuống taskbar"); self.window_visibility.clicked.connect(self._toggle_profile_windows); arrange_actions.addWidget(self.window_visibility); self.drag = self._icon_button(FIF.MOVE, "Hiện nút kéo"); self.drag.clicked.connect(self._toggle_drag); arrange_actions.addWidget(self.drag); self.scrollbars = self._icon_button(FIF.SCROLL, "Hiện thanh cuộn"); self.scrollbars.clicked.connect(self._toggle_scrollbars); arrange_actions.addWidget(self.scrollbars); acl.addLayout(arrange_actions)
         self.pin = FullRowCheckBox("Luôn nổi trên các cửa sổ khác"); self.pin.stateChanged.connect(lambda _s: self.runner.set_all_topmost(self.pin.isChecked())); acl.addWidget(self.pin); ll.addWidget(arrange_card)
         automation = self._card()
         au = QVBoxLayout(automation)
@@ -575,6 +575,24 @@ class Dashboard(QWidget):
         try: count=self.runner.arrange_windows(self._apply_windows_per_row())
         except Exception as error: self._error("Không sắp xếp được",str(error)); return
         self._append_log("Chưa có cửa sổ để sắp xếp" if not count else f"Đã sắp xếp {count} cửa sổ")
+    def _toggle_profile_windows(self) -> None:
+        try:
+            minimized, count = self.runner.toggle_all_profile_windows()
+        except Exception as error:
+            self._error("Không đổi được trạng thái cửa sổ", str(error))
+            return
+        if not count:
+            self._append_log("Chưa có cửa sổ profile đang mở")
+            return
+        self.window_visibility.setIcon(FIF.BACK_TO_WINDOW if minimized else FIF.MINIMIZE)
+        self.window_visibility.setToolTip(
+            "Mở tất cả cửa sổ từ taskbar"
+            if minimized
+            else "Thu gọn tất cả cửa sổ xuống taskbar"
+        )
+        self._append_log(
+            f"Đã {'thu gọn' if minimized else 'mở lại'} {count} cửa sổ profile"
+        )
     def _toggle_drag(self) -> None:
         self.drag_visible=not self.drag_visible; self.runner.set_all_drag_items_visible(self.drag_visible); self.drag.setToolTip("Ẩn nút kéo" if self.drag_visible else "Hiện nút kéo")
     def _toggle_scrollbars(self) -> None:
@@ -632,11 +650,26 @@ class Dashboard(QWidget):
             self._warning("Chưa chọn thiết bị", "Chọn ít nhất một profile nhận điều khiển.")
             return
         self._sync_target_profiles = selected
+        self._stop_automation_for_sync()
         self.runner.enable_sync(master, selected)
         self.master.setEnabled(False)
         self.sync.setText("Tắt đồng bộ")
         self.sync_status.setText(f"MASTER: {self.master.currentText()} → {len(selected)} thiết bị")
         self._set_sync_status_indicator(True)
+
+    def _stop_automation_for_sync(self) -> None:
+        """Switch safely from autonomous actions to manual input mirroring."""
+        stopped: list[str] = []
+        if self.farm_profiles:
+            self._stop_all_farms()
+            stopped.append("AutoFarm")
+        if getattr(self, "_monitoring_enabled", False):
+            self._stop_monitoring()
+            stopped.append("Giám sát")
+        if stopped:
+            self._append_log(
+                f"Đã dừng {' và '.join(stopped)} trước khi bật đồng bộ chuột - bàn phím"
+            )
 
     def _disable_sync_for_automation(self, task_name: str) -> None:
         """Stop input mirroring before an autonomous task can click or type."""
@@ -648,17 +681,19 @@ class Dashboard(QWidget):
             self.master.setEnabled(True)
         if hasattr(self, "sync"):
             self.sync.setText("Bật đồng bộ")
-            self.sync.setEnabled(False)
         if hasattr(self, "sync_status"):
             self.sync_status.setText("Sync đang tắt")
         if hasattr(self, "sync_status_icon"):
             self._set_sync_status_indicator(False)
+        self._refresh_sync_control()
 
     def _refresh_sync_control(self) -> None:
-        """Allow sync only while neither Farm nor monitoring is active."""
-        blocked = bool(self.farm_profiles) or bool(
-            getattr(self, "_monitoring_enabled", False)
-        )
+        """Keep manual sync selectable except while tabs are changing state."""
+        blocked = getattr(self, "_farm_launcher_phase", "launch") in {
+            "opening",
+            "quiescing",
+            "stopping",
+        }
         if hasattr(self, "sync"):
             self.sync.setEnabled(not blocked)
 
