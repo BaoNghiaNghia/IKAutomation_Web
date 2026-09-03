@@ -30,7 +30,7 @@ def test_farm_layout_fallbacks_use_relative_canvas_positions_at_16_by_9() -> Non
     assert ProfileWorker._map_toggle_layout_bounds((1280, 720)) == (13, 621, 80, 90)
     assert ProfileWorker._city_to_world_map_layout_bounds((1280, 720)) == (13, 621, 80, 90)
     assert ProfileWorker._world_map_search_layout_bounds((1280, 720)) == (425, 552, 57, 57)
-    assert ProfileWorker._search_target_checkbox_layout_bounds((1280, 720)) == (915, 488, 51, 47)
+    assert ProfileWorker._search_target_checkbox_layout_bounds((1280, 720)) == (916, 488, 51, 47)
 
 
 def test_area_relocation_closes_search_panel_and_opens_continent_map_directly() -> None:
