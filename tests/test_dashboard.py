@@ -718,65 +718,49 @@ def test_profile_launch_sends_an_open_command_even_when_memory_is_constrained(mo
     assert dashboard.farm_launcher.text == "Đang mở chậm"
 
 
-def test_profile_launch_batch_stops_at_each_five_profile_layout_mark() -> None:
+def test_profile_launch_does_not_arrange_between_batches(monkeypatch) -> None:
     dashboard = Dashboard.__new__(Dashboard)
     policy = FarmLaunchPolicy.for_total_memory(32 * 1_073_741_824)
-    dashboard._farm_launch_profiles = {f"account-{index}" for index in range(1, 11)}
-    dashboard._farm_open_states = {
-        f"account-{index}": WorkerState.READY for index in range(1, 4)
-    }
-    dashboard._farm_last_arranged_ready_count = 0
-
-    assert dashboard._next_farm_open_batch_limit(policy) == 2
-
-    dashboard._farm_open_states.update(
-        {f"account-{index}": WorkerState.READY for index in range(4, 9)}
+    dashboard.config = SimpleNamespace(
+        profiles=[SimpleNamespace(id=f"account-{index}") for index in range(1, 4)]
     )
-    dashboard._farm_last_arranged_ready_count = 5
-
-    assert dashboard._next_farm_open_batch_limit(policy) == 2
-
-
-def test_profile_launch_arranges_once_at_each_five_ready_profiles() -> None:
-    class ArrangeRunner:
-        def __init__(self) -> None:
-            self.calls: list[tuple[int, set[str]]] = []
-
-        def arrange_windows(
-            self,
-            columns: int,
-            *,
-            profile_ids: set[str],
-            layout_profile_ids: set[str],
-        ) -> int:
-            assert layout_profile_ids == dashboard._farm_launch_profiles
-            self.calls.append((columns, set(profile_ids)))
-            return len(profile_ids)
-
-    dashboard = Dashboard.__new__(Dashboard)
-    dashboard.runner = ArrangeRunner()
-    dashboard._farm_launch_profiles = {f"account-{index}" for index in range(1, 11)}
+    # FakeFarmRunner deliberately has no arrange_windows method. This test
+    # therefore also guards against restoring an intermediate arrangement.
+    dashboard.runner = FakeFarmRunner(set())
+    dashboard._farm_launcher_phase = "opening"
+    dashboard._farm_launch_profiles = {f"account-{index}" for index in range(1, 4)}
+    dashboard._farm_open_queue = deque(["account-3"])
     dashboard._farm_open_states = {
-        f"account-{index}": WorkerState.READY for index in range(1, 6)
+        "account-1": WorkerState.READY,
+        "account-2": WorkerState.READY,
     }
-    dashboard._farm_last_arranged_ready_count = 0
-    dashboard._farm_arrange_columns = 4
-    logs: list[str] = []
-    dashboard._append_log = logs.append
-
-    assert dashboard._arrange_farm_opening_milestone()
-    assert dashboard._arrange_farm_opening_milestone()
-    assert len(dashboard.runner.calls) == 1
-    assert dashboard.runner.calls[0] == (4, {f"account-{index}" for index in range(1, 6)})
-
-    dashboard._farm_open_states.update(
-        {f"account-{index}": WorkerState.READY for index in range(6, 11)}
+    dashboard._farm_open_deadline = time.monotonic() + 60.0
+    dashboard._farm_launch_policy = policy
+    dashboard._farm_batch_profiles = {"account-1", "account-2"}
+    dashboard._farm_batch_submitted = 2
+    dashboard._farm_batch_limit = 2
+    dashboard._farm_batch_resume_at = 0.0
+    dashboard._farm_next_open_at = 0.0
+    dashboard._farm_resource_pause_started = 0.0
+    dashboard._farm_resource_pause_reason = None
+    dashboard._latest_profile_cpu_percent = 0.0
+    dashboard.farm_launcher = FakeActionButton()
+    dashboard._log_lines = deque(maxlen=10)
+    dashboard.log = FakeLogWidget()
+    monkeypatch.setattr(
+        dashboard_module,
+        "get_system_memory_status",
+        lambda: SimpleNamespace(
+            available_bytes=16 * 1_073_741_824,
+            load_percent=40.0,
+        ),
     )
-    assert dashboard._arrange_farm_opening_milestone()
+    monkeypatch.setattr(dashboard_module, "get_gpu_utilization_percent", lambda: 20.0)
 
-    assert len(dashboard.runner.calls) == 2
-    assert dashboard._farm_last_arranged_ready_count == 10
-    assert "Đã mở đủ 10 profile" in logs[-1]
+    dashboard._advance_farm_opening()
+
+    assert dashboard.runner.commands == [("account-3", CommandKind.OPEN)]
+    assert dashboard._farm_batch_limit == policy.batch_size
 
 
 def test_in_app_update_quits_before_deploy_and_restarts_release(monkeypatch) -> None:

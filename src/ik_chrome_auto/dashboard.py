@@ -58,7 +58,6 @@ MONITOR_PROFILE_STAGGER_SECONDS = 0.25
 MONITOR_GROUP_PAUSE_SECONDS = 0.15
 MONITOR_CYCLE_SECONDS = 1.0
 PROFILE_UPDATE_BATCH_SIZE = 120
-FARM_PROGRESSIVE_ARRANGE_SIZE = 5
 
 
 def _ui_px(value: int | float, minimum: int = 1) -> int:
@@ -158,7 +157,6 @@ class Dashboard(QWidget):
         self._farm_batch_submitted = 0
         self._farm_batch_limit = self._farm_launch_policy.batch_size
         self._farm_batch_resume_at = 0.0
-        self._farm_last_arranged_ready_count = 0
         self._farm_arrange_columns = self.config.browser.windows_per_row
         self._farm_resource_pause_started = 0.0
         self._farm_resource_pause_reason: str | None = None
@@ -1191,7 +1189,6 @@ class Dashboard(QWidget):
             self._farm_batch_profiles.clear()
             self._farm_batch_submitted = 0
             self._farm_batch_resume_at = 0.0
-            self._farm_last_arranged_ready_count = 0
             self._farm_arrange_columns = self._apply_windows_per_row()
             self._farm_resource_pause_started = 0.0
             self._farm_resource_pause_reason = None
@@ -1384,14 +1381,12 @@ class Dashboard(QWidget):
             terminal_states = {WorkerState.READY, WorkerState.COMPLETED, WorkerState.ERROR}
             if any(self._farm_open_states.get(profile_id) not in terminal_states for profile_id in self._farm_batch_profiles):
                 return
-            if not self._arrange_farm_opening_milestone():
-                return
             if now < self._farm_batch_resume_at:
                 return
             self._append_log(f"Đợt {len(self._farm_batch_profiles)} tab đã ổn định; bắt đầu đợt tiếp theo")
             self._farm_batch_profiles.clear()
             self._farm_batch_submitted = 0
-            self._farm_batch_limit = self._next_farm_open_batch_limit(policy)
+            self._farm_batch_limit = policy.batch_size
         if now < self._farm_next_open_at:
             return
         reason: str | None = None
@@ -1451,43 +1446,6 @@ class Dashboard(QWidget):
             f"còn {len(self._farm_open_queue)} tab"
         )
 
-    def _ready_farm_opening_profiles(self) -> set[str]:
-        return {
-            profile_id
-            for profile_id, state in self._farm_open_states.items()
-            if profile_id in self._farm_launch_profiles
-            and state in {WorkerState.READY, WorkerState.COMPLETED}
-        }
-
-    def _next_farm_open_batch_limit(self, policy: FarmLaunchPolicy) -> int:
-        """Stop a launch batch exactly at the next five-window layout mark."""
-        ready_count = len(self._ready_farm_opening_profiles())
-        next_mark = self._farm_last_arranged_ready_count + FARM_PROGRESSIVE_ARRANGE_SIZE
-        remaining_to_mark = max(1, next_mark - ready_count)
-        return min(policy.batch_size, remaining_to_mark)
-
-    def _arrange_farm_opening_milestone(self) -> bool:
-        """Tile all ready windows once each five-profile milestone is reached."""
-        ready = self._ready_farm_opening_profiles()
-        next_mark = self._farm_last_arranged_ready_count + FARM_PROGRESSIVE_ARRANGE_SIZE
-        if len(ready) < next_mark:
-            return True
-        try:
-            count = self.runner.arrange_windows(
-                self._farm_arrange_columns,
-                profile_ids=ready,
-                layout_profile_ids=self._farm_launch_profiles,
-            )
-        except Exception as error:
-            self._abort_farm_opening("Không sắp xếp được tab", str(error), critical=True)
-            return False
-        self._farm_last_arranged_ready_count = len(ready)
-        self._append_log(
-            f"Đã mở đủ {len(ready)} profile; sắp xếp ngay {count} cửa sổ "
-            f"theo {self._farm_arrange_columns} cột"
-        )
-        return True
-
     def _abort_farm_opening(self, title: str, message: str, *, critical: bool = False) -> None:
         """Reset only the launch controller; already opened profiles stay recoverable."""
         self._farm_launcher_phase = "launch"
@@ -1497,7 +1455,6 @@ class Dashboard(QWidget):
         self._farm_batch_submitted = 0
         self._farm_batch_limit = self._farm_launch_policy.batch_size
         self._farm_batch_resume_at = 0.0
-        self._farm_last_arranged_ready_count = 0
         self._farm_resource_pause_started = 0.0
         self._farm_resource_pause_reason = None
         self._farm_all_running = False
@@ -1590,7 +1547,6 @@ class Dashboard(QWidget):
         self._farm_batch_profiles.clear()
         self._farm_batch_submitted = 0
         self._farm_batch_resume_at = 0.0
-        self._farm_last_arranged_ready_count = 0
         self._farm_resource_pause_started = 0.0
         self._farm_resource_pause_reason = None
         self._farm_close_queue.clear()
