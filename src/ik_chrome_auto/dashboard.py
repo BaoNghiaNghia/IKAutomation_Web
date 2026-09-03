@@ -14,7 +14,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QColor, QCursor, QGuiApplication, QIcon, QPixmap
-from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
 from qfluentwidgets import CardWidget, CheckBox, ComboBox, FluentIcon as FIF, LineEdit, PasswordLineEdit, PrimaryPushButton, PrimaryToolButton, PushButton, StrongBodyLabel, SubtitleLabel, ToolButton
 
 from ik_chrome_auto.build_info import release_build_label
@@ -232,7 +232,8 @@ class Dashboard(QWidget):
             head.addWidget(build_time)
         secure = QLabel("●  Local & secure"); self._secure_badge = secure; secure.setStyleSheet(f"background:#d9f7e8;color:#087443;border-radius:{_ui_px(12)}px;padding:{_ui_px(5)}px {_ui_px(10)}px;font-weight:600;"); head.addWidget(secure); root.addLayout(head)
         body = QHBoxLayout(); root.addLayout(body, 1)
-        left = QWidget(); self._left_sidebar = left; left.setMinimumWidth(self._responsive_sidebar_min); left.setMaximumWidth(self._responsive_sidebar_max); ll = QVBoxLayout(left); self._left_layout = ll; ll.setContentsMargins(0,0,0,0); ll.setSpacing(self._responsive_spacing); body.addWidget(left)
+        left = QWidget(); self._left_sidebar = left; left.setMinimumWidth(self._responsive_sidebar_min); left.setMaximumWidth(self._responsive_sidebar_max); ll = QVBoxLayout(left); self._left_layout = ll; ll.setContentsMargins(0,0,0,0); ll.setSpacing(self._responsive_spacing)
+        self._left_scroll = QScrollArea(); self._left_scroll.setWidgetResizable(True); self._left_scroll.setFrameShape(QFrame.Shape.NoFrame); self._left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff); self._left_scroll.setWidget(left); self._left_scroll.setMinimumWidth(self._responsive_sidebar_min); self._left_scroll.setMaximumWidth(self._responsive_sidebar_max + _ui_px(10)); body.addWidget(self._left_scroll)
         overview = self._card(); overview.setMaximumHeight(_ui_px(108)); ol = QGridLayout(overview); ol.setContentsMargins(_ui_px(12),_ui_px(10),_ui_px(12),_ui_px(10)); ol.setHorizontalSpacing(_ui_px(12)); ol.setVerticalSpacing(_ui_px(6))
         self.total, self.opened, self.ram, self.cpu = QLabel("0"), QLabel("0"), QLabel("0 MB"), QLabel("0.0%")
         for index, (label, value) in enumerate((("Tổng profile",self.total),("Đang mở",self.opened),("RAM Chrome",self.ram),("CPU Chrome",self.cpu))):
@@ -280,6 +281,11 @@ class Dashboard(QWidget):
         self.sync_section.hide()
         au.addWidget(self.sync_section)
         ll.addWidget(automation)
+        # Keep synchronization visible above the arrangement controls. On a
+        # short dashboard the old fixed sidebar clipped this final card and
+        # made the feature appear to have disappeared.
+        ll.removeWidget(automation)
+        ll.insertWidget(2, automation)
         ll.addStretch()
         right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(_ui_px(8)); body.addWidget(right,1)
         progress = self._card(); pl = QVBoxLayout(progress); ph = QHBoxLayout(); ph.addWidget(StrongBodyLabel("Tiến trình profile")); ph.addStretch(); self.open_badge = QLabel("0 đang mở"); self.open_badge.setStyleSheet(f"background:#e2edff;color:#2767bd;border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;"); ph.addWidget(self.open_badge); pl.addLayout(ph); self.table_layout = QGridLayout(); self.table_layout.setSpacing(_ui_px(8)); self.table_layout.setColumnStretch(0, 1); self.table_layout.setColumnStretch(1, 1); content=QWidget(); content.setLayout(self.table_layout); self.scroll=QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setWidget(content); pl.addWidget(self.scroll,1); rl.addWidget(progress,1)
@@ -359,6 +365,9 @@ class Dashboard(QWidget):
         if hasattr(self, "_left_sidebar"):
             self._left_sidebar.setMinimumWidth(sidebar_min)
             self._left_sidebar.setMaximumWidth(sidebar_max)
+            if hasattr(self, "_left_scroll"):
+                self._left_scroll.setMinimumWidth(sidebar_min)
+                self._left_scroll.setMaximumWidth(sidebar_max + _ui_px(10))
             self._apply_responsive_style()
 
     def _apply_responsive_style(self) -> None:

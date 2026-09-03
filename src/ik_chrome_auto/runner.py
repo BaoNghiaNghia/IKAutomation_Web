@@ -222,6 +222,7 @@ class ProfileWorker:
         self.session: ChromeProfileSession | None = None
         self._thread_lock = threading.Lock()
         self._sync_source_enabled = False
+        self._sync_rearm_at = 0.0
         self._inspector_enabled = False
         self._drag_item_visible = drag_item_visible
         self._scrollbars_visible = scrollbars_visible
@@ -655,7 +656,16 @@ class ProfileWorker:
                 if command.kind == CommandKind.SET_SYNC_SOURCE:
                     self._sync_source_enabled = bool(command.payload.get("enabled", False))
                     if self.session is not None:
-                        self.session.set_sync_source(self._sync_source_enabled)
+                        armed_frames = self.session.set_sync_source(self._sync_source_enabled)
+                        self._sync_rearm_at = time.monotonic() + 2.0
+                        self.event_log.write(
+                            "sync_source_armed",
+                            {
+                                "profile_id": self.profile.id,
+                                "enabled": self._sync_source_enabled,
+                                "armed_frame_count": int(armed_frames or 0),
+                            },
+                        )
                     continue
                 if command.kind == CommandKind.SET_INSPECTOR:
                     self._inspector_enabled = bool(command.payload.get("enabled", False))
@@ -782,6 +792,21 @@ class ProfileWorker:
         if self.session is None:
             return
         if self._sync_source_enabled:
+            now = time.monotonic()
+            if now >= self._sync_rearm_at:
+                try:
+                    armed_frames = self.session.sync_capture_frame_count()
+                    if armed_frames <= 0:
+                        armed_frames = self.session.set_sync_source(True)
+                        self.event_log.write(
+                            "sync_source_rearmed",
+                            {
+                                "profile_id": self.profile.id,
+                                "armed_frame_count": int(armed_frames or 0),
+                            },
+                        )
+                finally:
+                    self._sync_rearm_at = now + 2.0
             for event in self.session.poll_sync_events():
                 self.on_input(self.profile.id, event)
         if self._inspector_enabled:

@@ -272,6 +272,55 @@ def test_synced_ctrl_shortcut_does_not_inject_printable_text() -> None:
     assert "text" not in params
 
 
+def test_sync_probe_is_rearmed_for_a_retained_browser_frame() -> None:
+    class RetainedFrame:
+        url = "https://ik.playfun.vn/play-game"
+
+        def __init__(self) -> None:
+            self.arguments: list[list[bool]] = []
+
+        def evaluate(self, _script: str, argument: list[bool]) -> bool:
+            self.arguments.append(argument)
+            return True
+
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    frame = RetainedFrame()
+    session._page = SimpleNamespace(frames=[frame], is_closed=lambda: False)
+    session._sync_source = True
+    session._inspector_enabled = False
+    session._drag_item_visible = False
+    session._scrollbars_visible = False
+    session._configured_frames = {}
+
+    armed = session._repair_and_count_sync_frames()
+
+    assert armed == 1
+    assert frame.arguments == [[True, False]]
+    assert id(frame) in session._configured_frames
+
+
+def test_synced_pointer_uses_largest_target_canvas_not_source_canvas_index() -> None:
+    class Locator:
+        def __init__(self) -> None:
+            self.boxes = [
+                {"x": 4.0, "y": 5.0, "width": 32.0, "height": 32.0},
+                {"x": 0.0, "y": 0.0, "width": 1280.0, "height": 720.0},
+            ]
+
+        def count(self) -> int:
+            return len(self.boxes)
+
+        def nth(self, index: int) -> Any:
+            return SimpleNamespace(bounding_box=lambda: self.boxes[index])
+
+    frame = SimpleNamespace(locator=lambda _selector: Locator())
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+
+    box = session._canvas_box(frame, 0)
+
+    assert box == {"x": 0.0, "y": 0.0, "width": 1280.0, "height": 720.0}
+
+
 def test_synced_canvas_event_selects_largest_matching_game_frame() -> None:
     class Locator:
         def __init__(self, boxes: list[dict[str, float]]) -> None:

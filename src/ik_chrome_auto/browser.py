@@ -1185,9 +1185,69 @@ class ChromeProfileSession:
             timeout=self.config.browser.startup_timeout_ms,
         )
 
-    def set_sync_source(self, enabled: bool) -> None:
+    def set_sync_source(self, enabled: bool) -> int:
         self._sync_source = bool(enabled)
         self._configure_interaction_frames(force=True)
+        return self._repair_and_count_sync_frames() if self._sync_source else 0
+
+    def _repair_and_count_sync_frames(self) -> int:
+        """Re-arm input capture in retained/reconnected Chrome documents."""
+        armed = 0
+        for frame in self.page.frames:
+            try:
+                ready = frame.evaluate(
+                    """([syncSource, inspectEnabled]) => {
+                        if (!Array.isArray(window.__IK_SYNC_EVENTS)) window.__IK_SYNC_EVENTS = [];
+                        if (!Array.isArray(window.__IK_COORDINATE_EVENTS)) window.__IK_COORDINATE_EVENTS = [];
+                        // Profiles can survive a tool update. Repair the mode setter
+                        // when an older in-page probe left only its event listeners.
+                        if (typeof window.__IK_SET_INTERACTION_MODES !== 'function') {
+                            window.__IK_SET_INTERACTION_MODES = (sync, inspect) => {
+                                window.__IK_SYNC_SOURCE = Boolean(sync);
+                                window.__IK_INSPECT_ENABLED = Boolean(inspect);
+                            };
+                        }
+                        window.__IK_SET_INTERACTION_MODES(syncSource, inspectEnabled);
+                        return Boolean(
+                            window.__IK_INTERACTION_PROBE_INSTALLED &&
+                            Array.isArray(window.__IK_SYNC_EVENTS) &&
+                            typeof window.__IK_SET_INTERACTION_MODES === 'function' &&
+                            window.__IK_SYNC_SOURCE === Boolean(syncSource)
+                        );
+                    }""",
+                    [self._sync_source, self._inspector_enabled],
+                )
+                if ready:
+                    armed += 1
+                    # A repaired frame must remain in the normal configuration
+                    # cache; otherwise every 40 ms poll would rewrite its state.
+                    self._configured_frames[id(frame)] = (
+                        f"{frame.url}|{self._sync_source}|{self._inspector_enabled}|"
+                        f"{self._drag_item_visible}|{self._scrollbars_visible}"
+                    )
+            except Exception:
+                self._configured_frames.pop(id(frame), None)
+        return armed
+
+    def sync_capture_frame_count(self) -> int:
+        """Return the number of frames whose input probe is actively armed."""
+        if not self._sync_source:
+            return 0
+        armed = 0
+        for frame in self.page.frames:
+            try:
+                if frame.evaluate(
+                    """() => Boolean(
+                        window.__IK_INTERACTION_PROBE_INSTALLED &&
+                        Array.isArray(window.__IK_SYNC_EVENTS) &&
+                        typeof window.__IK_SET_INTERACTION_MODES === 'function' &&
+                        window.__IK_SYNC_SOURCE === true
+                    )"""
+                ):
+                    armed += 1
+            except Exception:
+                continue
+        return armed
 
     def set_inspector(self, enabled: bool) -> None:
         self._inspector_enabled = bool(enabled)
@@ -1466,16 +1526,15 @@ class ChromeProfileSession:
 
     def _canvas_box(self, frame: Frame, index: int) -> dict[str, float]:
         canvases = frame.locator("canvas")
-        if 0 <= index < canvases.count():
-            box = canvases.nth(index).bounding_box()
-            if box and box["width"] > 0 and box["height"] > 0:
-                return box
         boxes: list[dict[str, float]] = []
         for candidate_index in range(canvases.count()):
             box = canvases.nth(candidate_index).bounding_box()
             if box and box["width"] > 0 and box["height"] > 0:
                 boxes.append(box)
         if boxes:
+            # Canvas order is not stable across accounts, Chrome versions, or
+            # machines. The source index can therefore point at a tiny overlay
+            # on a follower. The game is consistently the largest canvas.
             return max(boxes, key=lambda item: item["width"] * item["height"])
         return self._frame_box(frame)
 
