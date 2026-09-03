@@ -268,6 +268,8 @@ class ProfileWorker:
         self._farm_area_selector = ResourceAreaPointSelector()
         self._farm_area_epoch = 0
         self._farm_run_id = ""
+        self._farm_area_relocation_pending: tuple[str, int] | None = None
+        self._farm_area_pending_selection: Any | None = None
         self._farm_recovery_attempts = 0
         self._mail_monitor: BrowserMailMonitor | None = None
         # Stopping monitoring can also cover a MONITOR_MAIL command already
@@ -622,6 +624,8 @@ class ProfileWorker:
                     self._farm_area_selector = ResourceAreaPointSelector()
                     self._farm_area_epoch = 0
                     self._farm_run_id = f"{self.profile.id}-{time.monotonic_ns()}"
+                    self._farm_area_relocation_pending = None
+                    self._farm_area_pending_selection = None
                     self._farm_recovery_attempts = 0
                     self._log_farm("started", {"resource_order": self._farm.resource_order})
                     self._publish(
@@ -1100,6 +1104,24 @@ class ProfileWorker:
                     "ready_teams": ready_teams,
                 },
             )
+            # A relocation that has already reached a verified City owns the
+            # next action. Never let the generic preflight see that City and
+            # click its normal City→World Map toggle while the intended next
+            # control is the dedicated Continent Map icon.
+            pending_relocation = self._farm_area_relocation_pending
+            if pending_relocation is not None:
+                pending_resource, pending_level = pending_relocation
+                relocation = self._try_resource_area_relocation(
+                    pending_resource,
+                    pending_level,
+                )
+                self._apply_resource_area_relocation_result(
+                    relocation,
+                    pending_resource,
+                    pending_level,
+                    reason="resume_verified_city",
+                )
+                return
             # Ported from ADB ResourceSearchExecutionService: probe the short
             # toast window after each fresh Search tap. A verified negative
             # toast advances the already-fixed level/resource plan; it is not
@@ -2204,7 +2226,27 @@ class ProfileWorker:
             },
         )
         relocation = self._try_resource_area_relocation(resource, level)
+        return self._apply_resource_area_relocation_result(
+            relocation,
+            resource,
+            level,
+            reason=reason,
+        )
+
+    def _apply_resource_area_relocation_result(
+        self,
+        relocation: str,
+        resource: str,
+        level: int,
+        *,
+        reason: str,
+    ) -> bool:
+        """Keep City relocation separate from the normal map-toggle cycle."""
+        if self._farm is None:
+            return False
         if relocation == "moved":
+            self._farm_area_relocation_pending = None
+            self._farm_area_pending_selection = None
             self._farm_resource_selected_at = 0.0
             self._farm_resource_selected_by_layout = False
             self._farm_detected_resource_level = None
@@ -2221,6 +2263,20 @@ class ProfileWorker:
             )
             self._farm_next_at = time.monotonic() + 1.0
             return True
+        if relocation == "city_waiting":
+            self._farm_area_relocation_pending = (resource, level)
+            self._farm_next_at = time.monotonic() + 1.5
+            self._log_farm(
+                "resource_area_city_map_waiting",
+                {"reason": reason, "level": level, "resource": resource},
+            )
+            self._publish(
+                WorkerState.RUNNING,
+                "Auto Farm: đã về City; đang chờ xác minh icon Map để mở Continent Map",
+            )
+            return True
+        self._farm_area_relocation_pending = None
+        self._farm_area_pending_selection = None
         if relocation == "unavailable":
             # Do not continue from a half-verified map/input UI. A new
             # preflight brings the game back to a known state before any next
@@ -2528,28 +2584,29 @@ class ProfileWorker:
 
         # The web game does not open Continent Map from World Map directly.
         # First return to City using the verified bottom-left castle control,
-        # then use City's dedicated map icon. Some skins also expose a blue
-        # Back control, retained here only as a verified fallback.
-        return_to_city = detected.evidence_for(FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON)
-        return_control = "world_map_castle"
-        if not return_to_city.actionable:
-            return_to_city = detected.evidence_for(FarmTemplateId.BROWSER_WORLD_MAP_BACK_BUTTON)
-            return_control = "world_map_back"
-        if detected.state != DetectedGameState.WORLD_MAP or not return_to_city.actionable:
+        # then use City's dedicated map icon. A resumed relocation may already
+        # be on City; in that case never touch the normal map toggle again.
+        if detected.state not in {
+            DetectedGameState.WORLD_MAP,
+            DetectedGameState.CITY,
+        }:
             self._log_farm("resource_area_navigation_blocked", {
-                "reason": "world_map_return_button_unavailable",
+                "reason": "world_map_or_city_unverified",
             })
             return "unavailable"
 
         # Do not consume a point merely because the Search overlay could not
         # be closed or World Map controls were not verifiable.
-        selection = self._farm_area_selector.next(
-            run_id=self._farm_run_id,
-            profile_id=self.profile.id,
-            resource=resource,
-            level=level,
-            area_epoch=self._farm_area_epoch,
-        )
+        selection = getattr(self, "_farm_area_pending_selection", None)
+        if selection is None:
+            selection = self._farm_area_selector.next(
+                run_id=self._farm_run_id,
+                profile_id=self.profile.id,
+                resource=resource,
+                level=level,
+                area_epoch=self._farm_area_epoch,
+            )
+            self._farm_area_pending_selection = selection
         if selection.exhausted:
             self._log_farm("resource_area_exhausted", {
                 "resource": resource, "level": level, "max_attempts": selection.max_attempts,
@@ -2558,31 +2615,63 @@ class ProfileWorker:
             return "exhausted"
         point = selection.point
         assert point is not None
-        input_method = self._tap_farm_game_control(return_to_city.bounds, size)  # type: ignore[arg-type]
-        self._log_farm(
-            "tap_world_map_return_to_city",
-            {
-                "bounds": return_to_city.bounds,
-                "point": point,
-                "input": input_method,
-                "control": return_control,
-            },
-        )
-        city_result = self._wait_for_farm_detection(
-            lambda frame: (
-                frame.state == DetectedGameState.CITY
-                and frame.evidence_for(FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON).actionable
-            ),
-            timeout_seconds=FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS,
-        )
+        if detected.state == DetectedGameState.WORLD_MAP:
+            # Some skins also expose a blue Back control, retained here only
+            # as a verified fallback.
+            return_to_city = detected.evidence_for(FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON)
+            return_control = "world_map_castle"
+            if not return_to_city.actionable:
+                return_to_city = detected.evidence_for(FarmTemplateId.BROWSER_WORLD_MAP_BACK_BUTTON)
+                return_control = "world_map_back"
+            if not return_to_city.actionable:
+                self._log_farm("resource_area_navigation_blocked", {
+                    "reason": "world_map_return_button_unavailable",
+                })
+                return "unavailable"
+            input_method = self._tap_farm_game_control(return_to_city.bounds, size)  # type: ignore[arg-type]
+            self._log_farm(
+                "tap_world_map_return_to_city",
+                {
+                    "bounds": return_to_city.bounds,
+                    "point": point,
+                    "input": input_method,
+                    "control": return_control,
+                },
+            )
+            city_result = self._wait_for_farm_detection(
+                lambda frame: frame.state == DetectedGameState.CITY,
+                timeout_seconds=FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS,
+            )
+        else:
+            city_result = (detected, _surface, size)
         if city_result is None:
             self._log_farm("resource_area_navigation_blocked", {
-                "reason": "city_or_city_map_button_unverified", "point": point,
+                "reason": "city_unverified", "point": point,
                 "attempt": selection.attempt,
             })
             return "unavailable"
         city, _surface, city_size = city_result
         city_map_button = city.evidence_for(FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON)
+        if not city_map_button.actionable:
+            city_map_result = self._wait_for_farm_detection(
+                lambda frame: (
+                    frame.state == DetectedGameState.CITY
+                    and frame.evidence_for(
+                        FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON
+                    ).actionable
+                ),
+                timeout_seconds=8.0,
+            )
+            if city_map_result is None:
+                self._log_farm("resource_area_navigation_blocked", {
+                    "reason": "city_map_button_unverified", "point": point,
+                    "attempt": selection.attempt,
+                })
+                return "city_waiting"
+            city, _surface, city_size = city_map_result
+            city_map_button = city.evidence_for(
+                FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON
+            )
         input_method = self._tap_farm_game_control(city_map_button.bounds, city_size)  # type: ignore[arg-type]
         self._log_farm(
             "tap_city_continent_map",

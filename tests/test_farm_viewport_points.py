@@ -104,6 +104,87 @@ def test_area_relocation_closes_search_panel_and_uses_world_map_castle() -> None
     )
 
 
+def test_area_relocation_resumed_on_city_clicks_only_continent_map() -> None:
+    city_map = TemplateEvidence(
+        FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON,
+        True,
+        1.0,
+        (202, 550, 50, 48),
+    )
+    continent_pin = TemplateEvidence(
+        FarmTemplateId.CONTINENT_MAP_PIN_BUTTON,
+        True,
+        1.0,
+        (690, 20, 40, 40),
+    )
+
+    class Session:
+        def __init__(self) -> None:
+            self.frames = [
+                GameDetectionResult(DetectedGameState.CITY, (city_map,)),
+                GameDetectionResult(DetectedGameState.CONTINENT_MAP, (continent_pin,)),
+            ]
+
+        def detect_farm_state(self):
+            return self.frames.pop(0), {}, (1280, 720)
+
+        def read_focused_numeric_farm_input(self, _bounds, _size):
+            return None
+
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker.session = Session()
+    worker.profile = SimpleNamespace(id="account-2")
+    worker.stop_event = threading.Event()
+    worker._farm = FarmWorkflow()
+    worker._automation_renderer_locked = True
+    worker._farm_run_id = "run"
+    worker._farm_area_epoch = 0
+    worker._farm_area_selector = SimpleNamespace(
+        next=lambda **_kwargs: SimpleNamespace(
+            point=(650, 954),
+            exhausted=False,
+            attempt=1,
+            max_attempts=3,
+            city_levels=(7, 8),
+        )
+    )
+    logs = []
+    taps = []
+    worker._log_farm = lambda event, payload: logs.append((event, payload))
+    worker._tap_farm_game_control = lambda bounds, size: (
+        taps.append((bounds, size)) or "touch_canvas_template"
+    )
+
+    result = worker._try_resource_area_relocation("iron", 6)
+
+    assert result == "unavailable"
+    assert taps == [((202, 550, 50, 48), (1280, 720))]
+    assert not any(event == "tap_world_map_return_to_city" for event, _payload in logs)
+    assert any(event == "tap_city_continent_map" for event, _payload in logs)
+
+
+def test_missing_city_map_icon_stays_in_relocation_instead_of_preflight() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker._farm = FarmWorkflow()
+    worker._farm_area_relocation_pending = None
+    worker._farm_next_at = 0.0
+    worker._log_farm = lambda *_args: None
+    worker._publish = lambda *_args: None
+    worker._retry_farm_or_stop = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("City relocation must not reset to preflight")
+    )
+
+    handled = worker._apply_resource_area_relocation_result(
+        "city_waiting",
+        "iron",
+        7,
+        reason="search_button_remained_visible",
+    )
+
+    assert handled is True
+    assert worker._farm_area_relocation_pending == ("iron", 7)
+
+
 def test_new_farm_cycle_preserves_the_running_sessions_coordinate_bag() -> None:
     worker = ProfileWorker.__new__(ProfileWorker)
     selector = object()

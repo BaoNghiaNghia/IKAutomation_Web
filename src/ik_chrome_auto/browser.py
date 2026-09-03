@@ -820,12 +820,37 @@ class ChromeProfileSession:
         viewport = page.viewport_size or page.evaluate(
             "() => ({width: window.innerWidth, height: window.innerHeight})"
         )
-        return {
+        box = {
             "x": 0.0,
             "y": 0.0,
             "width": max(1.0, float(viewport["width"])),
             "height": max(1.0, float(viewport["height"])),
         }
+        # Some retained GTArcade profiles keep their WebGL iframe in the
+        # compositor after Chromium has detached it from Playwright's frame
+        # tree.  The host page then exposes only its default 8 px body gutter:
+        # a 1280x720 game is captured as 1296x736.  Treating that whole image
+        # as the game scales every template and click against the border,
+        # leaving a clearly visible City at ``Unknown`` forever.  Infer the
+        # centred game rectangle only when removing the conventional gutter
+        # makes the surface materially closer to the game's authored 16:9
+        # aspect ratio. Full-viewport and compact non-16:9 portals are left
+        # untouched.
+        gutter = 8.0
+        inner_width = box["width"] - 2 * gutter
+        inner_height = box["height"] - 2 * gutter
+        if inner_width > 0 and inner_height > 0:
+            reference_aspect = 16 / 9
+            outer_error = abs(box["width"] / box["height"] - reference_aspect)
+            inner_error = abs(inner_width / inner_height - reference_aspect)
+            if inner_error + 0.002 < outer_error:
+                return {
+                    "x": gutter,
+                    "y": gutter,
+                    "width": inner_width,
+                    "height": inner_height,
+                }
+        return box
 
     def _canvas_or_viewport(self) -> tuple[Any | None, dict[str, float]]:
         frame = self.find_frame()
@@ -884,7 +909,18 @@ class ChromeProfileSession:
                     "fromSurface": True,
                     "captureBeyondViewport": False,
                 }
-                if canvas is not None:
+                clips_composited_gutter = False
+                if canvas is None:
+                    viewport = page.viewport_size or page.evaluate(
+                        "() => ({width: window.innerWidth, height: window.innerHeight})"
+                    )
+                    clips_composited_gutter = (
+                        float(box["x"]) != 0.0
+                        or float(box["y"]) != 0.0
+                        or abs(float(box["width"]) - float(viewport["width"])) > 0.5
+                        or abs(float(box["height"]) - float(viewport["height"])) > 0.5
+                    )
+                if canvas is not None or clips_composited_gutter:
                     params["clip"] = {
                             "x": float(box["x"]),
                             "y": float(box["y"]),

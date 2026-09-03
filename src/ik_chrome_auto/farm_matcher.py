@@ -166,8 +166,13 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
         "browser_city_continent_map_button.png",
         threshold=0.80,
         region="lower_left",
-        reference_width=850,
-        reference_height=437,
+        # Current City HUD capture supplied from the live 1280x720 profile.
+        # The old 28x25 crop came from an 850x437 frame and scaled into a
+        # different aspect, so a verified City could never authorise opening
+        # Continent Map.
+        reference_width=1280,
+        reference_height=720,
+        alternatives=("browser_city_continent_map_button_legacy_1280.png",),
         scale_variants=(0.94, 0.97, 1.0, 1.03, 1.06),
     ),
     FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON: TemplateSpec(

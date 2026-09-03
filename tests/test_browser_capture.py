@@ -532,6 +532,49 @@ def test_cdp_capture_uses_composited_viewport_when_canvas_is_detached() -> None:
     assert returned_box == {"x": 0.0, "y": 0.0, "width": 1280.0, "height": 720.0}
 
 
+def test_cdp_capture_removes_composited_body_gutter_when_canvas_is_detached() -> None:
+    session, _canvas, context, page = make_session()
+    page.viewport_size = {"width": 1296, "height": 736}
+    session._largest_canvas = lambda _frame: (_ for _ in ()).throw(
+        RuntimeError("Không tìm thấy canvas game đang hiển thị")
+    )
+
+    png, returned_box = session.capture_game_surface_png()
+
+    method, params = context.sessions[0].calls[0]
+    assert method == "Page.captureScreenshot"
+    assert params["clip"] == {
+        "x": 8.0,
+        "y": 8.0,
+        "width": 1280.0,
+        "height": 720.0,
+        "scale": 1,
+    }
+    assert png == ASSET_PNG
+    assert returned_box == {"x": 8.0, "y": 8.0, "width": 1280.0, "height": 720.0}
+
+
+def test_canvas_ratio_click_uses_inferred_compositor_game_gutter() -> None:
+    session, _canvas, context, page = make_session()
+    page.viewport_size = {"width": 1296, "height": 736}
+    session._largest_canvas = lambda _frame: (_ for _ in ()).throw(
+        RuntimeError("Không tìm thấy canvas game đang hiển thị")
+    )
+
+    session.click_game_surface_ratio(0.25, 0.75)
+
+    assert context.sessions[0].calls == [
+        (
+            "Input.dispatchMouseEvent",
+            {"type": "mousePressed", "x": 328.0, "y": 548.0, "button": "left", "clickCount": 1},
+        ),
+        (
+            "Input.dispatchMouseEvent",
+            {"type": "mouseReleased", "x": 328.0, "y": 548.0, "button": "left", "clickCount": 1},
+        ),
+    ]
+
+
 def test_canvas_ratio_click_uses_compositor_when_canvas_is_detached() -> None:
     session, _canvas, context, page = make_session()
     page.viewport_size = {"width": 1280, "height": 720}
