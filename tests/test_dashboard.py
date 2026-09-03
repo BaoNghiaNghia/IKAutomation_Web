@@ -11,9 +11,10 @@ from ik_chrome_auto.dashboard import (
     TAB_CLOSE_INTERVAL_SECONDS,
     Dashboard,
     FarmProfileDialog,
+    ProfileRow,
 )
 from ik_chrome_auto.farm_launch_policy import FarmLaunchPolicy
-from ik_chrome_auto.models import CommandKind, WorkerSnapshot
+from ik_chrome_auto.models import CommandKind, WorkerSnapshot, WorkerState
 from ik_chrome_auto.mail_monitor import (
     COMBAT_MAIL_OTHER,
     MAIL_BASELINE,
@@ -150,6 +151,77 @@ def test_dashboard_log_keeps_only_ten_latest_rows() -> None:
         dashboard._append_log(f"row-{index}")
 
     assert dashboard.log.value.splitlines() == [f"row-{index}" for index in range(5, 15)]
+
+
+def test_hidden_dashboard_log_retains_history_without_rendering() -> None:
+    class HiddenLog:
+        rendered = 0
+
+        @staticmethod
+        def isVisible() -> bool:
+            return False
+
+        def setPlainText(self, _value: str) -> None:
+            self.rendered += 1
+
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard._log_lines = deque(maxlen=10)
+    dashboard.log = HiddenLog()
+
+    dashboard._append_log("profile update")
+
+    assert list(dashboard._log_lines) == ["profile update"]
+    assert dashboard.log.rendered == 0
+
+
+def test_repeated_profile_snapshot_does_not_repaint_unchanged_widgets(monkeypatch) -> None:
+    class CountingLabel:
+        def __init__(self) -> None:
+            self.text_calls = 0
+            self.style_calls = 0
+
+        def setText(self, _value: str) -> None:
+            self.text_calls += 1
+
+        def setStyleSheet(self, _value: str) -> None:
+            self.style_calls += 1
+
+    dashboard = Dashboard.__new__(Dashboard)
+    status, roster, resource, badge = (CountingLabel() for _ in range(4))
+    card = object()
+    row = ProfileRow(status, roster, resource, badge, card)
+    card_state_calls: list[WorkerState] = []
+    roster_calls: list[tuple[tuple[int, str], ...]] = []
+    monkeypatch.setattr(
+        Dashboard,
+        "_set_profile_card_state",
+        staticmethod(lambda _card, state: card_state_calls.append(state)),
+    )
+    monkeypatch.setattr(
+        Dashboard,
+        "_set_roster_tooltip",
+        staticmethod(lambda _card, roster_value: roster_calls.append(roster_value)),
+    )
+    monkeypatch.setattr(
+        Dashboard,
+        "_set_roster_dots",
+        staticmethod(lambda _label, _roster: None),
+    )
+    snapshot = WorkerSnapshot(
+        "account-1",
+        WorkerState.RUNNING,
+        "Đang farm",
+        farm_roster=((1, "ready"), (2, "busy")),
+    )
+
+    dashboard._apply_profile_snapshot(row, snapshot)
+    dashboard._apply_profile_snapshot(row, snapshot)
+
+    assert status.text_calls == 1
+    assert badge.text_calls == 1
+    assert badge.style_calls == 1
+    assert card_state_calls == [WorkerState.RUNNING]
+    assert roster_calls == [snapshot.farm_roster]
 
 
 def test_roster_dots_show_each_team_with_its_current_status_color() -> None:
@@ -589,6 +661,60 @@ def test_profile_launch_sends_an_open_command_even_when_memory_is_constrained(mo
     assert dashboard.runner.commands == [("account-1", CommandKind.OPEN)]
     assert dashboard._farm_batch_limit == 1
     assert dashboard.farm_launcher.text == "Đang mở chậm"
+
+
+def test_profile_launch_batch_stops_at_each_five_profile_layout_mark() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    policy = FarmLaunchPolicy.for_total_memory(32 * 1_073_741_824)
+    dashboard._farm_launch_profiles = {f"account-{index}" for index in range(1, 11)}
+    dashboard._farm_open_states = {
+        f"account-{index}": WorkerState.READY for index in range(1, 4)
+    }
+    dashboard._farm_last_arranged_ready_count = 0
+
+    assert dashboard._next_farm_open_batch_limit(policy) == 2
+
+    dashboard._farm_open_states.update(
+        {f"account-{index}": WorkerState.READY for index in range(4, 9)}
+    )
+    dashboard._farm_last_arranged_ready_count = 5
+
+    assert dashboard._next_farm_open_batch_limit(policy) == 2
+
+
+def test_profile_launch_arranges_once_at_each_five_ready_profiles() -> None:
+    class ArrangeRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, set[str]]] = []
+
+        def arrange_windows(self, columns: int, *, profile_ids: set[str]) -> int:
+            self.calls.append((columns, set(profile_ids)))
+            return len(profile_ids)
+
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.runner = ArrangeRunner()
+    dashboard._farm_launch_profiles = {f"account-{index}" for index in range(1, 11)}
+    dashboard._farm_open_states = {
+        f"account-{index}": WorkerState.READY for index in range(1, 6)
+    }
+    dashboard._farm_last_arranged_ready_count = 0
+    dashboard._farm_arrange_columns = 4
+    logs: list[str] = []
+    dashboard._append_log = logs.append
+
+    assert dashboard._arrange_farm_opening_milestone()
+    assert dashboard._arrange_farm_opening_milestone()
+    assert len(dashboard.runner.calls) == 1
+    assert dashboard.runner.calls[0] == (4, {f"account-{index}" for index in range(1, 6)})
+
+    dashboard._farm_open_states.update(
+        {f"account-{index}": WorkerState.READY for index in range(6, 11)}
+    )
+    assert dashboard._arrange_farm_opening_milestone()
+
+    assert len(dashboard.runner.calls) == 2
+    assert dashboard._farm_last_arranged_ready_count == 10
+    assert "Đã mở đủ 10 profile" in logs[-1]
 
 
 def test_in_app_update_quits_before_deploy_and_restarts_release(monkeypatch) -> None:

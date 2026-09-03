@@ -57,6 +57,8 @@ MONITOR_GROUP_SIZE = 5
 MONITOR_PROFILE_STAGGER_SECONDS = 0.25
 MONITOR_GROUP_PAUSE_SECONDS = 0.15
 MONITOR_CYCLE_SECONDS = 1.0
+PROFILE_UPDATE_BATCH_SIZE = 120
+FARM_PROGRESSIVE_ARRANGE_SIZE = 5
 
 
 def _ui_px(value: int | float, minimum: int = 1) -> int:
@@ -116,6 +118,10 @@ class ProfileRow:
     resource: QLabel
     badge: QLabel
     card: CardWidget
+    last_message: str = ""
+    last_state: WorkerState | None = None
+    last_roster: tuple[tuple[int, str], ...] = ()
+    last_resource: str = ""
 
 
 class Dashboard(QWidget):
@@ -134,6 +140,8 @@ class Dashboard(QWidget):
         self._telegram_results: queue.Queue[tuple[bool, str]] = queue.Queue()
         self._update_check_results: queue.Queue[GitUpdateStatus | Exception] = queue.Queue()
         self._resource_alert_samples: queue.Queue[tuple[float, float | None]] = queue.Queue()
+        self._resource_overview_results: queue.Queue[object] = queue.Queue(maxsize=1)
+        self._resource_sample_in_flight = False
         self._telegram_notifier: TelegramNotifier | None = None
         self._telegram_event_at: dict[str, float] = {}
         self._resource_high_counts = {"ram": 0, "gpu": 0}
@@ -150,6 +158,8 @@ class Dashboard(QWidget):
         self._farm_batch_submitted = 0
         self._farm_batch_limit = self._farm_launch_policy.batch_size
         self._farm_batch_resume_at = 0.0
+        self._farm_last_arranged_ready_count = 0
+        self._farm_arrange_columns = self.config.browser.windows_per_row
         self._farm_resource_pause_started = 0.0
         self._farm_resource_pause_reason: str | None = None
         self._latest_profile_cpu_percent = 0.0
@@ -197,9 +207,9 @@ class Dashboard(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll)
         # Monitoring results refill the three capture slots through this
-        # timer. 100 ms keeps a 45-profile cropped scan near the two-second
-        # target without increasing the number of concurrent GPU captures.
-        self.timer.start(100)
+        # A 150 ms UI pulse is ample for state transitions and leaves more
+        # time for Qt to paint/scroll large (45–50 card) profile lists.
+        self.timer.start(150)
 
     def _build(self) -> None:
         self.setWindowTitle("IK Auto — Browser Control")
@@ -1137,6 +1147,8 @@ class Dashboard(QWidget):
             self._farm_batch_profiles.clear()
             self._farm_batch_submitted = 0
             self._farm_batch_resume_at = 0.0
+            self._farm_last_arranged_ready_count = 0
+            self._farm_arrange_columns = self._apply_windows_per_row()
             self._farm_resource_pause_started = 0.0
             self._farm_resource_pause_reason = None
             try:
@@ -1282,7 +1294,7 @@ class Dashboard(QWidget):
         try:
             # Farm follows the user-selected layout setting. The runner keeps
             # profile order, therefore placement is left → right, top → down.
-            columns = self._apply_windows_per_row()
+            columns = self._farm_arrange_columns
             count = self.runner.arrange_windows(
                 columns,
                 profile_ids=self._farm_launch_profiles,
@@ -1321,12 +1333,14 @@ class Dashboard(QWidget):
             terminal_states = {WorkerState.READY, WorkerState.COMPLETED, WorkerState.ERROR}
             if any(self._farm_open_states.get(profile_id) not in terminal_states for profile_id in self._farm_batch_profiles):
                 return
+            if not self._arrange_farm_opening_milestone():
+                return
             if now < self._farm_batch_resume_at:
                 return
             self._append_log(f"Đợt {len(self._farm_batch_profiles)} tab đã ổn định; bắt đầu đợt tiếp theo")
             self._farm_batch_profiles.clear()
             self._farm_batch_submitted = 0
-            self._farm_batch_limit = policy.batch_size
+            self._farm_batch_limit = self._next_farm_open_batch_limit(policy)
         if now < self._farm_next_open_at:
             return
         reason: str | None = None
@@ -1386,6 +1400,42 @@ class Dashboard(QWidget):
             f"còn {len(self._farm_open_queue)} tab"
         )
 
+    def _ready_farm_opening_profiles(self) -> set[str]:
+        return {
+            profile_id
+            for profile_id, state in self._farm_open_states.items()
+            if profile_id in self._farm_launch_profiles
+            and state in {WorkerState.READY, WorkerState.COMPLETED}
+        }
+
+    def _next_farm_open_batch_limit(self, policy: FarmLaunchPolicy) -> int:
+        """Stop a launch batch exactly at the next five-window layout mark."""
+        ready_count = len(self._ready_farm_opening_profiles())
+        next_mark = self._farm_last_arranged_ready_count + FARM_PROGRESSIVE_ARRANGE_SIZE
+        remaining_to_mark = max(1, next_mark - ready_count)
+        return min(policy.batch_size, remaining_to_mark)
+
+    def _arrange_farm_opening_milestone(self) -> bool:
+        """Tile all ready windows once each five-profile milestone is reached."""
+        ready = self._ready_farm_opening_profiles()
+        next_mark = self._farm_last_arranged_ready_count + FARM_PROGRESSIVE_ARRANGE_SIZE
+        if len(ready) < next_mark:
+            return True
+        try:
+            count = self.runner.arrange_windows(
+                self._farm_arrange_columns,
+                profile_ids=ready,
+            )
+        except Exception as error:
+            self._abort_farm_opening("Không sắp xếp được tab", str(error), critical=True)
+            return False
+        self._farm_last_arranged_ready_count = len(ready)
+        self._append_log(
+            f"Đã mở đủ {len(ready)} profile; sắp xếp ngay {count} cửa sổ "
+            f"theo {self._farm_arrange_columns} cột"
+        )
+        return True
+
     def _abort_farm_opening(self, title: str, message: str, *, critical: bool = False) -> None:
         """Reset only the launch controller; already opened profiles stay recoverable."""
         self._farm_launcher_phase = "launch"
@@ -1395,6 +1445,7 @@ class Dashboard(QWidget):
         self._farm_batch_submitted = 0
         self._farm_batch_limit = self._farm_launch_policy.batch_size
         self._farm_batch_resume_at = 0.0
+        self._farm_last_arranged_ready_count = 0
         self._farm_resource_pause_started = 0.0
         self._farm_resource_pause_reason = None
         self._farm_all_running = False
@@ -1487,6 +1538,7 @@ class Dashboard(QWidget):
         self._farm_batch_profiles.clear()
         self._farm_batch_submitted = 0
         self._farm_batch_resume_at = 0.0
+        self._farm_last_arranged_ready_count = 0
         self._farm_resource_pause_started = 0.0
         self._farm_resource_pause_reason = None
         self._farm_close_queue.clear()
@@ -1601,54 +1653,55 @@ class Dashboard(QWidget):
     def _copy_json(self) -> None:
         if self.last_coordinate: QApplication.clipboard().setText(json.dumps({"profile_id":self.last_coordinate[0],**self.last_coordinate[1]},ensure_ascii=False,indent=2,default=str))
     def _poll(self) -> None:
-        try:
-            while True:
+        # Keep each UI pulse bounded.  A burst from dozens of workers must not
+        # monopolize Qt's event loop and make profile-list scrolling hang.
+        for _ in range(PROFILE_UPDATE_BATCH_SIZE):
+            try:
                 snap=self.updates.get_nowait()
-                if snap.monitor_events is not None:
-                    self._handle_monitor_result(snap)
-                    continue
-                if (
-                    self._farm_launcher_phase == "quiescing"
-                    and snap.profile_id in self._farm_quiesce_farms
-                    and (
-                        "Đã dừng Auto Farm" in snap.message
-                        or snap.state in {WorkerState.STOPPED, WorkerState.ERROR}
-                    )
-                ):
-                    self._farm_quiesce_farms.discard(snap.profile_id)
-                    self._append_log(f"[{snap.profile_id}] Tác vụ Farm đã kết thúc")
-                    self._advance_farm_quiescing()
-                self._auto_arrange_states[snap.profile_id] = snap.state
-                if self._farm_launcher_phase == "opening" and snap.profile_id in self._farm_launch_profiles:
-                    self._farm_open_states[snap.profile_id] = snap.state
-                if (
-                    self._farm_launcher_phase == "stopping"
-                    and snap.profile_id == self._farm_close_in_flight
-                    and snap.state == WorkerState.STOPPED
-                    and not self.runner.has_open_session(snap.profile_id)
-                ):
-                    self._append_log(f"Đã đóng tab {snap.profile_id}")
-                    self._farm_close_in_flight = None
-                    self._schedule_next_tab_close(time.monotonic())
-                row=self.rows.get(snap.profile_id)
-                if row:
-                    row.status.setText(snap.message); text,bg,fg=self._state(snap.state); row.badge.setText(text); row.badge.setStyleSheet(f"background:{bg};color:{fg};border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;"); self._set_profile_card_state(row,snap.state)
-                    self._set_roster_tooltip(row.card, snap.farm_roster)
-                    self._set_roster_dots(row.roster, snap.farm_roster)
-                    if snap.state in {WorkerState.STOPPED, WorkerState.ERROR} or "Đã dừng Auto Farm" in snap.message:
-                        self.farm_profiles.discard(snap.profile_id); self._refresh_sync_control()
-                try:
-                    profile_name = self.config.profile(snap.profile_id).name
-                except KeyError:
-                    profile_name = snap.profile_id
-                if snap.state == WorkerState.ERROR:
-                    self._notify_telegram(
-                        f"❌ Lỗi {profile_name}: {snap.message}",
-                        event_key=f"profile-error:{snap.profile_id}:{snap.message}",
-                        cooldown_seconds=300.0,
-                    )
-                self._append_log(f"[{snap.profile_id}] {snap.message}")
-        except queue.Empty: pass
+            except queue.Empty:
+                break
+            if snap.monitor_events is not None:
+                self._handle_monitor_result(snap)
+                continue
+            if (
+                self._farm_launcher_phase == "quiescing"
+                and snap.profile_id in self._farm_quiesce_farms
+                and (
+                    "Đã dừng Auto Farm" in snap.message
+                    or snap.state in {WorkerState.STOPPED, WorkerState.ERROR}
+                )
+            ):
+                self._farm_quiesce_farms.discard(snap.profile_id)
+                self._append_log(f"[{snap.profile_id}] Tác vụ Farm đã kết thúc")
+                self._advance_farm_quiescing()
+            self._auto_arrange_states[snap.profile_id] = snap.state
+            if self._farm_launcher_phase == "opening" and snap.profile_id in self._farm_launch_profiles:
+                self._farm_open_states[snap.profile_id] = snap.state
+            if (
+                self._farm_launcher_phase == "stopping"
+                and snap.profile_id == self._farm_close_in_flight
+                and snap.state == WorkerState.STOPPED
+                and not self.runner.has_open_session(snap.profile_id)
+            ):
+                self._append_log(f"Đã đóng tab {snap.profile_id}")
+                self._farm_close_in_flight = None
+                self._schedule_next_tab_close(time.monotonic())
+            row=self.rows.get(snap.profile_id)
+            if row:
+                self._apply_profile_snapshot(row, snap)
+                if snap.state in {WorkerState.STOPPED, WorkerState.ERROR} or "Đã dừng Auto Farm" in snap.message:
+                    self.farm_profiles.discard(snap.profile_id); self._refresh_sync_control()
+            try:
+                profile_name = self.config.profile(snap.profile_id).name
+            except KeyError:
+                profile_name = snap.profile_id
+            if snap.state == WorkerState.ERROR:
+                self._notify_telegram(
+                    f"❌ Lỗi {profile_name}: {snap.message}",
+                    event_key=f"profile-error:{snap.profile_id}:{snap.message}",
+                    cooldown_seconds=300.0,
+                )
+            self._append_log(f"[{snap.profile_id}] {snap.message}")
         try:
             while True:
                 ok, message = self._telegram_results.get_nowait()
@@ -1681,31 +1734,107 @@ class Dashboard(QWidget):
         self._advance_farm_stopping()
         self._advance_monitoring()
         now=time.monotonic()
-        if now-self._last_resources>=2:
-            try:
-                overview=self.runner.resource_overview(); self._latest_profile_cpu_percent=overview.cpu_percent; self.total.setText(str(overview.total_profiles)); self.opened.setText(str(overview.opened_profiles)); self.open_badge.setText(f"{overview.opened_profiles} đang mở"); self.ram.setText(f"{overview.ram_bytes/1_048_576:.0f} MB"); self.cpu.setText(f"{overview.cpu_percent:.1f}%")
-                if self._farm_all_running:
-                    self.farm_all_button.setEnabled(True)
-                else:
-                    self.farm_all_button.setEnabled(
-                        self._farm_launcher_phase not in {"opening", "quiescing", "stopping"}
-                        and self._opened_profile_count() > 1
-                    )
-                self.monitor_button.setEnabled(
-                    self._monitoring_enabled
-                    or (
-                        self._farm_launcher_phase not in {"opening", "quiescing", "stopping"}
-                        and overview.opened_profiles > 0
-                    )
-                )
-                for item in overview.profiles:
-                    if item.profile_id in self.rows:self.rows[item.profile_id].resource.setText("—" if not item.opened else f"{item.ram_bytes/1_048_576:.0f} MB | {item.cpu_percent:.1f}%")
-            except Exception as error:self._append_log(str(error))
+        self._drain_resource_overview()
+        # Sampling every five seconds for large installations avoids process
+        # enumeration churn. It runs off the Qt thread in all cases.
+        resource_interval = 5.0 if len(self.rows) >= 40 else 2.0
+        if now-self._last_resources >= resource_interval:
+            self._start_resource_overview_sample()
             self._last_resources=now
         if now-self._last_trim>=60:
-            try:self.runner.trim_all_profile_memory()
-            except Exception:pass
+            threading.Thread(
+                target=self._trim_profile_memory_safely,
+                name="profile-memory-trim",
+                daemon=True,
+            ).start()
             self._last_trim=now
+
+    def _apply_profile_snapshot(self, row: ProfileRow, snap: WorkerSnapshot) -> None:
+        """Update only changed widgets so scrolling does not trigger repaints."""
+        if row.last_message != snap.message:
+            row.status.setText(snap.message)
+            row.last_message = snap.message
+        if row.last_state != snap.state:
+            text, bg, fg = self._state(snap.state)
+            row.badge.setText(text)
+            row.badge.setStyleSheet(
+                f"background:{bg};color:{fg};border-radius:{_ui_px(10)}px;"
+                f"padding:{_ui_px(3)}px {_ui_px(8)}px;"
+            )
+            self._set_profile_card_state(row, snap.state)
+            row.last_state = snap.state
+        if row.last_roster != snap.farm_roster:
+            self._set_roster_tooltip(row.card, snap.farm_roster)
+            self._set_roster_dots(row.roster, snap.farm_roster)
+            row.last_roster = snap.farm_roster
+
+    def _start_resource_overview_sample(self) -> None:
+        if getattr(self, "_resource_sample_in_flight", False):
+            return
+        self._resource_sample_in_flight = True
+
+        def sample() -> None:
+            try:
+                result: object = self.runner.resource_overview()
+            except Exception as error:
+                result = error
+            try:
+                self._resource_overview_results.put_nowait(result)
+            except queue.Full:
+                pass
+
+        threading.Thread(target=sample, name="profile-resource-sample", daemon=True).start()
+
+    def _drain_resource_overview(self) -> None:
+        results = getattr(self, "_resource_overview_results", None)
+        if results is None:
+            return
+        try:
+            overview = results.get_nowait()
+        except queue.Empty:
+            return
+        self._resource_sample_in_flight = False
+        if isinstance(overview, Exception):
+            self._append_log(str(overview))
+            return
+        self._latest_profile_cpu_percent = overview.cpu_percent
+        values = (
+            (self.total, str(overview.total_profiles)),
+            (self.opened, str(overview.opened_profiles)),
+            (self.open_badge, f"{overview.opened_profiles} đang mở"),
+            (self.ram, f"{overview.ram_bytes/1_048_576:.0f} MB"),
+            (self.cpu, f"{overview.cpu_percent:.1f}%"),
+        )
+        for widget, value in values:
+            if widget.text() != value:
+                widget.setText(value)
+        self.farm_all_button.setEnabled(
+            True if self._farm_all_running else (
+                self._farm_launcher_phase not in {"opening", "quiescing", "stopping"}
+                and self._opened_profile_count() > 1
+            )
+        )
+        self.monitor_button.setEnabled(
+            self._monitoring_enabled
+            or (
+                self._farm_launcher_phase not in {"opening", "quiescing", "stopping"}
+                and overview.opened_profiles > 0
+            )
+        )
+        for item in overview.profiles:
+            row = self.rows.get(item.profile_id)
+            if row is None:
+                continue
+            value = "—" if not item.opened else f"{item.ram_bytes/1_048_576:.0f} MB | {item.cpu_percent:.1f}%"
+            if row.last_resource != value:
+                row.resource.setText(value)
+                row.last_resource = value
+
+    def _trim_profile_memory_safely(self) -> None:
+        try:
+            self.runner.trim_all_profile_memory()
+        except Exception:
+            pass
     @staticmethod
     def _state(state:WorkerState)->tuple[str,str,str]:
         if state in {WorkerState.READY,WorkerState.COMPLETED}:return "Sẵn sàng","#dcfce7","#15803d"
@@ -1713,7 +1842,13 @@ class Dashboard(QWidget):
         if state==WorkerState.ERROR:return "Cần chú ý","#fee2e2","#b91c1c"
         return "Đã dừng","#f1f5f9","#475569"
     def _append_log(self,message:str)->None:
-        self._log_lines.append(message); value="\n".join(self._log_lines)
+        self._log_lines.append(message)
+        # The action log is intentionally hidden in the current dashboard.
+        # Retain its small history, but avoid rebuilding QTextEdit for every
+        # worker update while 45-50 profiles are active.
+        if hasattr(self.log, "isVisible") and not self.log.isVisible():
+            return
+        value="\n".join(self._log_lines)
         if hasattr(self.log,"setPlainText"): self.log.setPlainText(value)
         else:
             self.log.configure(state="normal"); self.log.delete("1.0","end"); self.log.insert("end",value+"\n"); self.log.see("end"); self.log.configure(state="disabled")
