@@ -250,14 +250,14 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
     # The visible ``Cấp: n / n`` readout is evidence only.  The runner never
     # clicks + or −; it uses this value as the current search level.
     FarmTemplateId.BROWSER_RESOURCE_LEVEL_6: TemplateSpec(
-        "browser_resource_level_6.png", threshold=0.82, region="lower",
-        reference_width=1014, reference_height=275, uniform_width_scale=True,
-        grayscale=True,
+        "browser_resource_level_6.png", threshold=0.82, region="resource_level",
+        reference_width=1280, reference_height=720,
+        scale_variants=(0.97, 1.0, 1.03), grayscale=True,
     ),
     FarmTemplateId.BROWSER_RESOURCE_LEVEL_7: TemplateSpec(
-        "browser_resource_level_7.png", threshold=0.82, region="lower",
-        reference_width=1031, reference_height=278, uniform_width_scale=True,
-        grayscale=True,
+        "browser_resource_level_7.png", threshold=0.82, region="resource_level",
+        reference_width=1280, reference_height=720,
+        scale_variants=(0.97, 1.0, 1.03), grayscale=True,
     ),
     # The resource panel's "only search eligible target" checkbox must be
     # enabled before Search.  Match the *unchecked* glyph only; after tapping
@@ -616,6 +616,14 @@ class BrowserCanvasMatcher:
         if name == "lower_left": return 0, height // 2, width // 2, height - height // 2
         if name == "lower": return 0, height // 2, width, height - height // 2
         if name == "lower_right": return width // 2, height // 2, width - width // 2, height - height // 2
+        # The search level readout (``Cấp: n / n``) is centered above the
+        # slider in the resource panel. Restricting the two digit templates
+        # to this slot prevents similar HUD numbers elsewhere from becoming
+        # level evidence.
+        if name == "resource_level":
+            left = width * 3 // 10
+            top = height * 4 // 5
+            return left, top, width // 4, height - top
         if name == "top_left": return 0, 0, width // 4, height // 5
         if name == "toast": return width // 6, height // 15, width * 2 // 3, height // 3
         if name == "right": return width * 3 // 4, 0, width - (width * 3 // 4), height // 2

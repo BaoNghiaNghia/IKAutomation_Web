@@ -58,6 +58,22 @@ class FakePage:
         return self.closed
 
 
+def test_focused_farm_input_is_read_from_the_inner_game_frame() -> None:
+    class Root:
+        def __init__(self, value: str | None) -> None:
+            self.value = value
+
+        def evaluate(self, _expression: str) -> str | None:
+            return self.value
+
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    outer = Root(None)
+    game = Root("564")
+    session._frame_roots = lambda: [outer, game]
+
+    assert session._focused_farm_input_value() == "564"
+
+
 class FakeCanvas:
     def __init__(self, direct_png: bytes | None = None) -> None:
         self.direct_png = direct_png or (b"\x89PNG\r\n\x1a\n" + b"\0" * 1_200)

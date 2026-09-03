@@ -225,6 +225,42 @@ def test_checked_search_target_template_requires_positive_tick_evidence() -> Non
     assert spec.threshold == 0.70
 
 
+def test_resource_level_templates_use_the_renderer_and_exact_panel_slot() -> None:
+    import ik_chrome_auto.farm_matcher as matcher_module
+
+    for template_id in (
+        FarmTemplateId.BROWSER_RESOURCE_LEVEL_6,
+        FarmTemplateId.BROWSER_RESOURCE_LEVEL_7,
+    ):
+        spec = matcher_module.SPECS[template_id]
+        assert (spec.reference_width, spec.reference_height) == (1280, 720)
+        assert spec.region == "resource_level"
+        assert spec.scale_variants == (0.97, 1.0, 1.03)
+
+
+@pytest.mark.parametrize(
+    ("level", "template_id"),
+    (
+        (6, FarmTemplateId.BROWSER_RESOURCE_LEVEL_6),
+        (7, FarmTemplateId.BROWSER_RESOURCE_LEVEL_7),
+    ),
+)
+def test_resource_level_is_matched_at_its_1280_panel_position(
+    level: int,
+    template_id: FarmTemplateId,
+) -> None:
+    matcher = BrowserCanvasMatcher()
+    template = matcher._load(f"browser_resource_level_{level}.png")
+    canvas = np.zeros((720, 1280, 3), dtype=np.uint8)
+    height, width = template.shape[:2]
+    canvas[630 : 630 + height, 540 : 540 + width] = template
+
+    evidence = matcher._match(canvas, template_id)
+
+    assert evidence.found
+    assert evidence.bounds == (540, 630, width, height)
+
+
 def test_team_selection_templates_use_the_supplied_1280_renderer_capture() -> None:
     import ik_chrome_auto.farm_matcher as matcher_module
 

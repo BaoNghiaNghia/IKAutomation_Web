@@ -1150,19 +1150,30 @@ class ChromeProfileSession:
         the original X/Y values remain available for rollback.
         """
         self.tap_farm_template(bounds, image_size)
-        cdp = self._get_page_cdp_session(self.page)
-        result = cdp.send(
-            "Runtime.evaluate",
-            {
-                "expression": "(() => { const e = document.activeElement; return e && 'value' in e ? String(e.value) : null; })()",
-                "returnByValue": True,
-            },
-        )
-        value = result.get("result", {}).get("value") if isinstance(result, dict) else None
+        value = self._focused_farm_input_value()
         try:
             return int(str(value).strip())
         except (TypeError, ValueError):
             return None
+
+    def _focused_farm_input_value(self) -> str | None:
+        """Read the focused input from the document that owns the game UI.
+
+        The coordinate inputs live inside the GTArcade iframe. Evaluating
+        ``document.activeElement`` through the page-level CDP session only
+        sees the outer iframe element and therefore always returned null.
+        Walk the known frame roots from inner to outer and accept the first
+        focused element that exposes a value.
+        """
+        expression = "() => { const e = document.activeElement; return e && 'value' in e ? String(e.value) : null; }"
+        for root in reversed(self._frame_roots()):
+            try:
+                value = root.evaluate(expression)
+            except Exception:
+                continue
+            if value is not None:
+                return str(value)
+        return None
 
     def replace_focused_farm_input(self, value: int) -> bool:
         """Replace the currently verified browser input and confirm its value."""
@@ -1179,14 +1190,7 @@ class ChromeProfileSession:
         ):
             cdp.send("Input.dispatchKeyEvent", event)
         cdp.send("Input.insertText", {"text": str(value)})
-        result = cdp.send(
-            "Runtime.evaluate",
-            {
-                "expression": "(() => { const e = document.activeElement; return e && 'value' in e ? String(e.value) : null; })()",
-                "returnByValue": True,
-            },
-        )
-        observed = result.get("result", {}).get("value") if isinstance(result, dict) else None
+        observed = self._focused_farm_input_value()
         return str(observed).strip() == str(value)
 
     def click_farm_template_mouse(

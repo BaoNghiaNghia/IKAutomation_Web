@@ -146,11 +146,11 @@ FARM_TEAM_ROW_WIDTH_RATIO = 0.172
 FARM_TEAM_ROW_HEIGHT_RATIO = 0.19
 FARM_TEAM_ROW_FIRST_TOP_RATIO = 0.002
 FARM_TEAM_ROW_STRIDE_RATIO = 0.205
-# The coordinate fields sit a fixed *relative canvas distance* from the
-# freshly matched Continent Map pin.  Keeping these as ratios avoids treating
-# the old 1280x720 capture as a desktop pixel coordinate system.
-FARM_COORDINATE_X_FIELD_OFFSET_X_RATIO = -134 / 1280
-FARM_COORDINATE_Y_FIELD_OFFSET_Y_RATIO = -54 / 720
+# Both coordinate fields sit on the same row immediately left of the freshly
+# matched Continent Map pin. Keeping the horizontal offsets as canvas ratios
+# avoids treating the reference 1280x720 capture as desktop coordinates.
+FARM_COORDINATE_X_FIELD_OFFSET_X_RATIO = -144 / 1280
+FARM_COORDINATE_Y_FIELD_OFFSET_X_RATIO = -61 / 1280
 
 # Measured from the 1260×674 video supplied on 2026-08-28.  They are declared
 # as direct X/Y canvas percentages (rather than retained pixel references), so
@@ -964,10 +964,14 @@ class ProfileWorker:
                 6: detected.evidence_for(FarmTemplateId.BROWSER_RESOURCE_LEVEL_6),
                 7: detected.evidence_for(FarmTemplateId.BROWSER_RESOURCE_LEVEL_7),
             }
-            detected_resource_level = next(
-                (level for level, evidence in resource_level_evidence.items() if evidence.found),
-                None,
+            detected_levels = tuple(
+                (evidence.confidence, level)
+                for level, evidence in resource_level_evidence.items()
+                if evidence.found
             )
+            # If anti-aliasing makes both digit crops pass their threshold,
+            # use the stronger match instead of relying on dictionary order.
+            detected_resource_level = max(detected_levels)[1] if detected_levels else None
             if detected_resource_level is not None:
                 self._farm_detected_resource_level = detected_resource_level
                 self._farm.set_observed_level(detected_resource_level)
@@ -2878,8 +2882,8 @@ class ProfileWorker:
         center_x = left + width // 2
         center_y = top + height // 2
         x_center = center_x + round(image_width * FARM_COORDINATE_X_FIELD_OFFSET_X_RATIO)
-        y_center = center_y + round(image_height * FARM_COORDINATE_Y_FIELD_OFFSET_Y_RATIO)
-        return (x_center, center_y, 2, 2), (center_x, y_center, 2, 2)
+        y_center = center_x + round(image_width * FARM_COORDINATE_Y_FIELD_OFFSET_X_RATIO)
+        return (x_center, center_y, 2, 2), (y_center, center_y, 2, 2)
 
     def _log_farm(self, event: str, payload: dict[str, object]) -> None:
         self.farm_log.write(event, {"profile_id": self.profile.id, **payload})

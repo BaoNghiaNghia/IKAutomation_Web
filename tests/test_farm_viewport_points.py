@@ -430,10 +430,10 @@ def test_continent_coordinate_fields_use_canvas_ratio_offsets() -> None:
     # by normalized canvas distances, which gives the same target for any
     # profile viewport.
     assert ProfileWorker._coordinate_fields_from_pin((400, 100, 40, 40), (1280, 720)) == (
-        (286, 120, 2, 2),
-        (420, 66, 2, 2),
+        (276, 120, 2, 2),
+        (359, 120, 2, 2),
     )
     assert ProfileWorker._coordinate_fields_from_pin((120, 50, 20, 20), (384, 216)) == (
-        (90, 60, 2, 2),
-        (130, 44, 2, 2),
+        (87, 60, 2, 2),
+        (112, 60, 2, 2),
     )
