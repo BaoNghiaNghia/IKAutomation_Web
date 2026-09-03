@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from ik_chrome_auto.farm_matcher import BrowserCanvasMatcher
-from ik_chrome_auto.farm_vision import TeamRowState
+from ik_chrome_auto.farm_vision import DetectedGameState, TeamRowState
 
 
 def test_city_template_search_is_limited_to_bottom_left_corner() -> None:
@@ -146,6 +146,26 @@ def test_full_renderer_roster_uses_direct_busy_evidence_per_row() -> None:
         (3, TeamRowState.READY),
         (4, TeamRowState.READY),
     )
+
+
+def test_busy_resource_text_cannot_become_ready_from_grayscale_correlation_alone() -> None:
+    # Scores measured from the reported 1280x720 account-2 capture. The busy
+    # first row resembles the tiny Ready template in grayscale, but its glyph
+    # edges do not. Rows 2 and 3 contain the real `Sẵn sàng` label.
+    classify = BrowserCanvasMatcher._is_ready_team_label
+
+    assert classify(0.7738, 0.2205, 0.5448) is False
+    assert classify(0.8186, 0.2610, 0.0660) is True
+    assert classify(0.8563, 0.2584, 0.1045) is True
+
+
+def test_roster_is_refreshed_on_stable_city_and_world_map_only() -> None:
+    supports = BrowserCanvasMatcher._state_has_team_roster
+
+    assert supports(DetectedGameState.CITY) is True
+    assert supports(DetectedGameState.WORLD_MAP) is True
+    assert supports(DetectedGameState.RESOURCE_SEARCH_PANEL) is False
+    assert supports(DetectedGameState.UNKNOWN) is False
 
 
 def test_busy_row_uses_static_indicator_when_countdown_changes() -> None:

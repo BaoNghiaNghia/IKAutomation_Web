@@ -8,7 +8,6 @@ from ik_chrome_auto.farm_vision import (
     TemplateEvidence,
 )
 from ik_chrome_auto.runner import (
-    AUTOMATION_RENDERER_CANVAS_GUTTER,
     AUTOMATION_RENDERER_SIZE,
     AUTOMATION_RENDERER_WINDOW_SIZE,
     FARM_MINIMUM_CANVAS_SIZE,
@@ -185,6 +184,34 @@ def test_missing_continent_map_icon_stays_in_relocation_instead_of_preflight() -
     assert worker._farm_area_relocation_pending == ("iron", 7)
 
 
+def test_coordinate_input_failure_keeps_pending_point_and_does_not_reset_preflight() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker._farm = FarmWorkflow()
+    worker._farm_area_relocation_pending = None
+    pending_point = object()
+    worker._farm_area_pending_selection = pending_point
+    worker._farm_next_at = 0.0
+    logs = []
+    updates = []
+    worker._log_farm = lambda event, payload: logs.append((event, payload))
+    worker._publish = lambda state, message, detail="": updates.append((state, message, detail))
+    worker._retry_farm_or_stop = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("Coordinate retry must not reset the farm workflow")
+    )
+
+    handled = worker._apply_resource_area_relocation_result(
+        "unavailable",
+        "stone",
+        6,
+        reason="original_coordinates_unreadable",
+    )
+
+    assert handled is True
+    assert worker._farm_area_relocation_pending == ("stone", 6)
+    assert worker._farm_area_pending_selection is pending_point
+    assert "thử lại bước X/Y" in updates[-1][1]
+
+
 def test_new_farm_cycle_preserves_the_running_sessions_coordinate_bag() -> None:
     worker = ProfileWorker.__new__(ProfileWorker)
     selector = object()
@@ -217,15 +244,15 @@ def test_farm_map_toggle_uses_exact_canvas_percentage_and_excludes_mail() -> Non
     assert not (left <= 151 < left + width and top <= 583 < top + height)
 
 
-def test_farm_map_toggle_prefers_native_mouse_ratio_over_synthetic_input() -> None:
+def test_farm_map_toggle_prefers_background_compositor_ratio() -> None:
     class Session:
         def __init__(self) -> None:
-            self.native_ratios: list[tuple[float, float]] = []
+            self.background_ratios: list[tuple[float, float]] = []
             self.synthetic_ratios: list[tuple[float, float]] = []
             self.touches: list[object] = []
 
-        def click_game_surface_native_ratio(self, x: float, y: float) -> None:
-            self.native_ratios.append((x, y))
+        def dispatch_game_surface_mouse_ratio(self, x: float, y: float) -> None:
+            self.background_ratios.append((x, y))
 
         def click_game_surface_ratio(self, x: float, y: float) -> None:
             self.synthetic_ratios.append((x, y))
@@ -241,7 +268,7 @@ def test_farm_map_toggle_prefers_native_mouse_ratio_over_synthetic_input() -> No
 
     worker._click_map_toggle(bounds, (1280, 720))
 
-    assert worker.session.native_ratios == [(53 / 1280, 666 / 720)]
+    assert worker.session.background_ratios == [(53 / 1280, 666 / 720)]
     assert worker.session.synthetic_ratios == []
     assert worker.session.touches == []
     assert worker._automation_renderer_hold_until > 0.0
@@ -290,12 +317,12 @@ def test_farm_game_control_prefers_touch_at_the_verified_canvas_bounds() -> None
     assert worker.session.touches == [(bounds, (1280, 720))]
 
 
-def test_farm_first_search_attempt_uses_native_canvas_ratio() -> None:
+def test_farm_first_search_attempt_uses_background_canvas_ratio() -> None:
     class Session:
         def __init__(self) -> None:
             self.ratios: list[tuple[float, float]] = []
 
-        def click_game_surface_native_ratio(self, x: float, y: float) -> None:
+        def dispatch_game_surface_mouse_ratio(self, x: float, y: float) -> None:
             self.ratios.append((x, y))
 
     worker = ProfileWorker.__new__(ProfileWorker)
@@ -304,9 +331,9 @@ def test_farm_first_search_attempt_uses_native_canvas_ratio() -> None:
     worker._automation_renderer_hold_until = 0.0
     bounds = worker._world_map_search_layout_bounds((1280, 720))
 
-    method = worker._click_farm_native_game_control(bounds, (1280, 720))
+    method = worker._click_farm_background_game_control(bounds, (1280, 720))
 
-    assert method == "native_canvas_ratio"
+    assert method == "cdp_canvas_ratio"
     assert worker.session.ratios == [(453.5 / 1280, 580.5 / 720)]
     assert worker._automation_renderer_hold_until > 0.0
 
@@ -344,7 +371,6 @@ def test_farm_yields_720p_after_postcondition_even_for_a_short_next_poll(monkeyp
 def test_farm_rejects_tiny_renderer_captures_before_team_or_resource_input() -> None:
     """A tiny canvas cannot safely distinguish Ready from Busy labels."""
     assert AUTOMATION_RENDERER_SIZE == (1280, 720)
-    assert AUTOMATION_RENDERER_CANVAS_GUTTER == (0, 0)
     assert AUTOMATION_RENDERER_WINDOW_SIZE == (1280, 720)
     assert FARM_MINIMUM_CANVAS_SIZE == (1280, 720)
     assert ProfileWorker._farm_canvas_is_usable((1280, 720)) is True

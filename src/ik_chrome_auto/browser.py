@@ -52,6 +52,28 @@ KNOWN_CHROME_PATHS = (
 
 _PROFILE_CDP_PORT_MIN = 21000
 _PROFILE_CDP_PORT_SPAN = 20_000
+_GAME_SURFACE_WIDTH = 1280.0
+_GAME_SURFACE_HEIGHT = 720.0
+
+
+def _fixed_game_surface_box() -> dict[str, float]:
+    """Return the coordinate system used while automation rerenders at 720p."""
+    return {
+        "x": 0.0,
+        "y": 0.0,
+        "width": _GAME_SURFACE_WIDTH,
+        "height": _GAME_SURFACE_HEIGHT,
+    }
+
+
+def _origin_surface_box(box: dict[str, float]) -> dict[str, float]:
+    """Keep live surface dimensions while deliberately discarding iframe offsets."""
+    return {
+        "x": 0.0,
+        "y": 0.0,
+        "width": max(1.0, float(box["width"])),
+        "height": max(1.0, float(box["height"])),
+    }
 
 
 def _profile_cdp_port(profile_id: str) -> int:
@@ -188,8 +210,8 @@ def _game_frame_fit_init_script() -> str:
             inset: 0 !important;
             display: block !important;
             box-sizing: border-box !important;
-            width: 100vw !important;
-            height: 100vh !important;
+            width: var(--ik-auto-game-frame-width, 100vw) !important;
+            height: var(--ik-auto-game-frame-height, 100vh) !important;
             max-width: none !important;
             max-height: none !important;
             margin: 0 !important;
@@ -217,6 +239,17 @@ def _game_frame_fit_init_script() -> str:
 
 
 GAME_FRAME_FIT_SCRIPT = _game_frame_fit_init_script()
+GAME_FRAME_SIZE_SCRIPT = r"""([enabled, width, height]) => {
+    const root = document.documentElement;
+    if (!root) return;
+    if (enabled) {
+        root.style.setProperty('--ik-auto-game-frame-width', `${width}px`);
+        root.style.setProperty('--ik-auto-game-frame-height', `${height}px`);
+    } else {
+        root.style.removeProperty('--ik-auto-game-frame-width');
+        root.style.removeProperty('--ik-auto-game-frame-height');
+    }
+}"""
 
 
 def _image_has_visible_content(image: RGBImage) -> bool:
@@ -290,6 +323,9 @@ class ChromeProfileSession:
         self._direct_canvas_capture_supported: bool | None = None
         self._farm_matcher: Any | None = None
         self._last_farm_capture_png: bytes | None = None
+        # Normal profile windows retain their responsive iframe dimensions.
+        # Only an active automation renderer lease forces the game to 1280x720.
+        self._automation_game_frame_fixed = False
 
     @property
     def context(self) -> BrowserContext:
@@ -329,9 +365,9 @@ class ChromeProfileSession:
                     except Exception:
                         continue
         self.context.add_init_script(INTERACTION_PROBE)
-        # Install before any later portal navigation. Inline width/height on
-        # the GTArcade iframe is intentionally overridden with !important so
-        # the host's default 8 px body margin cannot leave a black frame.
+        # Install before any later portal navigation. Normal profile windows
+        # remain responsive; an automation lease temporarily supplies the
+        # 1280x720 CSS variables used by this stylesheet.
         self.context.add_init_script(GAME_FRAME_FIT_SCRIPT)
         for existing_page in self.context.pages:
             for frame in existing_page.frames:
@@ -711,6 +747,27 @@ class ChromeProfileSession:
         self.pump(120)
         return True
 
+    def _set_automation_game_frame_size(
+        self, enabled: bool, width: int = 1280, height: int = 720
+    ) -> None:
+        """Toggle the fixed iframe size used only during a renderer lease."""
+        self._automation_game_frame_fixed = bool(enabled)
+        for page in self.context.pages:
+            if page.is_closed():
+                continue
+            for frame in page.frames:
+                try:
+                    frame.evaluate(
+                        GAME_FRAME_SIZE_SCRIPT,
+                        [bool(enabled), int(width), int(height)],
+                    )
+                except Exception:
+                    continue
+
+    def end_automation_game_frame(self) -> None:
+        """Return the iframe to its normal responsive dimensions."""
+        self._set_automation_game_frame_size(False)
+
     def begin_automation_renderer(
         self, width: int, height: int
     ) -> AutomationRendererLayout | None:
@@ -727,35 +784,41 @@ class ChromeProfileSession:
         path and do not own a native renderer window, so they return ``None``.
         """
         width, height = validate_viewport(int(width), int(height))
+        self._set_automation_game_frame_size(True, width, height)
         if sys.platform != "win32" or self.config.browser.headless:
             return None
-        hwnd = self.window_handle or self._bind_native_window(retries=10)
-        if hwnd is None:
-            raise RuntimeError(f"Không tìm thấy cửa sổ Chrome của {self.profile.name}")
-        if is_window_minimized(hwnd):
-            set_window_minimized(hwnd, False)
-            self.pump(80)
-        outer = get_window_rect(hwnd)
-        renderer = get_renderer_rect(hwnd)
-        resized = renderer.width < width or renderer.height < height
-        layout = AutomationRendererLayout(outer=outer, renderer=renderer, resized=resized)
-        if not resized:
+        try:
+            hwnd = self.window_handle or self._bind_native_window(retries=10)
+            if hwnd is None:
+                raise RuntimeError(f"Không tìm thấy cửa sổ Chrome của {self.profile.name}")
+            if is_window_minimized(hwnd):
+                set_window_minimized(hwnd, False)
+                self.pump(80)
+            outer = get_window_rect(hwnd)
+            renderer = get_renderer_rect(hwnd)
+            resized = renderer.width < width or renderer.height < height
+            layout = AutomationRendererLayout(outer=outer, renderer=renderer, resized=resized)
+            if not resized:
+                return layout
+            move_window_renderer(
+                hwnd,
+                outer.left,
+                outer.top,
+                width,
+                height,
+                topmost=self._topmost,
+            )
+            # Chromium needs a short settle period before its WebGL canvas reflects
+            # the native renderer dimensions in a DevTools screenshot.
+            self.pump(220)
             return layout
-        move_window_renderer(
-            hwnd,
-            outer.left,
-            outer.top,
-            width,
-            height,
-            topmost=self._topmost,
-        )
-        # Chromium needs a short settle period before its WebGL canvas reflects
-        # the native renderer dimensions in a DevTools screenshot.
-        self.pump(220)
-        return layout
+        except Exception:
+            self.end_automation_game_frame()
+            raise
 
     def restore_automation_renderer(self, layout: AutomationRendererLayout | None) -> None:
         """Restore the compact grid geometry saved for a temporary renderer."""
+        self.end_automation_game_frame()
         if layout is None or not layout.resized:
             return
         if sys.platform != "win32" or self.config.browser.headless:
@@ -871,7 +934,9 @@ class ChromeProfileSession:
         if target == "canvas":
             candidate = self._visible_canvas(frame)
             if candidate is not None:
-                return candidate[1]
+                if getattr(self, "_automation_game_frame_fixed", False):
+                    return _fixed_game_surface_box()
+                return _origin_surface_box(candidate[1])
             if frame_url_contains is None:
                 # A cross-process WebGL iframe can remain visible in Chrome's
                 # compositor without being attached to Playwright's Frame
@@ -893,68 +958,29 @@ class ChromeProfileSession:
         frame_element = frame.frame_element()
         box = frame_element.bounding_box()
         if box:
-            return box
+            if getattr(self, "_automation_game_frame_fixed", False):
+                return _fixed_game_surface_box()
+            return _origin_surface_box(box)
         raise RuntimeError("Không xác định được vùng click của frame/canvas")
 
     def _viewport_surface_box(self) -> dict[str, float]:
+        # The game is fixed to 1280x720 only while its automation renderer is
+        # leased. Compact/normal windows keep their live responsive size.
+        if getattr(self, "_automation_game_frame_fixed", False):
+            return _fixed_game_surface_box()
         page = self.page
         viewport = page.viewport_size or page.evaluate(
             "() => ({width: window.innerWidth, height: window.innerHeight})"
         )
-        box = {
-            "x": 0.0,
-            "y": 0.0,
-            "width": max(1.0, float(viewport["width"])),
-            "height": max(1.0, float(viewport["height"])),
-        }
-        try:
-            frame_fit_active = bool(
-                page.evaluate(
-                    """() => Boolean(
-                        document.getElementById('__ik_auto_game_frame_fit') &&
-                        document.querySelector(
-                            'iframe.iframe[src*="gtarcade.com"], iframe[src*="union.gtarcade.com/channel/"]'
-                        )
-                    )"""
-                )
-            )
-        except Exception:
-            frame_fit_active = False
-        if frame_fit_active:
-            # The target iframe is fixed to the viewport; there is no gutter
-            # to infer even when 1296x736 happens to become 16:9 after an
-            # eight-pixel crop.
-            return box
-        # Some retained GTArcade profiles keep their WebGL iframe in the
-        # compositor after Chromium has detached it from Playwright's frame
-        # tree.  The host page then exposes only its default 8 px body gutter:
-        # a 1280x720 game is captured as 1296x736.  Treating that whole image
-        # as the game scales every template and click against the border,
-        # leaving a clearly visible City at ``Unknown`` forever.  Infer the
-        # centred game rectangle only when removing the conventional gutter
-        # makes the surface materially closer to the game's authored 16:9
-        # aspect ratio. Full-viewport and compact non-16:9 portals are left
-        # untouched.
-        gutter = 8.0
-        inner_width = box["width"] - 2 * gutter
-        inner_height = box["height"] - 2 * gutter
-        if inner_width > 0 and inner_height > 0:
-            reference_aspect = 16 / 9
-            outer_error = abs(box["width"] / box["height"] - reference_aspect)
-            inner_error = abs(inner_width / inner_height - reference_aspect)
-            if inner_error + 0.002 < outer_error:
-                return {
-                    "x": gutter,
-                    "y": gutter,
-                    "width": inner_width,
-                    "height": inner_height,
-                }
-        return box
+        return _origin_surface_box(viewport)
 
     def _canvas_or_viewport(self) -> tuple[Any | None, dict[str, float]]:
         frame = self.find_frame()
         try:
-            return self._largest_canvas(frame)
+            canvas, measured_box = self._largest_canvas(frame)
+            if getattr(self, "_automation_game_frame_fixed", False):
+                return canvas, _fixed_game_surface_box()
+            return canvas, _origin_surface_box(measured_box)
         except RuntimeError:
             return None, self._viewport_surface_box()
 
@@ -1008,18 +1034,16 @@ class ChromeProfileSession:
                     "fromSurface": True,
                     "captureBeyondViewport": False,
                 }
-                clips_composited_gutter = False
+                needs_fixed_surface_clip = False
                 if canvas is None:
                     viewport = page.viewport_size or page.evaluate(
                         "() => ({width: window.innerWidth, height: window.innerHeight})"
                     )
-                    clips_composited_gutter = (
-                        float(box["x"]) != 0.0
-                        or float(box["y"]) != 0.0
-                        or abs(float(box["width"]) - float(viewport["width"])) > 0.5
+                    needs_fixed_surface_clip = (
+                        abs(float(box["width"]) - float(viewport["width"])) > 0.5
                         or abs(float(box["height"]) - float(viewport["height"])) > 0.5
                     )
-                if canvas is not None or clips_composited_gutter:
+                if canvas is not None or needs_fixed_surface_clip:
                     params["clip"] = {
                             "x": float(box["x"]),
                             "y": float(box["y"]),
@@ -1077,8 +1101,8 @@ class ChromeProfileSession:
             raise ValueError("Vùng chụp giám sát không hợp lệ")
         scale = max(0.35, min(1.0, float(scale)))
         clip = {
-            "x": round(float(box["x"]) + float(box["width"]) * left, 4),
-            "y": round(float(box["y"]) + float(box["height"]) * top, 4),
+            "x": round(float(box["width"]) * left, 4),
+            "y": round(float(box["height"]) * top, 4),
             "width": round(float(box["width"]) * (right - left), 4),
             "height": round(float(box["height"]) * (bottom - top), 4),
             "scale": scale,
@@ -1149,7 +1173,18 @@ class ChromeProfileSession:
         World Map coordinates unless the browser exposes a readable input, so
         the original X/Y values remain available for rollback.
         """
-        self.tap_farm_template(bounds, image_size)
+        left, top, width, height = bounds
+        image_width, image_height = image_size
+        if width <= 0 or height <= 0 or image_width <= 0 or image_height <= 0:
+            return None
+        # These are text-entry controls, not ordinary WebGL buttons. Send a
+        # compositor mouse event into this profile's renderer; it focuses the
+        # iframe editor without raising, restoring or exposing the window.
+        self.dispatch_game_surface_mouse_ratio(
+            (left + width / 2) / image_width,
+            (top + height / 2) / image_height,
+        )
+        time.sleep(0.08)
         value = self._focused_farm_input_value()
         try:
             return int(str(value).strip())
@@ -1217,78 +1252,6 @@ class ChromeProfileSession:
             (top + height / 2) / image_height,
         )
 
-    def click_game_surface_native_ratio(self, x_ratio: float, y_ratio: float) -> None:
-        """Send one native mouse click derived from a verified canvas ratio.
-
-        Some portal WebGL builds ignore both Playwright and CDP input even
-        though a fresh renderer capture matched the target.  This final
-        fallback still derives its screen point from the live canvas geometry,
-        never from a fixed desktop coordinate.
-        """
-        if sys.platform != "win32" or self.config.browser.headless:
-            self.click_game_surface_ratio(x_ratio, y_ratio)
-            return
-        if not 0.0 <= x_ratio <= 1.0 or not 0.0 <= y_ratio <= 1.0:
-            raise ValueError("Canvas ratios must be between 0 and 1")
-        hwnd = self.window_handle or self._bind_native_window(retries=3)
-        if hwnd is None:
-            raise RuntimeError(f"Không tìm thấy cửa sổ Chrome của {self.profile.name}")
-        _canvas, surface = self._canvas_or_viewport()
-        renderer = get_renderer_rect(hwnd)
-        viewport = self.page.viewport_size or self.page.evaluate(
-            "() => ({width: window.innerWidth, height: window.innerHeight})"
-        )
-        viewport_width = max(1.0, float(viewport["width"]))
-        viewport_height = max(1.0, float(viewport["height"]))
-        page_x = float(surface["x"]) + float(surface["width"]) * float(x_ratio)
-        page_y = float(surface["y"]) + float(surface["height"]) * float(y_ratio)
-        screen_x = renderer.left + round(page_x * renderer.width / viewport_width)
-        screen_y = renderer.top + round(page_y * renderer.height / viewport_height)
-        import ctypes
-
-        user32 = ctypes.windll.user32
-        # ``mouse_event`` sends a legacy, DPI-virtualised event on some
-        # Windows setups.  The game then receives a click at a different
-        # point even though the screen capture and matcher agree.  SendInput
-        # uses the virtual desktop's physical coordinate system, the same one
-        # used by the renderer rectangle captured just above.
-        user32.BringWindowToTop(int(hwnd))
-        user32.SetForegroundWindow(int(hwnd))
-        time.sleep(0.05)
-
-        class _MouseInput(ctypes.Structure):
-            _fields_ = [
-                ("dx", ctypes.c_long),
-                ("dy", ctypes.c_long),
-                ("mouseData", ctypes.c_ulong),
-                ("dwFlags", ctypes.c_ulong),
-                ("time", ctypes.c_ulong),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-            ]
-
-        class _InputUnion(ctypes.Union):
-            _fields_ = [("mi", _MouseInput)]
-
-        class _Input(ctypes.Structure):
-            _anonymous_ = ("data",)
-            _fields_ = [("type", ctypes.c_ulong), ("data", _InputUnion)]
-
-        virtual_left = user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
-        virtual_top = user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
-        virtual_width = max(1, user32.GetSystemMetrics(78))  # SM_CXVIRTUALSCREEN
-        virtual_height = max(1, user32.GetSystemMetrics(79))  # SM_CYVIRTUALSCREEN
-        absolute_x = round((screen_x - virtual_left) * 65535 / max(1, virtual_width - 1))
-        absolute_y = round((screen_y - virtual_top) * 65535 / max(1, virtual_height - 1))
-        move_flags = 0x0001 | 0x8000 | 0x4000  # MOVE | ABSOLUTE | VIRTUALDESK
-        inputs = (_Input * 3)(
-            _Input(type=0, mi=_MouseInput(absolute_x, absolute_y, 0, move_flags, 0, None)),
-            _Input(type=0, mi=_MouseInput(absolute_x, absolute_y, 0, 0x0002, 0, None)),
-            _Input(type=0, mi=_MouseInput(absolute_x, absolute_y, 0, 0x0004, 0, None)),
-        )
-        sent = user32.SendInput(3, ctypes.byref(inputs), ctypes.sizeof(_Input))
-        if sent != 3:
-            raise ctypes.WinError(ctypes.get_last_error())
-
     def _farm_template_center(
         self,
         bounds: tuple[int, int, int, int],
@@ -1299,8 +1262,8 @@ class ChromeProfileSession:
         if width <= 0 or height <= 0 or image_width <= 0 or image_height <= 0:
             raise ValueError("Farm template bounds không hợp lệ")
         _canvas, surface = self._canvas_or_viewport()
-        x = float(surface["x"]) + float(surface["width"]) * (left + width / 2) / image_width
-        y = float(surface["y"]) + float(surface["height"]) * (top + height / 2) / image_height
+        x = float(surface["width"]) * (left + width / 2) / image_width
+        y = float(surface["height"]) * (top + height / 2) / image_height
         return x, y
 
     def _capture_visible_canvas_png(
@@ -1319,10 +1282,10 @@ class ChromeProfileSession:
         viewport_height = max(1.0, float(viewport["height"]))
         scale_x = renderer.width / viewport_width
         scale_y = renderer.height / viewport_height
-        left = renderer.left + round(float(box["x"]) * scale_x)
-        top = renderer.top + round(float(box["y"]) * scale_y)
-        right = renderer.left + round((float(box["x"]) + float(box["width"])) * scale_x)
-        bottom = renderer.top + round((float(box["y"]) + float(box["height"])) * scale_y)
+        left = renderer.left
+        top = renderer.top
+        right = renderer.left + round(float(box["width"]) * scale_x)
+        bottom = renderer.top + round(float(box["height"]) * scale_y)
         region = WindowRect(left, top, right, bottom)
         # WindowFromPoint is advisory only.  Chrome's app-mode/WebGL renderer
         # can be reported under a compositor HWND unrelated to the profile
@@ -1347,8 +1310,8 @@ class ChromeProfileSession:
     def scroll_game_surface(self, delta_y: float) -> None:
         """Send a wheel event at the canvas centre without moving the real cursor."""
         _canvas, surface = self._canvas_or_viewport()
-        x = float(surface["x"]) + float(surface["width"]) / 2.0
-        y = float(surface["y"]) + float(surface["height"]) / 2.0
+        x = float(surface["width"]) / 2.0
+        y = float(surface["height"]) / 2.0
         self._get_page_cdp_session(self.page).send(
             "Input.dispatchMouseEvent",
             {
@@ -1382,8 +1345,8 @@ class ChromeProfileSession:
         if not 0.0 <= x_ratio <= 1.0 or not 0.0 <= y_ratio <= 1.0:
             raise ValueError("Canvas ratios must be between 0 and 1")
         _canvas, surface = self._canvas_or_viewport()
-        x = float(surface["x"]) + float(surface["width"]) * float(x_ratio)
-        y = float(surface["y"]) + float(surface["height"]) * float(y_ratio)
+        x = float(surface["width"]) * float(x_ratio)
+        y = float(surface["height"]) * float(y_ratio)
         point = {
             "x": x,
             "y": y,
@@ -1421,8 +1384,44 @@ class ChromeProfileSession:
         # not attach it to Playwright's DOM frame tree. Page-level CDP input
         # is hit-tested by Chromium's compositor and reaches that child
         # surface at the same coordinates used for the verified screenshot.
-        x = float(surface["x"]) + local_x
-        y = float(surface["y"]) + local_y
+        x = local_x
+        y = local_y
+        cdp = self._get_page_cdp_session(self.page)
+        cdp.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
+        )
+        cdp.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
+        )
+
+    def dispatch_game_surface_mouse_ratio(self, x_ratio: float, y_ratio: float) -> None:
+        """Click through Chrome's compositor without touching the OS cursor.
+
+        Prefer the canvas locator when Chromium exposes it. Its ``position``
+        is already local to the fixed 1280x720 surface. No measured iframe or
+        page offset is added in either this path or the CDP fallback.
+
+        The page-level CDP path remains the fallback for an OOPIF whose canvas
+        is visible in the compositor but absent from Playwright's frame tree.
+        Neither path moves the OS cursor or changes window z-order.
+        """
+        if not 0.0 <= x_ratio <= 1.0 or not 0.0 <= y_ratio <= 1.0:
+            raise ValueError("Canvas ratios must be between 0 and 1")
+        canvas, surface = self._canvas_or_viewport()
+        local_x = float(surface["width"]) * float(x_ratio)
+        local_y = float(surface["height"]) * float(y_ratio)
+        if canvas is not None:
+            canvas.click(
+                position={"x": local_x, "y": local_y},
+                force=True,
+                timeout=self.config.browser.startup_timeout_ms,
+            )
+            return
+
+        x = local_x
+        y = local_y
         cdp = self._get_page_cdp_session(self.page)
         cdp.send(
             "Input.dispatchMouseEvent",
@@ -1646,16 +1645,7 @@ class ChromeProfileSession:
                 return self._canvas_box(frame, int(canvas.get("index", 0)))
             return self._frame_box(frame)
         except Exception:
-            page = self.page
-            viewport = page.viewport_size or page.evaluate(
-                "() => ({width: window.innerWidth, height: window.innerHeight})"
-            )
-            return {
-                "x": 0.0,
-                "y": 0.0,
-                "width": float(viewport["width"]),
-                "height": float(viewport["height"]),
-            }
+            return self._viewport_surface_box()
 
     def _apply_synced_keyboard_input(self, event: dict[str, Any], event_type: str) -> None:
         keyboard = event.get("keyboard")
@@ -1705,6 +1695,11 @@ class ChromeProfileSession:
                 continue
             try:
                 frame.evaluate(GAME_FRAME_FIT_SCRIPT)
+                if getattr(self, "_automation_game_frame_fixed", False):
+                    frame.evaluate(
+                        GAME_FRAME_SIZE_SCRIPT,
+                        [True, int(_GAME_SURFACE_WIDTH), int(_GAME_SURFACE_HEIGHT)],
+                    )
                 frame.evaluate(INTERACTION_PROBE)
                 frame.evaluate(
                     "([syncSource, inspectEnabled]) => "
@@ -1828,7 +1823,10 @@ class ChromeProfileSession:
             # Canvas order is not stable across accounts, Chrome versions, or
             # machines. The source index can therefore point at a tiny overlay
             # on a follower. The game is consistently the largest canvas.
-            return max(boxes, key=lambda item: item["width"] * item["height"])
+            largest = max(boxes, key=lambda item: item["width"] * item["height"])
+            if getattr(self, "_automation_game_frame_fixed", False):
+                return _fixed_game_surface_box()
+            return _origin_surface_box(largest)
         return self._frame_box(frame)
 
     def _frame_box(self, frame: Frame) -> dict[str, float]:
@@ -1844,7 +1842,9 @@ class ChromeProfileSession:
             }
         box = frame.frame_element().bounding_box()
         if box:
-            return box
+            if getattr(self, "_automation_game_frame_fixed", False):
+                return _fixed_game_surface_box()
+            return _origin_surface_box(box)
         raise RuntimeError("Không xác định được vị trí frame đích để đồng bộ thao tác")
 
     def pump(self, milliseconds: int = 50) -> None:

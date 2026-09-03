@@ -6,6 +6,7 @@ from typing import Any
 import ik_chrome_auto.browser as browser_module
 from ik_chrome_auto.browser import (
     GAME_FRAME_FIT_SCRIPT,
+    GAME_FRAME_SIZE_SCRIPT,
     ChromeProfileSession,
     _image_has_visible_content,
     _low_gpu_init_script,
@@ -37,8 +38,10 @@ def test_game_frame_fit_overrides_the_live_gtarcade_iframe_inline_size() -> None
     assert "iframe.iframe" in GAME_FRAME_FIT_SCRIPT
     assert "union.gtarcade.com/channel/" in GAME_FRAME_FIT_SCRIPT
     assert "position: fixed !important" in GAME_FRAME_FIT_SCRIPT
-    assert "width: 100vw !important" in GAME_FRAME_FIT_SCRIPT
-    assert "height: 100vh !important" in GAME_FRAME_FIT_SCRIPT
+    assert "var(--ik-auto-game-frame-width, 100vw)" in GAME_FRAME_FIT_SCRIPT
+    assert "var(--ik-auto-game-frame-height, 100vh)" in GAME_FRAME_FIT_SCRIPT
+    assert "root.style.setProperty('--ik-auto-game-frame-width'" in GAME_FRAME_SIZE_SCRIPT
+    assert "root.style.removeProperty('--ik-auto-game-frame-width')" in GAME_FRAME_SIZE_SCRIPT
 
 
 def test_game_frame_fit_removes_the_eight_pixel_body_margin_inside_the_frame() -> None:
@@ -72,6 +75,62 @@ def test_focused_farm_input_is_read_from_the_inner_game_frame() -> None:
     session._frame_roots = lambda: [outer, game]
 
     assert session._focused_farm_input_value() == "564"
+
+
+def test_numeric_farm_input_uses_background_renderer_focus_before_reading() -> None:
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    clicks = []
+    session.dispatch_game_surface_mouse_ratio = lambda x, y: clicks.append((x, y))
+    session._focused_farm_input_value = lambda: "592"
+
+    value = session.read_focused_numeric_farm_input((36, 76, 56, 34), (1280, 720))
+
+    assert value == 592
+    assert clicks == [(64 / 1280, 93 / 720)]
+
+
+def test_background_renderer_click_dispatches_cdp_mouse_without_native_window() -> None:
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session._canvas_or_viewport = lambda: (
+        None,
+        {"x": 10.0, "y": 20.0, "width": 1280.0, "height": 720.0},
+    )
+    cdp = FakeCDP()
+    session._get_page_cdp_session = lambda _page: cdp
+    session._page = FakePage()
+
+    session.dispatch_game_surface_mouse_ratio(0.25, 0.5)
+
+    assert [method for method, _params in cdp.calls] == [
+        "Input.dispatchMouseEvent",
+        "Input.dispatchMouseEvent",
+    ]
+    assert cdp.calls[0][1]["x"] == 320.0
+    assert cdp.calls[0][1]["y"] == 360.0
+
+
+def test_background_renderer_click_uses_canvas_local_coordinates_inside_iframe() -> None:
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    canvas = FakeCanvas()
+    session._canvas_or_viewport = lambda: (
+        canvas,
+        {"x": 118.0, "y": 8.0, "width": 1280.0, "height": 720.0},
+    )
+    session.config = SimpleNamespace(browser=SimpleNamespace(startup_timeout_ms=12_345))
+    session._get_page_cdp_session = lambda _page: (_ for _ in ()).throw(
+        AssertionError("A visible iframe canvas must not use page-relative CDP input")
+    )
+    session._page = FakePage()
+
+    session.dispatch_game_surface_mouse_ratio(53 / 1280, 666 / 720)
+
+    assert canvas.click_calls == [
+        {
+            "position": {"x": 53.0, "y": 666.0},
+            "force": True,
+            "timeout": 12_345,
+        }
+    ]
 
 
 class FakeCanvas:
@@ -155,6 +214,7 @@ def make_session(
     session._runtime_page = None
     session._page_cdp_session = None
     session._direct_canvas_capture_supported = None
+    session._automation_game_frame_fixed = True
     session.find_frame = lambda: object()
     session._largest_canvas = lambda _frame: (canvas, BOX.copy())
     return session, canvas, context, page
@@ -167,6 +227,33 @@ def test_solid_black_webgl_capture_is_rejected() -> None:
 
 def test_rendered_game_capture_is_accepted() -> None:
     assert _image_has_visible_content(decode_png(ASSET.read_bytes()))
+
+
+def test_normal_profile_keeps_live_surface_size_without_iframe_offset() -> None:
+    session, _canvas, _context, _page = make_session()
+    session._automation_game_frame_fixed = False
+
+    _canvas, box = session._canvas_or_viewport()
+
+    assert box == {"x": 0.0, "y": 0.0, "width": 500.0, "height": 300.0}
+
+
+def test_automation_frame_size_is_enabled_only_for_the_renderer_lease() -> None:
+    calls: list[tuple[str, list[object]]] = []
+    frame = SimpleNamespace(
+        evaluate=lambda script, args: calls.append((script, args)),
+    )
+    page = SimpleNamespace(is_closed=lambda: False, frames=[frame])
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session._context = SimpleNamespace(pages=[page])
+
+    session._set_automation_game_frame_size(True, 1280, 720)
+    assert session._automation_game_frame_fixed is True
+    assert calls[-1] == (GAME_FRAME_SIZE_SCRIPT, [True, 1280, 720])
+
+    session.end_automation_game_frame()
+    assert session._automation_game_frame_fixed is False
+    assert calls[-1] == (GAME_FRAME_SIZE_SCRIPT, [False, 1280, 720])
 
 
 def test_black_direct_capture_is_probed_only_once() -> None:
@@ -249,8 +336,8 @@ def test_scroll_game_surface_sends_wheel_at_canvas_centre() -> None:
     assert method == "Input.dispatchMouseEvent"
     assert params == {
         "type": "mouseWheel",
-        "x": BOX["x"] + BOX["width"] / 2,
-        "y": BOX["y"] + BOX["height"] / 2,
+        "x": 640.0,
+        "y": 360.0,
         "deltaX": 0,
         "deltaY": 480.0,
         "modifiers": 0,
@@ -502,8 +589,8 @@ def test_mouse_fallback_click_uses_the_template_center() -> None:
     assert context.sessions[0].calls == []
     assert _canvas.click_calls == [{
         "position": {
-            "x": BOX["width"] * 0.25,
-            "y": BOX["height"] * 0.4,
+            "x": 320.0,
+            "y": 288.0,
         },
         "force": True,
         "timeout": session.config.browser.startup_timeout_ms,
@@ -518,8 +605,8 @@ def test_canvas_ratio_mouse_click_uses_locator_in_the_correct_frame() -> None:
     assert context.sessions[0].calls == []
     assert _canvas.click_calls == [{
         "position": {
-            "x": BOX["width"] * 53 / 1280,
-            "y": BOX["height"] * 666 / 720,
+            "x": 53.0,
+            "y": 666.0,
         },
         "force": True,
         "timeout": 90_000,
@@ -538,10 +625,10 @@ def test_cdp_capture_uses_exact_canvas_clip() -> None:
         "format": "png",
         "fromSurface": True,
         "captureBeyondViewport": False,
-        "clip": {**BOX, "scale": 1},
+        "clip": {"x": 0.0, "y": 0.0, "width": 1280.0, "height": 720.0, "scale": 1},
     }
     assert png == ASSET_PNG
-    assert returned_box == BOX
+    assert returned_box == {"x": 0.0, "y": 0.0, "width": 1280.0, "height": 720.0}
     assert canvas.screenshot_calls == 0
 
 
@@ -565,7 +652,7 @@ def test_cdp_capture_uses_composited_viewport_when_canvas_is_detached() -> None:
     assert returned_box == {"x": 0.0, "y": 0.0, "width": 1280.0, "height": 720.0}
 
 
-def test_cdp_capture_removes_composited_body_gutter_when_canvas_is_detached() -> None:
+def test_cdp_capture_never_infers_composited_body_gutter() -> None:
     session, _canvas, context, page = make_session()
     page.viewport_size = {"width": 1296, "height": 736}
     session._largest_canvas = lambda _frame: (_ for _ in ()).throw(
@@ -577,17 +664,17 @@ def test_cdp_capture_removes_composited_body_gutter_when_canvas_is_detached() ->
     method, params = context.sessions[0].calls[0]
     assert method == "Page.captureScreenshot"
     assert params["clip"] == {
-        "x": 8.0,
-        "y": 8.0,
+        "x": 0.0,
+        "y": 0.0,
         "width": 1280.0,
         "height": 720.0,
         "scale": 1,
     }
     assert png == ASSET_PNG
-    assert returned_box == {"x": 8.0, "y": 8.0, "width": 1280.0, "height": 720.0}
+    assert returned_box == {"x": 0.0, "y": 0.0, "width": 1280.0, "height": 720.0}
 
 
-def test_cdp_capture_keeps_full_viewport_after_iframe_fit_css_is_active() -> None:
+def test_cdp_capture_keeps_fixed_surface_after_iframe_fit_css_is_active() -> None:
     session, _canvas, context, page = make_session()
     page.viewport_size = {"width": 1296, "height": 736}
     page.evaluate = lambda _script: True
@@ -599,12 +686,18 @@ def test_cdp_capture_keeps_full_viewport_after_iframe_fit_css_is_active() -> Non
 
     method, params = context.sessions[0].calls[0]
     assert method == "Page.captureScreenshot"
-    assert "clip" not in params
+    assert params["clip"] == {
+        "x": 0.0,
+        "y": 0.0,
+        "width": 1280.0,
+        "height": 720.0,
+        "scale": 1,
+    }
     assert png == ASSET_PNG
-    assert returned_box == {"x": 0.0, "y": 0.0, "width": 1296.0, "height": 736.0}
+    assert returned_box == {"x": 0.0, "y": 0.0, "width": 1280.0, "height": 720.0}
 
 
-def test_canvas_ratio_click_uses_inferred_compositor_game_gutter() -> None:
+def test_canvas_ratio_click_never_adds_compositor_game_gutter() -> None:
     session, _canvas, context, page = make_session()
     page.viewport_size = {"width": 1296, "height": 736}
     session._largest_canvas = lambda _frame: (_ for _ in ()).throw(
@@ -616,11 +709,11 @@ def test_canvas_ratio_click_uses_inferred_compositor_game_gutter() -> None:
     assert context.sessions[0].calls == [
         (
             "Input.dispatchMouseEvent",
-            {"type": "mousePressed", "x": 328.0, "y": 548.0, "button": "left", "clickCount": 1},
+            {"type": "mousePressed", "x": 320.0, "y": 540.0, "button": "left", "clickCount": 1},
         ),
         (
             "Input.dispatchMouseEvent",
-            {"type": "mouseReleased", "x": 328.0, "y": 548.0, "button": "left", "clickCount": 1},
+            {"type": "mouseReleased", "x": 320.0, "y": 540.0, "button": "left", "clickCount": 1},
         ),
     ]
 
@@ -657,14 +750,14 @@ def test_monitor_capture_uses_only_normalized_canvas_region() -> None:
     method, params = context.sessions[0].calls[0]
     assert method == "Page.captureScreenshot"
     assert params["clip"] == {
-        "x": 112.5,
-        "y": 124.25,
-        "width": 300.0,
-        "height": 120.0,
+        "x": 256.0,
+        "y": 216.0,
+        "width": 768.0,
+        "height": 288.0,
         "scale": 0.65,
     }
     assert png == ASSET_PNG
-    assert full_size == (500, 300)
+    assert full_size == (1280, 720)
     assert scale == 0.65
 
 

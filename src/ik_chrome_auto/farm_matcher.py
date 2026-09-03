@@ -29,6 +29,12 @@ _BUSY_TEAM_LABEL = "browser_busy_team_label.png"
 # The countdown digits after the busy icon change every second.  Matching the
 # entire label made a busy row intermittently score below a false Ready match.
 _BUSY_TEAM_INDICATOR_WIDTH = 26
+# Grayscale correlation alone is unsafe for the tiny Ready label: changing
+# countdown/resource text in a busy row can share the same broad light/dark
+# pattern.  Its glyph edges must also match before a row becomes schedulable.
+# The live false-positive reported on account 2 scored 0.2205 here, while its
+# two genuine Ready rows scored 0.2610 and 0.2584.
+_READY_TEAM_MIN_EDGE_SCORE = 0.24
 # Browser screenshots have their own HUD scaling. These are stable roster
 # layout proportions, not gameplay click coordinates. A matched Ready label
 # is mapped to its actual row before any scheduler decision is made.
@@ -399,11 +405,14 @@ class BrowserCanvasMatcher:
             raise ValueError("Canvas screenshot không phải PNG hợp lệ")
         evidence = {template_id: self._match(image, template_id) for template_id in DETECTION_TEMPLATES}
         result = BrowserGameStateDetector().detect(evidence)
-        # The compact team HUD is meaningful only on the verified World Map.
-        # Do not let similar text in City/popup UI leak into farm scheduling.
+        # The same compact team HUD is visible in both stable City and World
+        # Map frames. Scanning only World Map left the dashboard with a stale
+        # all-ready roster while the profile was visibly in City. Popup and
+        # unknown screens remain excluded so unrelated text cannot leak into
+        # scheduling.
         roster = (
             self._team_roster(image)
-            if result.state == DetectedGameState.WORLD_MAP
+            if self._state_has_team_roster(result.state)
             else ()
         )
         return replace(
@@ -411,6 +420,10 @@ class BrowserCanvasMatcher:
             ready_teams=tuple(row.team for row in roster if row.state == TeamRowState.READY),
             team_roster=roster,
         )
+
+    @staticmethod
+    def _state_has_team_roster(state: DetectedGameState) -> bool:
+        return state in {DetectedGameState.CITY, DetectedGameState.WORLD_MAP}
 
     def _team_roster(self, image: object) -> tuple[TeamRosterRow, ...]:
         """Scan every unlocked roster row and classify it exactly once.
@@ -450,6 +463,7 @@ class BrowserCanvasMatcher:
         portrait_left = round(image_width * _ROSTER_PORTRAIT_LEFT_RATIO)
         portrait_right = min(round(image_width * _ROSTER_PORTRAIT_RIGHT_RATIO), image_width)
         ready_grays = tuple(cv2.cvtColor(template, cv2.COLOR_BGR2GRAY) for template in status_ready)
+        ready_edges = tuple(cv2.Canny(template, 50, 120) for template in ready_grays)
         # Keep only the static icon/prefix of the busy label; the trailing
         # ``mm:ss`` text is intentionally excluded because it changes on each
         # capture.  This is especially important for rows 1/2 in the live HUD.
@@ -480,6 +494,11 @@ class BrowserCanvasMatcher:
                 cv2.minMaxLoc(cv2.matchTemplate(search_gray, template, cv2.TM_CCOEFF_NORMED))[1]
                 for template in ready_grays
             )
+            search_edges = cv2.Canny(search_gray, 50, 120)
+            ready_edge_score = max(
+                cv2.minMaxLoc(cv2.matchTemplate(search_edges, template, cv2.TM_CCOEFF_NORMED))[1]
+                for template in ready_edges
+            )
             busy_score = -1.0
             # The icon starts at the fixed left edge of the label and the HUD
             # baseline is stable within each row. Restrict its search band to
@@ -505,7 +524,7 @@ class BrowserCanvasMatcher:
             # make every row score as `Sẵn sàng` at the old 0.66 threshold.
             if busy_score >= 0.62:
                 states[team] = TeamRowState.BUSY
-            elif ready_score >= 0.55 and ready_score >= busy_score + 0.06:
+            elif self._is_ready_team_label(ready_score, ready_edge_score, busy_score):
                 states[team] = TeamRowState.READY
             elif busy_score >= 0.55 and busy_score >= ready_score + 0.05:
                 states[team] = TeamRowState.BUSY
@@ -525,6 +544,19 @@ class BrowserCanvasMatcher:
                 ),
             )
             for team in range(1, highest_confirmed + 1)
+        )
+
+    @staticmethod
+    def _is_ready_team_label(
+        grayscale_score: float,
+        edge_score: float,
+        busy_score: float,
+    ) -> bool:
+        """Require both the tone and glyph shape of the Vietnamese label."""
+        return (
+            grayscale_score >= 0.55
+            and edge_score >= _READY_TEAM_MIN_EDGE_SCORE
+            and grayscale_score >= busy_score + 0.06
         )
 
     @staticmethod

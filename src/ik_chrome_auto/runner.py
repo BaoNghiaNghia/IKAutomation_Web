@@ -70,20 +70,9 @@ FARM_REFERENCE_ASPECT_RATIO = 16 / 9
 # recognition.  The worker therefore temporarily renders a single active
 # profile at this true 16:9 size; it never upscales a compact screenshot.
 AUTOMATION_RENDERER_SIZE = (1280, 720)
-# The browser bootstrap now removes the portal/iframe document's default 8 px
-# body margin. The native renderer must therefore be exactly 1280×720 too;
-# retaining the old +16 compensation makes the game itself render at
-# 1296×736, drops all template scores, and causes the lease/restore cycle to
-# look like repeated zooming.
-AUTOMATION_RENDERER_CANVAS_GUTTER = (0, 0)
-AUTOMATION_RENDERER_WINDOW_SIZE = tuple(
-    canvas + gutter
-    for canvas, gutter in zip(
-        AUTOMATION_RENDERER_SIZE,
-        AUTOMATION_RENDERER_CANVAS_GUTTER,
-        strict=True,
-    )
-)
+# The iframe, canvas and renderer now share this exact size and origin. There
+# is no host/body/iframe compensation in either dimension.
+AUTOMATION_RENDERER_WINDOW_SIZE = AUTOMATION_RENDERER_SIZE
 FARM_MINIMUM_CANVAS_SIZE = AUTOMATION_RENDERER_SIZE
 # One high-detail WebGL renderer at a time prevents five compact profiles from
 # becoming five simultaneous 720p GPU surfaces.  A Farm lease survives the
@@ -394,6 +383,10 @@ class ProfileWorker:
             restore_renderer = getattr(self.session, "restore_automation_renderer", None)
             if restore and callable(restore_renderer):
                 restore_renderer(layout)
+            elif not restore:
+                end_game_frame = getattr(self.session, "end_automation_game_frame", None)
+                if callable(end_game_frame):
+                    end_game_frame()
         finally:
             self._automation_renderer_lock.release()
 
@@ -1126,6 +1119,19 @@ class ProfileWorker:
                     reason="resume_verified_city",
                 )
                 return
+            if detected.state == DetectedGameState.CONTINENT_MAP:
+                # A previous build could clear the pending relocation after
+                # entering Continent Map but before focusing X/Y. Recover to
+                # a known map screen instead of leaving generic PREFLIGHT to
+                # classify this verified screen as UNKNOWN forever.
+                self.session.press_escape()
+                self._log_farm("recover_orphaned_continent_map", {})
+                self._farm_next_at = time.monotonic() + 1.5
+                self._publish(
+                    WorkerState.RUNNING,
+                    "Auto Farm: đang thoát Continent Map bị gián đoạn để khôi phục lượt farm",
+                )
+                return
             # Ported from ADB ResourceSearchExecutionService: probe the short
             # toast window after each fresh Search tap. A verified negative
             # toast advances the already-fixed level/resource plan; it is not
@@ -1602,12 +1608,11 @@ class ProfileWorker:
                     )
                     self._publish(WorkerState.RUNNING, "Auto Farm: nút tìm tài nguyên thay đổi, đang nhận diện lại")
                     return
-                # This portal's WebGL HUD ignores CDP touch on some profiles.
-                # Use an OS-level click first, derived solely from the fresh
-                # 1280×720 renderer capture.  If its postcondition is still
-                # absent, retry once through Playwright's canvas locator.
+                # Use a renderer-level compositor mouse event first. It is
+                # independent of window overlap/z-order and reaches the game
+                # iframe without moving the user's physical cursor.
                 if self._farm_search_clicks == 0:
-                    input_method = self._click_farm_native_game_control(click_bounds, fresh_size)
+                    input_method = self._click_farm_background_game_control(click_bounds, fresh_size)
                 else:
                     input_method = self._click_farm_panel_control(click_bounds, fresh_size)
                 self._farm_search_clicks += 1
@@ -1980,16 +1985,16 @@ class ProfileWorker:
                                 # Playwright/canvas click even though the
                                 # unchecked control remains visible. Capture
                                 # has just re-verified that exact state, so a
-                                # single native click at the freshly matched
-                                # bounds is safe; never click stale pixels.
-                                input_method = self._click_farm_native_game_control(
+                                # second compositor click at the freshly
+                                # matched bounds is safe; never click stale pixels.
+                                input_method = self._click_farm_background_game_control(
                                     target_checkbox_unchecked.bounds,  # type: ignore[arg-type]
                                     image_size,
                                 )
                                 self._farm_target_checkbox_click_at = time.monotonic()
                                 self._farm_target_checkbox_clicks += 1
                                 self._log_farm(
-                                    "retry_search_target_checkbox_native",
+                                    "retry_search_target_checkbox_background",
                                     {
                                         "bounds": target_checkbox_unchecked.bounds,
                                         "input": input_method,
@@ -1997,7 +2002,7 @@ class ProfileWorker:
                                 )
                                 self._publish(
                                     WorkerState.RUNNING,
-                                    "Auto Farm: checkbox chưa nhận lần đầu; đã bấm lại bằng chuột native",
+                                    "Auto Farm: checkbox chưa nhận lần đầu; đã gửi lại click nền vào iframe",
                                 )
                                 self._farm_next_at = self._farm_target_checkbox_click_at + 0.8
                                 return
@@ -2330,22 +2335,25 @@ class ProfileWorker:
                 "Auto Farm: đang chờ xác minh icon Map để mở Continent Map",
             )
             return True
-        self._farm_area_relocation_pending = None
-        self._farm_area_pending_selection = None
         if relocation == "unavailable":
-            # Do not continue from a half-verified map/input UI. A new
-            # preflight brings the game back to a known state before any next
-            # input, while the user-started Farm itself remains running.
+            # Keep both the requested target and its already selected point.
+            # Clearing them here used to reset the workflow to PREFLIGHT while
+            # the profile was still visibly on Continent Map, after which it
+            # could never reach the X/Y input branch again.
+            self._farm_area_relocation_pending = (resource, level)
             self._log_farm(
                 "search_round_area_waiting",
                 {"reason": reason, "level": level, "resource": resource},
             )
-            return self._retry_farm_or_stop(
-                "resource_area_navigation_unverified",
-                "không thể xác minh đổi khu vực; quay lại preflight an toàn",
-                resource=resource,
-                level=level,
+            self._farm_next_at = time.monotonic() + 1.5
+            self._publish(
+                WorkerState.RUNNING,
+                "Auto Farm: giữ mục tiêu đổi khu vực và đang thử lại bước X/Y",
             )
+            return True
+
+        self._farm_area_relocation_pending = None
+        self._farm_area_pending_selection = None
 
         # Three non-repeating points are the whole bounded fallback for this
         # target.  Keep Auto Farm active, but do not loop through coordinates
@@ -2494,21 +2502,20 @@ class ProfileWorker:
         bounds: tuple[int, int, int, int],
         image_size: tuple[int, int],
     ) -> None:
-        """Click City/Map natively at its exact verified canvas ratio.
+        """Click City/Map in the profile renderer at its verified ratio.
 
         Several portal profiles acknowledge Playwright's synthetic mouse
-        call without forwarding it to the WebGL HUD.  The native path uses
-        the live window and canvas geometry, so it remains resolution-safe
-        while producing the same physical click a user performs.
+        call without forwarding it to the WebGL HUD. The compositor path is
+        resolution-safe and remains usable while this window is covered.
         """
         if self.session is None:
             raise RuntimeError("Profile chưa mở")
         if not getattr(self, "_automation_renderer_locked", False):
             raise RuntimeError("Nút Map/City chỉ được bấm sau khi renderer đã khóa ở 1280×720")
-        native_click = getattr(self.session, "click_game_surface_native_ratio", None)
+        background_click = getattr(self.session, "dispatch_game_surface_mouse_ratio", None)
         click_ratio = getattr(self.session, "click_game_surface_ratio", None)
-        if callable(native_click):
-            native_click(*FARM_MAP_TOGGLE_CENTER)
+        if callable(background_click):
+            background_click(*FARM_MAP_TOGGLE_CENTER)
         elif callable(click_ratio):
             click_ratio(*FARM_MAP_TOGGLE_CENTER)
         else:
@@ -2566,24 +2573,24 @@ class ProfileWorker:
             return "touch_canvas_template"
         return self._click_farm_panel_control(bounds, image_size)
 
-    def _click_farm_native_game_control(
+    def _click_farm_background_game_control(
         self,
         bounds: tuple[int, int, int, int],
         image_size: tuple[int, int],
     ) -> str:
-        """Use native input only as a second verified WebGL-control attempt."""
+        """Use background compositor input for a verified WebGL control."""
         if self.session is None:
             raise RuntimeError("Profile chưa mở")
         if not getattr(self, "_automation_renderer_locked", False):
             raise RuntimeError("Control Farm chỉ được bấm sau khi renderer đã khóa ở 1280×720")
         left, top, width, height = bounds
         image_width, image_height = image_size
-        native_click = getattr(self.session, "click_game_surface_native_ratio", None)
-        if callable(native_click) and image_width > 0 and image_height > 0:
-            native_click((left + width / 2) / image_width, (top + height / 2) / image_height)
+        background_click = getattr(self.session, "dispatch_game_surface_mouse_ratio", None)
+        if callable(background_click) and image_width > 0 and image_height > 0:
+            background_click((left + width / 2) / image_width, (top + height / 2) / image_height)
             self._hold_automation_renderer_for_postcondition()
-            return "native_canvas_ratio"
-        return self._tap_farm_game_control(bounds, image_size)
+            return "cdp_canvas_ratio"
+        return self._click_farm_panel_control(bounds, image_size)
 
     # Compatibility for tests/integrations that referenced the directional
     # helper before both directions were unified onto the same physical slot.
@@ -2632,6 +2639,28 @@ class ProfileWorker:
                 self._log_farm(
                     "resource_area_navigation_blocked",
                     {"reason": "search_panel_close_unverified"},
+                )
+                return "unavailable"
+            detected, _surface, size = prepared
+
+        if detected.state == DetectedGameState.CONTINENT_MAP:
+            # A retained pending relocation means the prior attempt reached
+            # this screen but failed to focus an input. Escape once, verify a
+            # known City/World Map state, and re-enter using the same point.
+            # This avoids both blind coordinate input and a dead PREFLIGHT.
+            self.session.press_escape()
+            self._log_farm("recover_continent_map_for_coordinate_retry", {})
+            prepared = self._wait_for_farm_detection(
+                lambda frame: frame.state in {
+                    DetectedGameState.WORLD_MAP,
+                    DetectedGameState.CITY,
+                },
+                timeout_seconds=6.0,
+            )
+            if prepared is None:
+                self._log_farm(
+                    "resource_area_navigation_blocked",
+                    {"reason": "continent_map_close_unverified"},
                 )
                 return "unavailable"
             detected, _surface, size = prepared
@@ -2712,7 +2741,7 @@ class ProfileWorker:
         if continent_result is None:
             # WebGL touch can occasionally be ignored. Never retry at stale
             # coordinates: capture again and require the same actionable icon
-            # on the same verified map state before using native mouse input.
+            # on the same verified map state before background compositor input.
             retry_frame, _surface, retry_size = self.session.detect_farm_state()
             retry_button = retry_frame.evidence_for(
                 FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON
@@ -2724,11 +2753,11 @@ class ProfileWorker:
                 }
                 and retry_button.actionable
             ):
-                input_method = self._click_farm_native_game_control(
+                input_method = self._click_farm_background_game_control(
                     retry_button.bounds, retry_size  # type: ignore[arg-type]
                 )
                 self._log_farm(
-                    "retry_continent_map_button_native",
+                    "retry_continent_map_button_background",
                     {
                         "bounds": retry_button.bounds,
                         "point": point,

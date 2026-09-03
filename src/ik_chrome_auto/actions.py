@@ -114,8 +114,8 @@ class AutomationFunctions:
         if not 0 <= x <= 1 or not 0 <= y <= 1:
             raise ValueError("click_ratio yêu cầu x và y trong khoảng 0..1")
         box = self.session.surface_box(target=target, frame_url_contains=frame_url_contains)
-        click_x = box["x"] + box["width"] * x
-        click_y = box["y"] + box["height"] * y
+        click_x = box["width"] * x
+        click_y = box["height"] * y
         self.status(f"Click {target} tại tỉ lệ ({x:.3f}, {y:.3f})")
         self.session.page.mouse.click(click_x, click_y)
 
