@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,13 +12,31 @@ from ik_chrome_auto.windows import (
     capture_screen_region_png,
     descendant_process_ids,
     encode_rgb_png,
+    find_tcp_listener_process,
 )
+import ik_chrome_auto.windows as windows_module
 
 
 def test_descendant_process_ids_collects_full_tree_without_cycles() -> None:
     parents = {11: 10, 12: 10, 13: 11, 14: 13, 10: 14, 99: 50}
 
     assert descendant_process_ids(10, parents) == (10, 11, 12, 13, 14)
+
+
+def test_tcp_listener_process_parses_profile_cdp_port(monkeypatch) -> None:
+    monkeypatch.setattr(windows_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        windows_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            stdout=(
+                "  TCP    127.0.0.1:23145    0.0.0.0:0    LISTENING    4321\n"
+                "  TCP    [::1]:9999        [::]:0       LISTENING    7777\n"
+            )
+        ),
+    )
+
+    assert find_tcp_listener_process(23145) == 4321
 
 
 def test_calculate_tiled_positions_orders_left_to_right_then_down() -> None:

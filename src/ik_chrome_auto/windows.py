@@ -445,6 +445,63 @@ def find_chrome_window(title: str) -> int | None:
     return matches[0] if matches else None
 
 
+def find_tcp_listener_process(port: int) -> int | None:
+    """Resolve a local TCP port owner without requiring admin privileges."""
+    if sys.platform != "win32" or not 1 <= int(port) <= 65535:
+        return None
+    try:
+        result = subprocess.run(
+            ["netstat", "-ano", "-p", "tcp"],
+            capture_output=True,
+            text=True,
+            timeout=4,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    wanted = int(port)
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 4 or fields[0].upper() != "TCP":
+            continue
+        local = fields[1]
+        try:
+            local_port = int(local.rsplit(":", 1)[1])
+            process_id = int(fields[-1])
+        except (IndexError, ValueError):
+            continue
+        if local_port == wanted and process_id > 0:
+            return process_id
+    return None
+
+
+def find_chrome_window_for_process(process_id: int | None) -> int | None:
+    """Find a visible Chrome window owned by a browser process or its child."""
+    if sys.platform != "win32" or not process_id:
+        return None
+    process_ids = set(descendant_process_ids(int(process_id), snapshot_process_parents()))
+    matches: list[int] = []
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    @callback_type
+    def collect(hwnd: int, _lparam: int) -> bool:
+        if not _user32.IsWindowVisible(hwnd):
+            return True
+        class_buffer = ctypes.create_unicode_buffer(128)
+        _user32.GetClassNameW(hwnd, class_buffer, len(class_buffer))
+        if class_buffer.value != "Chrome_WidgetWin_1":
+            return True
+        owner = wintypes.DWORD()
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if int(owner.value) in process_ids:
+            matches.append(int(hwnd))
+        return True
+
+    _user32.EnumWindows(collect, 0)
+    return matches[0] if matches else None
+
+
 def set_taskbar_group(hwnd: int, app_id: str = TASKBAR_APP_ID) -> bool:
     """Set a shared Windows AppUserModelID so profile windows use one taskbar icon."""
     if not is_window(hwnd):

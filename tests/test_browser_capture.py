@@ -321,6 +321,20 @@ def test_synced_pointer_uses_largest_target_canvas_not_source_canvas_index() -> 
     assert box == {"x": 0.0, "y": 0.0, "width": 1280.0, "height": 720.0}
 
 
+def test_native_window_falls_back_to_managed_chrome_process(monkeypatch: Any) -> None:
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session.profile = SimpleNamespace(name="Tài khoản 02 · Vochon***")
+    session._managed_browser_pid = 4321
+    monkeypatch.setattr(browser_module, "find_chrome_window", lambda _title: None)
+    monkeypatch.setattr(
+        browser_module,
+        "find_chrome_window_for_process",
+        lambda process_id: 9876 if process_id == 4321 else None,
+    )
+
+    assert session._find_native_window() == 9876
+
+
 def test_synced_canvas_event_selects_largest_matching_game_frame() -> None:
     class Locator:
         def __init__(self, boxes: list[dict[str, float]]) -> None:

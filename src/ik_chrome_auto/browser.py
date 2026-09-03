@@ -28,6 +28,8 @@ from ik_chrome_auto.windows import (
     WindowRect,
     capture_screen_region_png,
     find_chrome_window,
+    find_chrome_window_for_process,
+    find_tcp_listener_process,
     get_window_rect,
     get_renderer_rect,
     is_window,
@@ -198,6 +200,7 @@ class ChromeProfileSession:
         self._drag_item_visible = False
         self._scrollbars_visible = False
         self._window_handle: int | None = None
+        self._managed_browser_pid: int | None = None
         self._topmost = False
         self._configured_frames: dict[int, str] = {}
         self._externally_closed = False
@@ -335,7 +338,7 @@ class ChromeProfileSession:
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             )
             try:
-                subprocess.Popen(
+                process = subprocess.Popen(
                     args,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
@@ -343,6 +346,7 @@ class ChromeProfileSession:
                     creationflags=creationflags,
                     close_fds=True,
                 )
+                self._managed_browser_pid = int(process.pid)
             except OSError as error:
                 raise RuntimeError(f"Không thể mở Chrome cho profile {self.profile.name}: {error}") from error
 
@@ -354,6 +358,12 @@ class ChromeProfileSession:
                     "Hãy đóng riêng cửa sổ Chrome của profile này rồi thử lại."
                 )
             time.sleep(0.2)
+        # The CDP listener belongs to the correct profile's Chrome process.
+        # Resolve it even when reconnecting to a window retained across an
+        # IK Auto update, where the current page title may no longer match.
+        listener_pid = find_tcp_listener_process(port)
+        if listener_pid is not None:
+            self._managed_browser_pid = listener_pid
         self._connect_cdp(endpoint)
 
     def _start_cdp(self) -> None:
@@ -555,7 +565,9 @@ class ChromeProfileSession:
     def resize(self, width: int, height: int) -> None:
         width, height = validate_viewport(int(width), int(height))
         if sys.platform == "win32" and not self.config.browser.headless:
-            hwnd = self.window_handle or self._bind_native_window(retries=30)
+            # A slower workstation can expose CDP before its top-level Chrome
+            # window becomes visible. Give the native HWND up to ten seconds.
+            hwnd = self.window_handle or self._bind_native_window(retries=100)
             if hwnd is None:
                 raise RuntimeError(f"Cannot find the Chrome window for {self.profile.name}")
             rect = get_window_rect(hwnd)
@@ -1266,16 +1278,24 @@ class ChromeProfileSession:
     def window_handle(self) -> int | None:
         if is_window(self._window_handle):
             return self._window_handle
-        self._window_handle = find_chrome_window(self.profile.name)
+        self._window_handle = self._find_native_window()
         if self._window_handle is not None:
             set_taskbar_group(self._window_handle)
         return self._window_handle
+
+    def _find_native_window(self) -> int | None:
+        # Prefer the profile title because it also works for externally
+        # configured CDP sessions. Fall back to the CDP-owning process when
+        # Chrome has truncated, localized, or not yet applied that title.
+        return find_chrome_window(self.profile.name) or find_chrome_window_for_process(
+            getattr(self, "_managed_browser_pid", None)
+        )
 
     def _bind_native_window(self, retries: int = 30) -> int | None:
         if self.config.browser.headless:
             return None
         for _attempt in range(max(1, retries)):
-            hwnd = find_chrome_window(self.profile.name)
+            hwnd = self._find_native_window()
             if hwnd is not None:
                 self._window_handle = hwnd
                 set_taskbar_group(hwnd)
