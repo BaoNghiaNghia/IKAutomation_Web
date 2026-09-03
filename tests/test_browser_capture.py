@@ -41,6 +41,14 @@ def test_game_frame_fit_overrides_the_live_gtarcade_iframe_inline_size() -> None
     assert "height: 100vh !important" in GAME_FRAME_FIT_SCRIPT
 
 
+def test_game_frame_fit_removes_the_eight_pixel_body_margin_inside_the_frame() -> None:
+    assert "location.hostname.endsWith('.gtarcade.com')" in GAME_FRAME_FIT_SCRIPT
+    assert "node.style.setProperty('margin', '0', 'important')" in GAME_FRAME_FIT_SCRIPT
+    assert "node.style.setProperty('padding', '0', 'important')" in GAME_FRAME_FIT_SCRIPT
+    assert "document.querySelector(iframeSelector)" in GAME_FRAME_FIT_SCRIPT
+    assert "MutationObserver" in GAME_FRAME_FIT_SCRIPT
+
+
 class FakePage:
     def __init__(self, url: str = "https://ik.playfun.vn/play-game") -> None:
         self.url = url

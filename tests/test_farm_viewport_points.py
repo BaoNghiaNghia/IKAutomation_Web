@@ -34,7 +34,7 @@ def test_farm_layout_fallbacks_use_relative_canvas_positions_at_16_by_9() -> Non
     assert ProfileWorker._search_target_checkbox_layout_bounds((1280, 720)) == (996, 494, 51, 47)
 
 
-def test_area_relocation_closes_search_panel_and_uses_world_map_castle() -> None:
+def test_area_relocation_closes_search_panel_and_opens_continent_map_directly() -> None:
     def frame(
         state: DetectedGameState,
         template: FarmTemplateId | None = None,
@@ -47,8 +47,7 @@ def test_area_relocation_closes_search_panel_and_uses_world_map_castle() -> None
         def __init__(self) -> None:
             self.frames = [
                 frame(DetectedGameState.RESOURCE_SEARCH_PANEL),
-                frame(DetectedGameState.WORLD_MAP, FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON),
-                frame(DetectedGameState.CITY, FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON),
+                frame(DetectedGameState.WORLD_MAP, FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON),
                 frame(DetectedGameState.CONTINENT_MAP, FarmTemplateId.CONTINENT_MAP_PIN_BUTTON),
             ]
             self.escape_calls = 0
@@ -96,12 +95,13 @@ def test_area_relocation_closes_search_panel_and_uses_world_map_castle() -> None
     assert result == "unavailable"  # Coordinate inputs are deliberately unreadable in this test.
     assert session.escape_calls == 1
     assert len(selector_calls) == 1
-    assert taps == [((10, 20, 30, 40), (1280, 720)), ((10, 20, 30, 40), (1280, 720))]
+    assert taps == [((10, 20, 30, 40), (1280, 720))]
     assert ("close_search_panel_for_area_navigation", {}) in logs
     assert any(
-        event == "tap_world_map_return_to_city" and payload["control"] == "world_map_castle"
+        event == "tap_continent_map_button" and payload["from_state"] == "world_map"
         for event, payload in logs
     )
+    assert not any(event == "tap_world_map_return_to_city" for event, _payload in logs)
 
 
 def test_area_relocation_resumed_on_city_clicks_only_continent_map() -> None:
@@ -160,10 +160,10 @@ def test_area_relocation_resumed_on_city_clicks_only_continent_map() -> None:
     assert result == "unavailable"
     assert taps == [((202, 550, 50, 48), (1280, 720))]
     assert not any(event == "tap_world_map_return_to_city" for event, _payload in logs)
-    assert any(event == "tap_city_continent_map" for event, _payload in logs)
+    assert any(event == "tap_continent_map_button" for event, _payload in logs)
 
 
-def test_missing_city_map_icon_stays_in_relocation_instead_of_preflight() -> None:
+def test_missing_continent_map_icon_stays_in_relocation_instead_of_preflight() -> None:
     worker = ProfileWorker.__new__(ProfileWorker)
     worker._farm = FarmWorkflow()
     worker._farm_area_relocation_pending = None
@@ -175,7 +175,7 @@ def test_missing_city_map_icon_stays_in_relocation_instead_of_preflight() -> Non
     )
 
     handled = worker._apply_resource_area_relocation_result(
-        "city_waiting",
+        "map_button_waiting",
         "iron",
         7,
         reason="search_button_remained_visible",

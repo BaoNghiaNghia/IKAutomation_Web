@@ -149,9 +149,28 @@ def _low_gpu_init_script(fps_limit: int) -> str:
 
 
 def _game_frame_fit_init_script() -> str:
-    """Return persistent host CSS that removes the portal iframe gutter."""
+    """Return persistent CSS that removes host and game-frame gutters."""
     return r"""
     (() => {
+      const iframeSelector =
+        'iframe.iframe[src*="gtarcade.com"], iframe[src*="union.gtarcade.com/channel/"]';
+      const zeroDocumentGutter = () => {
+        let isGtarcadeDocument = false;
+        try {
+          isGtarcadeDocument =
+            location.hostname === 'gtarcade.com' ||
+            location.hostname.endsWith('.gtarcade.com');
+        } catch (_) {}
+        if (!isGtarcadeDocument && !document.querySelector(iframeSelector)) return;
+        for (const node of [document.documentElement, document.body]) {
+          if (!node) continue;
+          node.style.setProperty('margin', '0', 'important');
+          node.style.setProperty('padding', '0', 'important');
+          node.style.setProperty('width', '100%', 'important');
+          node.style.setProperty('height', '100%', 'important');
+          node.style.setProperty('overflow', 'hidden', 'important');
+        }
+      };
       const install = () => {
         const root = document.head || document.documentElement;
         if (!root) return;
@@ -178,10 +197,20 @@ def _game_frame_fit_init_script() -> str:
             border: 0 !important;
           }
         `;
+        zeroDocumentGutter();
       };
       install();
       if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', install, { once: true });
+      }
+      if (!window.__IK_AUTO_GAME_FRAME_FIT_OBSERVER && document.documentElement) {
+        window.__IK_AUTO_GAME_FRAME_FIT_OBSERVER = new MutationObserver(
+          zeroDocumentGutter
+        );
+        window.__IK_AUTO_GAME_FRAME_FIT_OBSERVER.observe(
+          document.documentElement,
+          { childList: true, subtree: true }
+        );
       }
     })();
     """

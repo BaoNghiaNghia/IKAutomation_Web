@@ -166,9 +166,9 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
         "browser_city_continent_map_button.png",
         threshold=0.80,
         region="lower_left",
-        # Current City HUD capture supplied from the live 1280x720 profile.
+        # Current World Map HUD capture supplied from the live 1280x720 profile.
         # The old 28x25 crop came from an 850x437 frame and scaled into a
-        # different aspect, so a verified City could never authorise opening
+        # different aspect, so the verified map view could never authorise opening
         # Continent Map.
         reference_width=1280,
         reference_height=720,
