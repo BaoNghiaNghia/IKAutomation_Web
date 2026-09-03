@@ -148,6 +148,48 @@ def _low_gpu_init_script(fps_limit: int) -> str:
     """
 
 
+def _game_frame_fit_init_script() -> str:
+    """Return persistent host CSS that removes the portal iframe gutter."""
+    return r"""
+    (() => {
+      const install = () => {
+        const root = document.head || document.documentElement;
+        if (!root) return;
+        const styleId = '__ik_auto_game_frame_fit';
+        let style = document.getElementById(styleId);
+        if (!style) {
+          style = document.createElement('style');
+          style.id = styleId;
+          root.appendChild(style);
+        }
+        style.textContent = `
+          iframe.iframe[src*="gtarcade.com"],
+          iframe[src*="union.gtarcade.com/channel/"] {
+            position: fixed !important;
+            inset: 0 !important;
+            display: block !important;
+            box-sizing: border-box !important;
+            width: 100vw !important;
+            height: 100vh !important;
+            max-width: none !important;
+            max-height: none !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            border: 0 !important;
+          }
+        `;
+      };
+      install();
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', install, { once: true });
+      }
+    })();
+    """
+
+
+GAME_FRAME_FIT_SCRIPT = _game_frame_fit_init_script()
+
+
 def _image_has_visible_content(image: RGBImage) -> bool:
     """Reject empty WebGL toDataURL captures (transparent/solid black)."""
     step_x = max(1, image.width // 32)
@@ -258,6 +300,16 @@ class ChromeProfileSession:
                     except Exception:
                         continue
         self.context.add_init_script(INTERACTION_PROBE)
+        # Install before any later portal navigation. Inline width/height on
+        # the GTArcade iframe is intentionally overridden with !important so
+        # the host's default 8 px body margin cannot leave a black frame.
+        self.context.add_init_script(GAME_FRAME_FIT_SCRIPT)
+        for existing_page in self.context.pages:
+            for frame in existing_page.frames:
+                try:
+                    frame.evaluate(GAME_FRAME_FIT_SCRIPT)
+                except Exception:
+                    continue
         if self.config.browser.profile_title:
             self.context.add_init_script(self._profile_title_script())
         self.reader.attach(self.context)
@@ -826,6 +878,24 @@ class ChromeProfileSession:
             "width": max(1.0, float(viewport["width"])),
             "height": max(1.0, float(viewport["height"])),
         }
+        try:
+            frame_fit_active = bool(
+                page.evaluate(
+                    """() => Boolean(
+                        document.getElementById('__ik_auto_game_frame_fit') &&
+                        document.querySelector(
+                            'iframe.iframe[src*="gtarcade.com"], iframe[src*="union.gtarcade.com/channel/"]'
+                        )
+                    )"""
+                )
+            )
+        except Exception:
+            frame_fit_active = False
+        if frame_fit_active:
+            # The target iframe is fixed to the viewport; there is no gutter
+            # to infer even when 1296x736 happens to become 16:9 after an
+            # eight-pixel crop.
+            return box
         # Some retained GTArcade profiles keep their WebGL iframe in the
         # compositor after Chromium has detached it from Playwright's frame
         # tree.  The host page then exposes only its default 8 px body gutter:
@@ -1601,6 +1671,7 @@ class ChromeProfileSession:
             if not force and self._configured_frames.get(key) == signature:
                 continue
             try:
+                frame.evaluate(GAME_FRAME_FIT_SCRIPT)
                 frame.evaluate(INTERACTION_PROBE)
                 frame.evaluate(
                     "([syncSource, inspectEnabled]) => "

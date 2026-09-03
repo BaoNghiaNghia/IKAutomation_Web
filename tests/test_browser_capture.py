@@ -5,6 +5,7 @@ from typing import Any
 
 import ik_chrome_auto.browser as browser_module
 from ik_chrome_auto.browser import (
+    GAME_FRAME_FIT_SCRIPT,
     ChromeProfileSession,
     _image_has_visible_content,
     _low_gpu_init_script,
@@ -30,6 +31,14 @@ def test_fps_limiter_can_update_a_retained_profile_to_22_fps() -> None:
     assert assignment in script
     assert script.index(assignment) < script.index("if (window.__IK_LOW_GPU_MODE) return")
     assert "Number(window.__IK_RENDER_INTERVAL_MS)" in script
+
+
+def test_game_frame_fit_overrides_the_live_gtarcade_iframe_inline_size() -> None:
+    assert "iframe.iframe" in GAME_FRAME_FIT_SCRIPT
+    assert "union.gtarcade.com/channel/" in GAME_FRAME_FIT_SCRIPT
+    assert "position: fixed !important" in GAME_FRAME_FIT_SCRIPT
+    assert "width: 100vw !important" in GAME_FRAME_FIT_SCRIPT
+    assert "height: 100vh !important" in GAME_FRAME_FIT_SCRIPT
 
 
 class FakePage:
@@ -552,6 +561,23 @@ def test_cdp_capture_removes_composited_body_gutter_when_canvas_is_detached() ->
     }
     assert png == ASSET_PNG
     assert returned_box == {"x": 8.0, "y": 8.0, "width": 1280.0, "height": 720.0}
+
+
+def test_cdp_capture_keeps_full_viewport_after_iframe_fit_css_is_active() -> None:
+    session, _canvas, context, page = make_session()
+    page.viewport_size = {"width": 1296, "height": 736}
+    page.evaluate = lambda _script: True
+    session._largest_canvas = lambda _frame: (_ for _ in ()).throw(
+        RuntimeError("Không tìm thấy canvas game đang hiển thị")
+    )
+
+    png, returned_box = session.capture_game_surface_png()
+
+    method, params = context.sessions[0].calls[0]
+    assert method == "Page.captureScreenshot"
+    assert "clip" not in params
+    assert png == ASSET_PNG
+    assert returned_box == {"x": 0.0, "y": 0.0, "width": 1296.0, "height": 736.0}
 
 
 def test_canvas_ratio_click_uses_inferred_compositor_game_gutter() -> None:
