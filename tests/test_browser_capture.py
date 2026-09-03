@@ -409,6 +409,58 @@ def test_synced_canvas_event_selects_largest_matching_game_frame() -> None:
     assert resolved is game
 
 
+def test_find_frame_discovers_canvas_in_nested_iframe_locator() -> None:
+    class CanvasList:
+        def __init__(self, boxes: list[dict[str, float]]) -> None:
+            self.boxes = boxes
+
+        def count(self) -> int:
+            return len(self.boxes)
+
+        def nth(self, index: int) -> Any:
+            return SimpleNamespace(bounding_box=lambda: self.boxes[index])
+
+    class IframeList:
+        def __init__(self, children: list[Any]) -> None:
+            self.children = children
+
+        def count(self) -> int:
+            return len(self.children)
+
+        def nth(self, index: int) -> Any:
+            return SimpleNamespace(content_frame=self.children[index])
+
+    class Root:
+        def __init__(
+            self,
+            *,
+            url: str = "",
+            canvases: list[dict[str, float]] | None = None,
+            children: list[Any] | None = None,
+        ) -> None:
+            self.url = url
+            self.canvases = canvases or []
+            self.children = children or []
+
+        def locator(self, selector: str) -> Any:
+            if selector == "canvas":
+                return CanvasList(self.canvases)
+            if selector == "iframe":
+                return IframeList(self.children)
+            raise AssertionError(selector)
+
+    game = Root(canvases=[{"x": 8.0, "y": 8.0, "width": 1280.0, "height": 720.0}])
+    login = Root(children=[game])
+    main = Root(url="https://ik.playfun.vn/play-game", children=[login])
+    main.frames = [main, login]
+    main.main_frame = main
+    main.is_closed = lambda: False
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session._page = main
+
+    assert session.find_frame() is game
+
+
 def test_mouse_fallback_click_uses_the_template_center() -> None:
     session, _canvas, context, _page = make_session()
 

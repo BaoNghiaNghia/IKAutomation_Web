@@ -715,22 +715,74 @@ class ChromeProfileSession:
                 return int(match.group(1)), int(match.group(2))
         return None
 
-    def find_frame(self, url_contains: str | None = None) -> Frame:
+    def _frame_roots(self, *, max_nested_depth: int = 3) -> list[Any]:
+        """Return Playwright roots that may contain the live game canvas.
+
+        GTArcade normally appears as a regular ``Frame`` in ``page.frames``.
+        Some Chrome builds expose the login iframe there but keep the nested
+        WebGL iframe only as a ``FrameLocator`` (not as another Frame entry).
+        Walking iframe locators as well keeps retained/local Chrome profiles
+        capturable without reloading their game session.
+        """
+        roots: list[Any] = list(reversed(self.page.frames))
+        frontier: list[Any] = list(roots)
+        for _depth in range(max_nested_depth):
+            nested: list[Any] = []
+            for root in frontier:
+                try:
+                    iframes = root.locator("iframe")
+                    count = min(iframes.count(), 16)
+                except Exception:
+                    continue
+                for index in range(count):
+                    try:
+                        child = iframes.nth(index).content_frame
+                    except Exception:
+                        continue
+                    if child is not None:
+                        roots.append(child)
+                        nested.append(child)
+            if not nested:
+                break
+            frontier = nested
+        return roots
+
+    @staticmethod
+    def _visible_canvas(root: Any) -> tuple[Any, dict[str, float]] | None:
+        try:
+            canvases = root.locator("canvas")
+            candidates: list[tuple[Any, dict[str, float]]] = []
+            for index in range(canvases.count()):
+                locator = canvases.nth(index)
+                box = locator.bounding_box()
+                if box and box["width"] > 0 and box["height"] > 0:
+                    candidates.append((locator, box))
+        except Exception:
+            return None
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item[1]["width"] * item[1]["height"])
+
+    def find_frame(self, url_contains: str | None = None) -> Any:
         frames = self.page.frames
         if url_contains:
             matches = [frame for frame in frames if url_contains.lower() in frame.url.lower()]
             if not matches:
                 raise RuntimeError(f"Không tìm thấy frame chứa URL: {url_contains}")
             return matches[-1]
+
+        visible_roots: list[tuple[Any, float]] = []
+        for root in self._frame_roots():
+            candidate = self._visible_canvas(root)
+            if candidate is not None:
+                _canvas, box = candidate
+                visible_roots.append((root, box["width"] * box["height"]))
+        if visible_roots:
+            return max(visible_roots, key=lambda item: item[1])[0]
+
         game_frames = [frame for frame in frames if "gtarcade.com" in frame.url.lower()]
         if game_frames:
             return game_frames[-1]
-        for frame in reversed(frames):
-            try:
-                if frame.locator("canvas").count() > 0:
-                    return frame
-            except Exception:
-                continue
         return self.page.main_frame
 
     def surface_box(self, *, target: str = "canvas", frame_url_contains: str | None = None) -> dict[str, float]:
@@ -1123,17 +1175,11 @@ class ChromeProfileSession:
             raise RuntimeError("Ảnh màn hình game trống; hãy đưa cửa sổ profile ra màn hình")
         return png
 
-    def _largest_canvas(self, frame: Frame) -> tuple[Any, dict[str, float]]:
-        canvases = frame.locator("canvas")
-        candidates: list[tuple[Any, dict[str, float]]] = []
-        for index in range(canvases.count()):
-            locator = canvases.nth(index)
-            box = locator.bounding_box()
-            if box and box["width"] > 0 and box["height"] > 0:
-                candidates.append((locator, box))
-        if not candidates:
+    def _largest_canvas(self, frame: Any) -> tuple[Any, dict[str, float]]:
+        candidate = self._visible_canvas(frame)
+        if candidate is None:
             raise RuntimeError("Không tìm thấy canvas game đang hiển thị")
-        return max(candidates, key=lambda item: item[1]["width"] * item[1]["height"])
+        return candidate
 
     def scroll_game_surface(self, delta_y: float) -> None:
         """Send a wheel event at the canvas centre without moving the real cursor."""
