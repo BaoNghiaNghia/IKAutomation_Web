@@ -788,13 +788,15 @@ class ChromeProfileSession:
     def surface_box(self, *, target: str = "canvas", frame_url_contains: str | None = None) -> dict[str, float]:
         frame = self.find_frame(frame_url_contains)
         if target == "canvas":
-            boxes: list[dict[str, float]] = []
-            for index in range(frame.locator("canvas").count()):
-                box = frame.locator("canvas").nth(index).bounding_box()
-                if box and box["width"] > 0 and box["height"] > 0:
-                    boxes.append(box)
-            if boxes:
-                return max(boxes, key=lambda item: item["width"] * item["height"])
+            candidate = self._visible_canvas(frame)
+            if candidate is not None:
+                return candidate[1]
+            if frame_url_contains is None:
+                # A cross-process WebGL iframe can remain visible in Chrome's
+                # compositor without being attached to Playwright's Frame
+                # tree. The portal occupies the complete viewport, so this is
+                # the safe coordinate surface for a freshly verified image.
+                return self._viewport_surface_box()
         if frame == self.page.main_frame:
             viewport = self.page.viewport_size
             if viewport is None:
@@ -813,6 +815,25 @@ class ChromeProfileSession:
             return box
         raise RuntimeError("Không xác định được vùng click của frame/canvas")
 
+    def _viewport_surface_box(self) -> dict[str, float]:
+        page = self.page
+        viewport = page.viewport_size or page.evaluate(
+            "() => ({width: window.innerWidth, height: window.innerHeight})"
+        )
+        return {
+            "x": 0.0,
+            "y": 0.0,
+            "width": max(1.0, float(viewport["width"])),
+            "height": max(1.0, float(viewport["height"])),
+        }
+
+    def _canvas_or_viewport(self) -> tuple[Any | None, dict[str, float]]:
+        frame = self.find_frame()
+        try:
+            return self._largest_canvas(frame)
+        except RuntimeError:
+            return None, self._viewport_surface_box()
+
     def capture_game_surface_png(
         self, *, prefer_browser_capture: bool = False
     ) -> tuple[bytes, dict[str, float]]:
@@ -827,8 +848,7 @@ class ChromeProfileSession:
         """
         page = self.page
         self._ensure_page_runtime(page)
-        frame = self.find_frame()
-        canvas, box = self._largest_canvas(frame)
+        canvas, box = self._canvas_or_viewport()
         if sys.platform == "win32" and not self.config.browser.headless:
             # ``toDataURL`` can synchronously read a WebGL buffer and cause a
             # visible frame hitch. Go straight to CDP's clipped renderer
@@ -836,7 +856,7 @@ class ChromeProfileSession:
             # z-order and desktop occlusion.
             self._direct_canvas_capture_supported = False
         png: bytes | None = None
-        if self._direct_canvas_capture_supported is not False:
+        if canvas is not None and self._direct_canvas_capture_supported is not False:
             try:
                 data_url = canvas.evaluate("element => element.toDataURL('image/png')")
                 if isinstance(data_url, str) and data_url.startswith("data:image/png;base64,"):
@@ -859,20 +879,22 @@ class ChromeProfileSession:
                 self._direct_canvas_capture_supported = False
         if png is None:
             try:
-                result = self._get_page_cdp_session(page).send(
-                    "Page.captureScreenshot",
-                    {
-                        "format": "png",
-                        "fromSurface": True,
-                        "captureBeyondViewport": False,
-                        "clip": {
+                params: dict[str, Any] = {
+                    "format": "png",
+                    "fromSurface": True,
+                    "captureBeyondViewport": False,
+                }
+                if canvas is not None:
+                    params["clip"] = {
                             "x": float(box["x"]),
                             "y": float(box["y"]),
                             "width": float(box["width"]),
                             "height": float(box["height"]),
                             "scale": 1,
-                        },
-                    },
+                    }
+                result = self._get_page_cdp_session(page).send(
+                    "Page.captureScreenshot",
+                    params,
                 )
                 candidate = base64.b64decode(result["data"])
                 if not (
@@ -885,12 +907,17 @@ class ChromeProfileSession:
             except Exception:
                 # Compatibility fallback for older Chromium/CDP builds.  It
                 # may touch locator state, so it is intentionally last.
-                png = bytes(
-                    canvas.screenshot(
-                        type="png",
-                        timeout=self.config.browser.startup_timeout_ms,
+                if canvas is not None:
+                    png = bytes(
+                        canvas.screenshot(
+                            type="png",
+                            timeout=self.config.browser.startup_timeout_ms,
+                        )
                     )
-                )
+                elif sys.platform == "win32" and not self.config.browser.headless:
+                    png = self._capture_visible_canvas_png(page, box)
+                else:
+                    raise RuntimeError("Chrome returned an empty game screenshot")
                 if not _png_has_visible_content(png):
                     raise RuntimeError("Chrome returned a black game screenshot")
         return png, box
@@ -909,8 +936,7 @@ class ChromeProfileSession:
         """
         page = self.page
         self._ensure_page_runtime(page)
-        frame = self.find_frame()
-        _canvas, box = self._largest_canvas(frame)
+        _canvas, box = self._canvas_or_viewport()
         left, top, right, bottom = region
         if not (0.0 <= left < right <= 1.0 and 0.0 <= top < bottom <= 1.0):
             raise ValueError("Vùng chụp giám sát không hợp lệ")
@@ -1068,8 +1094,7 @@ class ChromeProfileSession:
         hwnd = self.window_handle or self._bind_native_window(retries=3)
         if hwnd is None:
             raise RuntimeError(f"Không tìm thấy cửa sổ Chrome của {self.profile.name}")
-        frame = self.find_frame()
-        _canvas, surface = self._largest_canvas(frame)
+        _canvas, surface = self._canvas_or_viewport()
         renderer = get_renderer_rect(hwnd)
         viewport = self.page.viewport_size or self.page.evaluate(
             "() => ({width: window.innerWidth, height: window.innerHeight})"
@@ -1134,8 +1159,7 @@ class ChromeProfileSession:
         image_width, image_height = image_size
         if width <= 0 or height <= 0 or image_width <= 0 or image_height <= 0:
             raise ValueError("Farm template bounds không hợp lệ")
-        frame = self.find_frame()
-        _canvas, surface = self._largest_canvas(frame)
+        _canvas, surface = self._canvas_or_viewport()
         x = float(surface["x"]) + float(surface["width"]) * (left + width / 2) / image_width
         y = float(surface["y"]) + float(surface["height"]) * (top + height / 2) / image_height
         return x, y
@@ -1183,8 +1207,7 @@ class ChromeProfileSession:
 
     def scroll_game_surface(self, delta_y: float) -> None:
         """Send a wheel event at the canvas centre without moving the real cursor."""
-        frame = self.find_frame()
-        _canvas, surface = self._largest_canvas(frame)
+        _canvas, surface = self._canvas_or_viewport()
         x = float(surface["x"]) + float(surface["width"]) / 2.0
         y = float(surface["y"]) + float(surface["height"]) / 2.0
         self._get_page_cdp_session(self.page).send(
@@ -1219,8 +1242,7 @@ class ChromeProfileSession:
         """Tap a canvas-relative point without moving the physical mouse."""
         if not 0.0 <= x_ratio <= 1.0 or not 0.0 <= y_ratio <= 1.0:
             raise ValueError("Canvas ratios must be between 0 and 1")
-        frame = self.find_frame()
-        _canvas, surface = self._largest_canvas(frame)
+        _canvas, surface = self._canvas_or_viewport()
         x = float(surface["x"]) + float(surface["width"]) * float(x_ratio)
         y = float(surface["y"]) + float(surface["height"]) * float(y_ratio)
         point = {
@@ -1245,15 +1267,31 @@ class ChromeProfileSession:
         """
         if not 0.0 <= x_ratio <= 1.0 or not 0.0 <= y_ratio <= 1.0:
             raise ValueError("Canvas ratios must be between 0 and 1")
-        frame = self.find_frame()
-        canvas, surface = self._largest_canvas(frame)
-        canvas.click(
-            position={
-                "x": float(surface["width"]) * float(x_ratio),
-                "y": float(surface["height"]) * float(y_ratio),
-            },
-            force=True,
-            timeout=self.config.browser.startup_timeout_ms,
+        canvas, surface = self._canvas_or_viewport()
+        local_x = float(surface["width"]) * float(x_ratio)
+        local_y = float(surface["height"]) * float(y_ratio)
+        if canvas is not None:
+            canvas.click(
+                position={"x": local_x, "y": local_y},
+                force=True,
+                timeout=self.config.browser.startup_timeout_ms,
+            )
+            return
+
+        # The WebGL OOPIF is composited into the page even when Chrome does
+        # not attach it to Playwright's DOM frame tree. Page-level CDP input
+        # is hit-tested by Chromium's compositor and reaches that child
+        # surface at the same coordinates used for the verified screenshot.
+        x = float(surface["x"]) + local_x
+        y = float(surface["y"]) + local_y
+        cdp = self._get_page_cdp_session(self.page)
+        cdp.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
+        )
+        cdp.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
         )
 
     def set_sync_source(self, enabled: bool) -> int:
