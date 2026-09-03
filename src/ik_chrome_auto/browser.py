@@ -98,6 +98,7 @@ def _low_gpu_init_script(fps_limit: int) -> str:
     interval_ms = 1000.0 / min(60, max(10, int(fps_limit)))
     return f"""
     (() => {{
+      window.__IK_RENDER_INTERVAL_MS = {interval_ms:.4f};
       if (window.__IK_LOW_GPU_MODE) return;
       window.__IK_LOW_GPU_MODE = true;
       const originalGetContext = HTMLCanvasElement.prototype.getContext;
@@ -115,7 +116,6 @@ def _low_gpu_init_script(fps_limit: int) -> str:
 
       const nativeRequest = window.requestAnimationFrame.bind(window);
       const nativeCancel = window.cancelAnimationFrame.bind(window);
-      const interval = {interval_ms:.4f};
       let sequence = 1;
       const pending = new Map();
       window.requestAnimationFrame = callback => {{
@@ -123,6 +123,7 @@ def _low_gpu_init_script(fps_limit: int) -> str:
         const state = {{ nativeId: 0, cancelled: false, startedAt: performance.now() }};
         const tick = timestamp => {{
           if (state.cancelled) return;
+          const interval = Number(window.__IK_RENDER_INTERVAL_MS) || {interval_ms:.4f};
           if (timestamp - state.startedAt + 0.1 >= interval) {{
             pending.delete(token);
             callback(timestamp);
@@ -828,7 +829,31 @@ class ChromeProfileSession:
                         timeout=self.config.browser.startup_timeout_ms,
                     )
                 )
+                if not _png_has_visible_content(png):
+                    raise RuntimeError("Chrome returned a black game screenshot")
         return png, box
+
+    def wait_for_game_surface(self, timeout_seconds: float = 45.0) -> None:
+        """Wait until the game canvas has produced a real, non-black frame.
+
+        DOM readiness is too early for WebGL-heavy profiles: Chrome can expose
+        CDP and a canvas element several seconds before the compositor has a
+        usable frame. Keeping the worker in STARTING state here makes the
+        dashboard's launch batches a true renderer barrier.
+        """
+        deadline = time.monotonic() + max(1.0, float(timeout_seconds))
+        last_error = "canvas chưa xuất hiện"
+        while time.monotonic() < deadline:
+            try:
+                self.capture_game_surface_png()
+                return
+            except Exception as error:
+                last_error = str(error) or type(error).__name__
+            self.pump(250)
+        raise RuntimeError(
+            "Màn hình game chưa render được sau khi mở profile "
+            f"({last_error})"
+        )
 
     def capture_game_region_png(
         self,

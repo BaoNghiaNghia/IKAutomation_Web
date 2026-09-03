@@ -788,6 +788,15 @@ class ProfileWorker:
                 self.session.set_topmost(True)
         elif navigate:
             self.session.goto()
+        if navigate:
+            wait_for_game = getattr(self.session, "wait_for_game_surface", None)
+            if callable(wait_for_game):
+                wait_for_game(
+                    timeout_seconds=min(
+                        45.0,
+                        max(10.0, self.config.browser.startup_timeout_ms / 1000),
+                    )
+                )
         return self.session
 
     def _poll_browser_events(self) -> None:
@@ -3010,11 +3019,12 @@ class MultiProfileRunner:
         columns_per_row: int | None = None,
         *,
         profile_ids: set[str] | None = None,
+        layout_profile_ids: set[str] | None = None,
     ) -> int:
-        """Tile the requested profiles left-to-right, then top-to-bottom."""
+        """Tile requested profiles, optionally reserving a stable final grid."""
         if columns_per_row is not None and not 1 <= int(columns_per_row) <= 6:
             raise ValueError("Số cửa sổ mỗi hàng phải từ 1 đến 6")
-        opened: list[tuple[str, int, WindowRect, WindowRect]] = []
+        opened: dict[str, tuple[str, int, WindowRect, WindowRect]] = {}
         for profile in self.config.profiles:
             if profile_ids is not None and profile.id not in profile_ids:
                 continue
@@ -3030,18 +3040,29 @@ class MultiProfileRunner:
                 visible = get_visible_window_rect(hwnd)
             except Exception:
                 continue
-            opened.append((profile.id, hwnd, outer, visible))
+            opened[profile.id] = (profile.id, hwnd, outer, visible)
         if not opened:
             return 0
-        columns = int(columns_per_row or len(opened))
+        layout_ids = [
+            profile.id
+            for profile in self.config.profiles
+            if (
+                profile.id in opened
+                if layout_profile_ids is None
+                else profile.id in layout_profile_ids
+            )
+        ]
+        if not layout_ids:
+            layout_ids = list(opened)
+        columns = int(columns_per_row or len(layout_ids))
         work_areas = get_monitor_work_areas()
-        monitor_count = min(len(work_areas), len(opened))
-        base_count, remainder = divmod(len(opened), monitor_count)
+        monitor_count = min(len(work_areas), len(layout_ids))
+        base_count, remainder = divmod(len(layout_ids), monitor_count)
         layouts: list[tuple[tuple[str, int, WindowRect, WindowRect], tuple[int, int], int, int]] = []
         offset = 0
         for monitor_index, work_area in enumerate(work_areas[:monitor_count]):
             profile_count = base_count + (1 if monitor_index < remainder else 0)
-            monitor_profiles = opened[offset : offset + profile_count]
+            monitor_profile_ids = layout_ids[offset : offset + profile_count]
             offset += profile_count
             rows = max(1, (profile_count + columns - 1) // columns)
             # Keep every game surface at 16:9 while fitting the selected grid
@@ -3057,10 +3078,14 @@ class MultiProfileRunner:
                 profile_count,
                 columns_per_row=columns,
             )
-            layouts.extend(
-                (profile, position, visible_width, visible_height)
-                for profile, position in zip(monitor_profiles, positions, strict=True)
-            )
+            for profile_id, position in zip(
+                monitor_profile_ids, positions, strict=True
+            ):
+                profile = opened.get(profile_id)
+                if profile is not None:
+                    layouts.append(
+                        (profile, position, visible_width, visible_height)
+                    )
         moved = 0
         resized = 0
         pending_resizes = sum(

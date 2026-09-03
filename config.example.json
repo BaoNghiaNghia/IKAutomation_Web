@@ -8,7 +8,7 @@
     "profile_title": true,
     "low_memory_mode": true,
     "low_gpu_mode": true,
-    "render_fps_limit": 24,
+    "render_fps_limit": 22,
     "auto_resize": true,
     "viewport": {
       "width": 500,

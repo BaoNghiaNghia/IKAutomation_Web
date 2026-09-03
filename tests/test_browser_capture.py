@@ -4,7 +4,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import ik_chrome_auto.browser as browser_module
-from ik_chrome_auto.browser import ChromeProfileSession, _image_has_visible_content
+from ik_chrome_auto.browser import (
+    ChromeProfileSession,
+    _image_has_visible_content,
+    _low_gpu_init_script,
+)
 from ik_chrome_auto.image_utils import RGBImage, decode_png
 
 
@@ -17,6 +21,15 @@ ASSET = (
 )
 ASSET_PNG = ASSET.read_bytes()
 BOX = {"x": 12.5, "y": 34.25, "width": 500.0, "height": 300.0}
+
+
+def test_fps_limiter_can_update_a_retained_profile_to_22_fps() -> None:
+    script = _low_gpu_init_script(22)
+
+    assignment = "window.__IK_RENDER_INTERVAL_MS = 45.4545;"
+    assert assignment in script
+    assert script.index(assignment) < script.index("if (window.__IK_LOW_GPU_MODE) return")
+    assert "Number(window.__IK_RENDER_INTERVAL_MS)" in script
 
 
 class FakePage:
@@ -454,6 +467,16 @@ def test_locator_screenshot_is_only_the_last_fallback() -> None:
     assert png == ASSET_PNG
     assert canvas.screenshot_calls == 1
     assert context.new_session_calls == 1
+
+
+def test_startup_renderer_barrier_accepts_only_a_visible_game_frame() -> None:
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    calls: list[bool] = []
+    session.capture_game_surface_png = lambda: calls.append(True) or (ASSET_PNG, BOX)
+
+    session.wait_for_game_surface(timeout_seconds=1)
+
+    assert calls == [True]
 
 
 def test_close_detaches_page_cdp_even_for_external_profile() -> None:

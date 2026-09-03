@@ -87,7 +87,10 @@ def load_config(path: Path) -> AppConfig:
         profile_title=bool(browser_raw.get("profile_title", True)),
         low_memory_mode=bool(browser_raw.get("low_memory_mode", True)),
         low_gpu_mode=bool(browser_raw.get("low_gpu_mode", True)),
-        render_fps_limit=min(60, max(10, int(browser_raw.get("render_fps_limit", 24)))),
+        # IK Auto uses one fixed renderer budget across every profile. Keeping
+        # this independent from older config files also migrates retained
+        # installations that previously stored 24/30/60 FPS.
+        render_fps_limit=22,
         auto_resize=bool(browser_raw.get("auto_resize", True)),
         viewport_width=int(viewport.get("width", 500)),
         viewport_height=int(viewport.get("height", 281)),
@@ -158,7 +161,7 @@ def save_config(config: AppConfig) -> None:
             "profile_title": config.browser.profile_title,
             "low_memory_mode": config.browser.low_memory_mode,
             "low_gpu_mode": config.browser.low_gpu_mode,
-            "render_fps_limit": min(60, max(10, int(config.browser.render_fps_limit))),
+            "render_fps_limit": 22,
             "auto_resize": config.browser.auto_resize,
             "viewport": {
                 "width": config.browser.viewport_width,

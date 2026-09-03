@@ -307,6 +307,44 @@ def test_large_arrangement_throttles_webgl_resizes_in_five_window_batches(monkey
     assert sleeps.count(1.25) == 2
 
 
+def test_progressive_arrangement_reserves_final_grid_size(monkeypatch) -> None:
+    runner = make_runner()
+    runner.config = SimpleNamespace(
+        profiles=[SimpleNamespace(id=f"p{index}") for index in range(6)]
+    )
+    runner.windows_topmost = False
+    runner.workers = {
+        "p0": FakeWorker(SimpleNamespace(window_handle=100)),
+        "p1": FakeWorker(SimpleNamespace(window_handle=101)),
+    }
+    rect = WindowRect(0, 0, 500, 281)
+    monkeypatch.setattr(runner_module, "get_window_rect", lambda _hwnd: rect)
+    monkeypatch.setattr(runner_module, "get_visible_window_rect", lambda _hwnd: rect)
+    monkeypatch.setattr(
+        runner_module,
+        "get_monitor_work_areas",
+        lambda: (WindowRect(0, 0, 1000, 600),),
+    )
+    moves: list[tuple[int, int, int, int]] = []
+    monkeypatch.setattr(
+        runner_module,
+        "move_window_outer",
+        lambda hwnd, x, y, width, height, **_kwargs: moves.append(
+            (hwnd, x, width, height)
+        ),
+    )
+
+    assert runner.arrange_windows(
+        2,
+        profile_ids={"p0", "p1"},
+        layout_profile_ids={f"p{index}" for index in range(6)},
+    ) == 2
+
+    # Six final slots need three rows, so the first two profiles start at the
+    # final 355x199 renderer size instead of first growing to 500x281.
+    assert moves == [(100, 0, 355, 199), (101, 355, 355, 199)]
+
+
 class FakeLog:
     def __init__(self) -> None:
         self.rows: list[tuple[str, dict[str, object]]] = []

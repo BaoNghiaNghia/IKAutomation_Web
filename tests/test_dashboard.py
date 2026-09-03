@@ -742,7 +742,14 @@ def test_profile_launch_arranges_once_at_each_five_ready_profiles() -> None:
         def __init__(self) -> None:
             self.calls: list[tuple[int, set[str]]] = []
 
-        def arrange_windows(self, columns: int, *, profile_ids: set[str]) -> int:
+        def arrange_windows(
+            self,
+            columns: int,
+            *,
+            profile_ids: set[str],
+            layout_profile_ids: set[str],
+        ) -> int:
+            assert layout_profile_ids == dashboard._farm_launch_profiles
             self.calls.append((columns, set(profile_ids)))
             return len(profile_ids)
 
