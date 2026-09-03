@@ -120,11 +120,12 @@ class FarmWorkflow:
                 self.step = FarmStep.ENTER_WORLD_MAP
                 return FarmDecision(self.step, "Đã nhận diện City; cần mở World Map", input_allowed=target_verified)
             if state == FarmGameState.WORLD_MAP:
-                # Every browser cycle starts from City. This clears stale
-                # World Map panels and makes the City → World Map transition
-                # explicit before we inspect teams or search resources.
-                self.step = FarmStep.RETURN_TO_CITY
-                return FarmDecision(self.step, "Đang ở World Map; cần về City trước khi farm")
+                # The castle artwork at bottom-left is the *return to City*
+                # control and therefore proves that the profile is already
+                # on World Map. Keep that screen and scan the fresh roster;
+                # toggling City and immediately reopening Map only adds a
+                # destructive transition between consecutive farm cycles.
+                self.step = FarmStep.CHECK_TEAMS
             else:
                 return FarmDecision(self.step, "Chờ City hoặc World Map đã được xác minh")
         if self.step == FarmStep.RETURN_TO_CITY:

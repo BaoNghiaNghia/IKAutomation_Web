@@ -21,12 +21,22 @@ def test_temporary_unknown_frame_keeps_the_verified_farm_stage() -> None:
     assert farm.step == FarmStep.OPEN_SEARCH
 
 
-def test_new_cycle_entering_on_world_map_must_verify_city_first() -> None:
+def test_new_cycle_already_on_world_map_scans_teams_without_toggling_city() -> None:
     farm = FarmWorkflow()
 
-    assert farm.decide(FarmGameState.WORLD_MAP).step == FarmStep.RETURN_TO_CITY
-    assert farm.decide(FarmGameState.WORLD_MAP).step == FarmStep.RETURN_TO_CITY
-    assert farm.decide(FarmGameState.CITY).step == FarmStep.ENTER_WORLD_MAP
+    decision = farm.decide(FarmGameState.WORLD_MAP, ready_teams=(3,))
+
+    assert decision.step == FarmStep.OPEN_SEARCH
+    assert decision.team == 3
+
+
+def test_new_cycle_without_ready_team_waits_directly_on_world_map() -> None:
+    farm = FarmWorkflow()
+
+    decision = farm.decide(FarmGameState.WORLD_MAP, ready_teams=())
+
+    assert decision.step == FarmStep.WAITING
+    assert farm.waiting_for_ready_team is True
 
 
 def test_happy_path_completes_exactly_one_verified_dispatch() -> None:

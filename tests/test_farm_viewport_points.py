@@ -1,3 +1,12 @@
+import threading
+from types import SimpleNamespace
+
+from ik_chrome_auto.farm_vision import (
+    DetectedGameState,
+    FarmTemplateId,
+    GameDetectionResult,
+    TemplateEvidence,
+)
 from ik_chrome_auto.runner import (
     AUTOMATION_RENDERER_CANVAS_GUTTER,
     AUTOMATION_RENDERER_SIZE,
@@ -23,6 +32,91 @@ def test_farm_layout_fallbacks_use_relative_canvas_positions_at_16_by_9() -> Non
     assert ProfileWorker._city_to_world_map_layout_bounds((1280, 720)) == (13, 621, 80, 90)
     assert ProfileWorker._world_map_search_layout_bounds((1280, 720)) == (425, 552, 57, 57)
     assert ProfileWorker._search_target_checkbox_layout_bounds((1280, 720)) == (996, 494, 51, 47)
+
+
+def test_area_relocation_closes_search_panel_and_uses_world_map_castle() -> None:
+    def frame(
+        state: DetectedGameState,
+        template: FarmTemplateId | None = None,
+        bounds: tuple[int, int, int, int] = (10, 20, 30, 40),
+    ) -> GameDetectionResult:
+        evidence = () if template is None else (TemplateEvidence(template, True, 1.0, bounds),)
+        return GameDetectionResult(state, evidence)
+
+    class Session:
+        def __init__(self) -> None:
+            self.frames = [
+                frame(DetectedGameState.RESOURCE_SEARCH_PANEL),
+                frame(DetectedGameState.WORLD_MAP, FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON),
+                frame(DetectedGameState.CITY, FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON),
+                frame(DetectedGameState.CONTINENT_MAP, FarmTemplateId.CONTINENT_MAP_PIN_BUTTON),
+            ]
+            self.escape_calls = 0
+
+        def detect_farm_state(self):
+            return self.frames.pop(0), {}, (1280, 720)
+
+        def press_escape(self) -> None:
+            self.escape_calls += 1
+
+        def read_focused_numeric_farm_input(self, _bounds, _size):
+            return None
+
+    session = Session()
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker.session = session
+    worker.profile = SimpleNamespace(id="account-2")
+    worker.stop_event = threading.Event()
+    worker._farm = FarmWorkflow()
+    worker._automation_renderer_locked = True
+    worker._farm_run_id = "run"
+    worker._farm_area_epoch = 0
+    selector_calls = []
+    worker._farm_area_selector = SimpleNamespace(
+        next=lambda **kwargs: (
+            selector_calls.append(kwargs)
+            or SimpleNamespace(
+                point=(650, 954),
+                exhausted=False,
+                attempt=1,
+                max_attempts=3,
+                city_levels=(7, 8),
+            )
+        )
+    )
+    logs = []
+    taps = []
+    worker._log_farm = lambda event, payload: logs.append((event, payload))
+    worker._tap_farm_game_control = lambda bounds, size: (
+        taps.append((bounds, size)) or "touch_canvas_template"
+    )
+
+    result = worker._try_resource_area_relocation("iron", 6)
+
+    assert result == "unavailable"  # Coordinate inputs are deliberately unreadable in this test.
+    assert session.escape_calls == 1
+    assert len(selector_calls) == 1
+    assert taps == [((10, 20, 30, 40), (1280, 720)), ((10, 20, 30, 40), (1280, 720))]
+    assert ("close_search_panel_for_area_navigation", {}) in logs
+    assert any(
+        event == "tap_world_map_return_to_city" and payload["control"] == "world_map_castle"
+        for event, payload in logs
+    )
+
+
+def test_new_farm_cycle_preserves_the_running_sessions_coordinate_bag() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    selector = object()
+    worker._farm_area_selector = selector
+    worker._farm_run_id = "account-2-running-session"
+    worker._farm_area_epoch = 2
+    worker._farm_recovery_attempts = 0
+
+    worker._reset_farm_cycle()
+
+    assert worker._farm_area_selector is selector
+    assert worker._farm_run_id == "account-2-running-session"
+    assert worker._farm_area_epoch == 2
 
 
 def test_farm_layout_fallbacks_scale_for_a_compact_five_profile_viewport() -> None:

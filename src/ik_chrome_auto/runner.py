@@ -2170,9 +2170,11 @@ class ProfileWorker:
         self._farm_team_selection_clicks = 0
         self._farm_expected_team_row = None
         self._farm_dispatch_click_at = 0.0
-        self._farm_area_selector = ResourceAreaPointSelector()
-        self._farm_area_epoch = 0
-        self._farm_run_id = f"{self.profile.id}-{time.monotonic_ns()}"
+        # The coordinate bag belongs to the user-started AutoFarm session,
+        # not to one dispatch/recovery cycle. START_FARM creates it and a
+        # STOP/START creates the next one. Keeping it here prevents a failed
+        # relocation from resetting the bag and selecting the same point
+        # forever on every preflight retry.
 
     def _handle_search_no_result(
         self,
@@ -2503,6 +2505,44 @@ class ProfileWorker:
             or not getattr(self, "_automation_renderer_locked", False)
         ):
             return "unavailable"
+        detected, _surface, size = self.session.detect_farm_state()
+        if detected.state == DetectedGameState.RESOURCE_SEARCH_PANEL:
+            # A no-result Search leaves the bottom panel open. Its overlay
+            # hides the World Map castle, so attempting relocation directly
+            # can never verify the return-to-City control. Escape dismisses
+            # only this panel; subsequent input is still gated by a fresh,
+            # explicit World Map classification.
+            self.session.press_escape()
+            self._log_farm("close_search_panel_for_area_navigation", {})
+            prepared = self._wait_for_farm_detection(
+                lambda frame: frame.state == DetectedGameState.WORLD_MAP,
+                timeout_seconds=6.0,
+            )
+            if prepared is None:
+                self._log_farm(
+                    "resource_area_navigation_blocked",
+                    {"reason": "search_panel_close_unverified"},
+                )
+                return "unavailable"
+            detected, _surface, size = prepared
+
+        # The web game does not open Continent Map from World Map directly.
+        # First return to City using the verified bottom-left castle control,
+        # then use City's dedicated map icon. Some skins also expose a blue
+        # Back control, retained here only as a verified fallback.
+        return_to_city = detected.evidence_for(FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON)
+        return_control = "world_map_castle"
+        if not return_to_city.actionable:
+            return_to_city = detected.evidence_for(FarmTemplateId.BROWSER_WORLD_MAP_BACK_BUTTON)
+            return_control = "world_map_back"
+        if detected.state != DetectedGameState.WORLD_MAP or not return_to_city.actionable:
+            self._log_farm("resource_area_navigation_blocked", {
+                "reason": "world_map_return_button_unavailable",
+            })
+            return "unavailable"
+
+        # Do not consume a point merely because the Search overlay could not
+        # be closed or World Map controls were not verifiable.
         selection = self._farm_area_selector.next(
             run_id=self._farm_run_id,
             profile_id=self.profile.id,
@@ -2518,44 +2558,46 @@ class ProfileWorker:
             return "exhausted"
         point = selection.point
         assert point is not None
-        detected, _surface, size = self.session.detect_farm_state()
-        # The web game does not open Continent Map from World Map directly.
-        # First return to City using the verified blue back control, then use
-        # City's dedicated map icon. This is intentionally different from the
-        # old ADB minimap shortcut and matches the portal UI contract.
-        return_to_city = detected.evidence_for(FarmTemplateId.BROWSER_WORLD_MAP_BACK_BUTTON)
-        if detected.state != DetectedGameState.WORLD_MAP or not return_to_city.actionable:
-            self._log_farm("resource_area_navigation_blocked", {
-                "reason": "world_map_return_button_unavailable", "point": point,
-                "attempt": selection.attempt, "city_levels": selection.city_levels,
-            })
-            return "unavailable"
         input_method = self._tap_farm_game_control(return_to_city.bounds, size)  # type: ignore[arg-type]
         self._log_farm(
             "tap_world_map_return_to_city",
-            {"bounds": return_to_city.bounds, "point": point, "input": input_method},
+            {
+                "bounds": return_to_city.bounds,
+                "point": point,
+                "input": input_method,
+                "control": return_control,
+            },
         )
-        time.sleep(0.7)
-        city, _surface, city_size = self.session.detect_farm_state()
-        city_map_button = city.evidence_for(FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON)
-        if city.state != DetectedGameState.CITY or not city_map_button.actionable:
+        city_result = self._wait_for_farm_detection(
+            lambda frame: (
+                frame.state == DetectedGameState.CITY
+                and frame.evidence_for(FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON).actionable
+            ),
+            timeout_seconds=FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS,
+        )
+        if city_result is None:
             self._log_farm("resource_area_navigation_blocked", {
                 "reason": "city_or_city_map_button_unverified", "point": point,
                 "attempt": selection.attempt,
             })
             return "unavailable"
+        city, _surface, city_size = city_result
+        city_map_button = city.evidence_for(FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON)
         input_method = self._tap_farm_game_control(city_map_button.bounds, city_size)  # type: ignore[arg-type]
         self._log_farm(
             "tap_city_continent_map",
             {"bounds": city_map_button.bounds, "point": point, "input": input_method},
         )
-        time.sleep(0.6)
-        continent, _surface, continent_size = self.session.detect_farm_state()
-        if continent.state != DetectedGameState.CONTINENT_MAP:
+        continent_result = self._wait_for_farm_detection(
+            lambda frame: frame.state == DetectedGameState.CONTINENT_MAP,
+            timeout_seconds=12.0,
+        )
+        if continent_result is None:
             self._log_farm("resource_area_navigation_blocked", {
                 "reason": "continent_map_unverified", "point": point, "attempt": selection.attempt,
             })
             return "unavailable"
+        continent, _surface, continent_size = continent_result
         pin = continent.evidence_for(FarmTemplateId.CONTINENT_MAP_PIN_BUTTON)
         if not pin.actionable:
             self._log_farm("resource_area_navigation_blocked", {
@@ -2614,25 +2656,34 @@ class ProfileWorker:
             return "unavailable"
         input_method = self._tap_farm_game_control(refreshed_pin.bounds, refreshed_size)  # type: ignore[arg-type]
         self._log_farm("tap_continent_map_pin", {"bounds": refreshed_pin.bounds, "point": point, "input": input_method})
-        time.sleep(0.45)
-        target_frame, _surface, target_size = self.session.detect_farm_state()
-        target_pin = target_frame.evidence_for(FarmTemplateId.CONTINENT_MAP_SEARCH_TARGET_PIN)
-        if not target_pin.actionable:
+        target_result = self._wait_for_farm_detection(
+            lambda frame: frame.evidence_for(FarmTemplateId.CONTINENT_MAP_SEARCH_TARGET_PIN).actionable,
+            timeout_seconds=6.0,
+        )
+        if target_result is None:
+            target_frame, _surface, target_size = self.session.detect_farm_state()
             rollback_coordinates(target_frame, target_size, reason="destination_pin_unverified")
             self._log_farm("resource_area_navigation_rolled_back", {
                 "reason": "destination_pin_unverified", "point": point,
                 "original": (original_x, original_y), "attempt": selection.attempt,
             })
             return "unavailable"
+        target_frame, _surface, target_size = target_result
+        target_pin = target_frame.evidence_for(FarmTemplateId.CONTINENT_MAP_SEARCH_TARGET_PIN)
         input_method = self._tap_farm_game_control(target_pin.bounds, target_size)  # type: ignore[arg-type]
         self._log_farm("tap_continent_target_pin", {"bounds": target_pin.bounds, "point": point, "input": input_method})
-        time.sleep(0.7)
-        final, _surface, _final_size = self.session.detect_farm_state()
-        world_verified = final.state == DetectedGameState.WORLD_MAP or (
-            final.evidence_for(FarmTemplateId.BROWSER_CANVAS_READY_ANCHOR).found
-            and final.evidence_for(FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON).found
+        final_result = self._wait_for_farm_detection(
+            lambda frame: (
+                frame.state == DetectedGameState.WORLD_MAP
+                or (
+                    frame.evidence_for(FarmTemplateId.BROWSER_CANVAS_READY_ANCHOR).found
+                    and frame.evidence_for(FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON).found
+                )
+            ),
+            timeout_seconds=FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS,
         )
-        if not world_verified:
+        if final_result is None:
+            final, _surface, _final_size = self.session.detect_farm_state()
             rollback_coordinates(final, _final_size, reason="world_map_unverified_after_target_pin")
             self._log_farm("resource_area_navigation_blocked", {
                 "reason": "world_map_unverified_after_target_pin", "point": point,
@@ -2653,6 +2704,25 @@ class ProfileWorker:
         })
         self._publish(WorkerState.RUNNING, f"Auto Farm: đã chuyển tới {point[0]},{point[1]}; mở lại tìm {resource} cấp {level}")
         return "moved"
+
+    def _wait_for_farm_detection(
+        self,
+        predicate: Callable[[Any], bool],
+        *,
+        timeout_seconds: float,
+        poll_seconds: float = 0.45,
+    ) -> tuple[Any, dict[str, float], tuple[int, int]] | None:
+        """Wait for a verified game postcondition without issuing input."""
+        if self.session is None:
+            return None
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while True:
+            result = self.session.detect_farm_state()
+            if predicate(result[0]):
+                return result
+            if time.monotonic() >= deadline or self.stop_event.is_set():
+                return None
+            time.sleep(max(0.05, poll_seconds))
 
     @staticmethod
     def _coordinate_fields_from_pin(
