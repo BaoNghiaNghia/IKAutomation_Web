@@ -244,15 +244,19 @@ def test_farm_map_toggle_uses_exact_canvas_percentage_and_excludes_mail() -> Non
     assert not (left <= 151 < left + width and top <= 583 < top + height)
 
 
-def test_farm_map_toggle_prefers_background_compositor_ratio() -> None:
+def test_farm_map_toggle_prefers_background_cdp_touch_ratio() -> None:
     class Session:
         def __init__(self) -> None:
             self.background_ratios: list[tuple[float, float]] = []
+            self.touch_ratios: list[tuple[float, float]] = []
             self.synthetic_ratios: list[tuple[float, float]] = []
             self.touches: list[object] = []
 
         def dispatch_game_surface_mouse_ratio(self, x: float, y: float) -> None:
             self.background_ratios.append((x, y))
+
+        def tap_game_surface_ratio(self, x: float, y: float) -> None:
+            self.touch_ratios.append((x, y))
 
         def click_game_surface_ratio(self, x: float, y: float) -> None:
             self.synthetic_ratios.append((x, y))
@@ -268,7 +272,8 @@ def test_farm_map_toggle_prefers_background_compositor_ratio() -> None:
 
     worker._click_map_toggle(bounds, (1280, 720))
 
-    assert worker.session.background_ratios == [(53 / 1280, 666 / 720)]
+    assert worker.session.touch_ratios == [(53 / 1280, 666 / 720)]
+    assert worker.session.background_ratios == []
     assert worker.session.synthetic_ratios == []
     assert worker.session.touches == []
     assert worker._automation_renderer_hold_until > 0.0

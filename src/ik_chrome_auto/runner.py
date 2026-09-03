@@ -1515,7 +1515,7 @@ class ProfileWorker:
                             {
                                 "bounds": click_bounds,
                                 "matched_bounds": fresh_map_to_city.bounds,
-                                "method": "mouse_canvas_ratio",
+                                "method": "cdp_touch_canvas_ratio",
                                 "attempt": self._farm_return_city_clicks,
                                 "control": "world_map_castle",
                             },
@@ -1648,7 +1648,7 @@ class ProfileWorker:
                     {
                         "bounds": click_bounds,
                         "matched_bounds": fresh_city.bounds,
-                        "method": "mouse_canvas_ratio",
+                        "method": "cdp_touch_canvas_ratio",
                     },
                 )
                 self._farm_next_at = time.monotonic() + 1.2
