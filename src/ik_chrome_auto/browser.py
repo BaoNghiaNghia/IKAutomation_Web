@@ -126,6 +126,16 @@ LOGIN_PASSWORD_SELECTORS = (
     "input[autocomplete='current-password']",
     "input[type='password']",
 )
+LOGIN_BUTTON_SELECTORS = (
+    "button[type='submit']",
+    "input[type='submit']",
+    "button[id*='login' i]",
+    "button[class*='login' i]",
+    "[role='button'][id*='login' i]",
+    "[role='button'][class*='login' i]",
+)
+_AUTO_LOGIN_RETRY_SECONDS = 2.5
+_AUTO_LOGIN_WINDOW_SECONDS = 180.0
 
 
 def _low_gpu_init_script(fps_limit: int) -> str:
@@ -339,6 +349,12 @@ class ChromeProfileSession:
         # produce different sizes while Chrome lays out dozens of profiles.
         self._sync_pointer_target_box: dict[str, float] | None = None
         self._sync_last_target_box: dict[str, float] | None = None
+        # Login iframes arrive noticeably later when dozens of Chrome
+        # profiles start together. Keep a bounded background retry window
+        # instead of relying on the first DOMContentLoaded snapshot.
+        self._auto_login_completed = False
+        self._auto_login_next_at = 0.0
+        self._auto_login_deadline = time.monotonic() + _AUTO_LOGIN_WINDOW_SECONDS
         # Normal profile windows retain their responsive iframe dimensions.
         # Only an active automation renderer lease forces the game to 1280x720.
         self._automation_game_frame_fixed = False
@@ -636,6 +652,9 @@ class ChromeProfileSession:
 
     def goto(self, url: str | None = None) -> None:
         target = url or self.config.target_url
+        self._auto_login_completed = False
+        self._auto_login_next_at = 0.0
+        self._auto_login_deadline = time.monotonic() + _AUTO_LOGIN_WINDOW_SECONDS
         self.page.goto(
             target,
             wait_until="domcontentloaded",
@@ -678,16 +697,50 @@ class ChromeProfileSession:
                 time.sleep(random.uniform(0.18, 0.36))
                 self._paced_login_input(password, credential.password)
                 time.sleep(random.uniform(0.30, 0.55))
-                login_button = frame.get_by_role(
-                    "button", name=re.compile(r"^(đăng nhập|login)$", re.IGNORECASE)
-                ).first
-                login_button.hover(timeout=3_000)
+                login_button = self._first_visible_login_button(frame)
                 time.sleep(random.uniform(0.12, 0.24))
-                login_button.click(timeout=3_000)
+                if login_button is not None:
+                    login_button.click(timeout=3_000)
+                else:
+                    # The legacy portal sometimes renders no semantic button
+                    # but still submits the password field on Enter.
+                    password.press("Enter", timeout=3_000)
+                self._auto_login_completed = True
                 return True
             except Exception:
-                return False
+                # Several login/advert frames can coexist. A stale candidate
+                # must not prevent the valid frame below it from being tried.
+                continue
         return False
+
+    @staticmethod
+    def _first_visible_login_button(frame: Frame) -> Any | None:
+        try:
+            button = frame.get_by_role(
+                "button",
+                name=re.compile(r"^(đăng nhập|login|sign in)$", re.IGNORECASE),
+            ).first
+            if button.count() and button.is_visible(timeout=500):
+                return button
+        except Exception:
+            pass
+        return ChromeProfileSession._first_visible_input(
+            frame, LOGIN_BUTTON_SELECTORS
+        )
+
+    def _retry_auto_login_if_due(self) -> bool:
+        """Retry delayed login forms without blocking bulk profile startup."""
+        if getattr(self, "_auto_login_completed", False):
+            return False
+        now = time.monotonic()
+        deadline = float(getattr(self, "_auto_login_deadline", 0.0) or 0.0)
+        if deadline and now >= deadline:
+            return False
+        next_at = float(getattr(self, "_auto_login_next_at", 0.0) or 0.0)
+        if now < next_at:
+            return False
+        self._auto_login_next_at = now + _AUTO_LOGIN_RETRY_SECONDS
+        return self.auto_login_if_needed()
 
     @staticmethod
     def _paced_login_input(locator: Any, value: str) -> None:
@@ -2018,6 +2071,7 @@ class ChromeProfileSession:
         if self._page is not None and not self._page.is_closed():
             self._page.wait_for_timeout(milliseconds)
             self._configure_interaction_frames()
+            self._retry_auto_login_if_due()
 
     def close(self, *, close_browser: bool = False) -> None:
         """Detach from a profile, optionally closing its Chrome window.
