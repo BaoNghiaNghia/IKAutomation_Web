@@ -5,46 +5,13 @@ import numpy as np
 import pytest
 
 from ik_chrome_auto.farm_matcher import BrowserCanvasMatcher
-from ik_chrome_auto.farm_vision import DetectedGameState, TeamRowState, TemplateEvidence
+from ik_chrome_auto.farm_vision import DetectedGameState, TeamRowState
 
 
 def test_city_template_search_is_limited_to_bottom_left_corner() -> None:
     assert BrowserCanvasMatcher._region("city_corner", 835, 432) == (0, 324, 139, 108)
     assert BrowserCanvasMatcher._region("map_corner", 1280, 720) == (0, 540, 153, 180)
 from ik_chrome_auto.farm_vision import FarmTemplateId
-
-
-def test_selective_detection_matches_only_requested_templates_and_skips_roster(monkeypatch) -> None:
-    matcher = BrowserCanvasMatcher()
-    canvas = np.zeros((720, 1280, 3), dtype=np.uint8)
-    ok, encoded = cv2.imencode(".png", canvas)
-    assert ok
-    calls: list[FarmTemplateId] = []
-
-    def match(_image, template_id: FarmTemplateId) -> TemplateEvidence:
-        calls.append(template_id)
-        return TemplateEvidence(
-            template_id,
-            template_id == FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON,
-            bounds=(10, 10, 20, 20),
-        )
-
-    monkeypatch.setattr(matcher, "_match", match)
-    monkeypatch.setattr(
-        matcher,
-        "_team_roster",
-        lambda _image: pytest.fail("roster scan must be skipped"),
-    )
-
-    result = matcher.detect(
-        encoded.tobytes(),
-        template_ids=(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON,),
-        include_roster=False,
-    )
-
-    assert result.state == DetectedGameState.CITY
-    assert calls == [FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON]
-    assert not result.ready_teams
 
 
 def test_browser_map_toggle_templates_match_their_actual_direction() -> None:

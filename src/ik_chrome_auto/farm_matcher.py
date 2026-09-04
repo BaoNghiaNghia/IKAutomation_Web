@@ -1,7 +1,6 @@
 """OpenCV template matching over a captured browser game canvas."""
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -405,38 +404,14 @@ class BrowserCanvasMatcher:
     def __init__(self, template_root: Path | None = None) -> None:
         self.template_root = template_root or Path(__file__).with_name("assets") / "farm_templates"
         self._templates: dict[str, object] = {}
-        # Farm always leases the same 1280x720 renderer. Keep the resized and
-        # preprocessed template variants instead of rebuilding roughly one
-        # hundred OpenCV matrices on every verification frame.
-        self._scaled_templates: dict[tuple[str, int, int, str], object] = {}
-        self._search_views: dict[tuple[int, int, int, int, str], object] = {}
-
-    def detect(
-        self,
-        screenshot_png: bytes,
-        *,
-        template_ids: Iterable[FarmTemplateId] | None = None,
-        include_roster: bool = True,
-    ) -> GameDetectionResult:
+    def detect(self, screenshot_png: bytes) -> GameDetectionResult:
         import cv2
         import numpy as np
 
         image = cv2.imdecode(np.frombuffer(screenshot_png, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             raise ValueError("Canvas screenshot không phải PNG hợp lệ")
-        # Search regions belong to this one screenshot and must never leak to
-        # the next frame. They can, however, be shared by every template that
-        # scans the same lower/top/checkbox region in this detection pass.
-        self._search_views.clear()
-        selected_templates = (
-            DETECTION_TEMPLATES
-            if template_ids is None
-            else tuple(dict.fromkeys(template_ids))
-        )
-        evidence = {
-            template_id: self._match(image, template_id)
-            for template_id in selected_templates
-        }
+        evidence = {template_id: self._match(image, template_id) for template_id in DETECTION_TEMPLATES}
         result = BrowserGameStateDetector().detect(evidence)
         # The same compact team HUD is visible in both stable City and World
         # Map frames. Scanning only World Map left the dashboard with a stale
@@ -445,7 +420,7 @@ class BrowserCanvasMatcher:
         # scheduling.
         roster = (
             self._team_roster(image)
-            if include_roster and self._state_has_team_roster(result.state)
+            if self._state_has_team_roster(result.state)
             else ()
         )
         return replace(
@@ -634,12 +609,6 @@ class BrowserCanvasMatcher:
         scale_y = scale_x if spec.uniform_width_scale else image_height / spec.reference_height
         x, y, width, height = self._region(spec.region, image_width, image_height)
         search = image[y : y + height, x : x + width]
-        mode = "edge" if spec.edge else "grayscale" if spec.grayscale else "color"
-        search_key = (x, y, width, height, mode)
-        match_search = self._search_views.get(search_key)
-        if match_search is None:
-            match_search = self._prepare_match_image(search, mode)
-            self._search_views[search_key] = match_search
         best_confidence = -1.0
         best_location: tuple[int, int] | None = None
         best_size: tuple[int, int] | None = None
@@ -648,16 +617,16 @@ class BrowserCanvasMatcher:
             scaled_height = max(1, round(template.shape[0] * scale_y * variant))
             if scaled_width > search.shape[1] or scaled_height > search.shape[0]:
                 continue
-            template_key = (filename, scaled_width, scaled_height, mode)
-            match_template = self._scaled_templates.get(template_key)
-            if match_template is None:
-                scaled = cv2.resize(
-                    template,
-                    (scaled_width, scaled_height),
-                    interpolation=cv2.INTER_AREA,
-                )
-                match_template = self._prepare_match_image(scaled, mode)
-                self._scaled_templates[template_key] = match_template
+            scaled = cv2.resize(template, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
+            if spec.edge:
+                match_search = cv2.Canny(cv2.cvtColor(search, cv2.COLOR_BGR2GRAY), 60, 150)
+                match_template = cv2.Canny(cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY), 60, 150)
+            elif spec.grayscale:
+                match_search = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
+                match_template = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
+            else:
+                match_search = search
+                match_template = scaled
             result = cv2.matchTemplate(match_search, match_template, cv2.TM_CCOEFF_NORMED)
             _, confidence, _, location = cv2.minMaxLoc(result)
             if confidence > best_confidence:
@@ -672,16 +641,6 @@ class BrowserCanvasMatcher:
             best_confidence,
             (x + best_location[0], y + best_location[1], best_size[0], best_size[1]),
         )
-
-    @staticmethod
-    def _prepare_match_image(image: object, mode: str) -> object:
-        import cv2
-
-        if mode == "edge":
-            return cv2.Canny(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), 60, 150)
-        if mode == "grayscale":
-            return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        return image
 
     def _load(self, filename: str) -> object:
         import cv2

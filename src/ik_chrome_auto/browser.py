@@ -334,6 +334,11 @@ class ChromeProfileSession:
         self._direct_canvas_capture_supported: bool | None = None
         self._farm_matcher: Any | None = None
         self._last_farm_capture_png: bytes | None = None
+        # A synchronized gesture must use one immutable follower transform.
+        # Re-reading an iframe during pointerdown/move/up can produce different
+        # boxes while Chrome is laying out dozens of background profiles.
+        self._sync_pointer_target_box: dict[str, float] | None = None
+        self._sync_last_target_box: dict[str, float] | None = None
         # Normal profile windows retain their responsive iframe dimensions.
         # Only an active automation renderer lease forces the game to 1280x720.
         self._automation_game_frame_fixed = False
@@ -1136,12 +1141,7 @@ class ChromeProfileSession:
             scale,
         )
 
-    def detect_farm_state(
-        self,
-        *,
-        template_ids: Any = None,
-        include_roster: bool = True,
-    ) -> tuple[Any, dict[str, float], tuple[int, int]]:
+    def detect_farm_state(self) -> tuple[Any, dict[str, float], tuple[int, int]]:
         """Classify the current game canvas with the ported ADB template pack."""
         from ik_chrome_auto.farm_matcher import BrowserCanvasMatcher
 
@@ -1158,14 +1158,7 @@ class ChromeProfileSession:
         self._last_farm_capture_png = png
         if self._farm_matcher is None:
             self._farm_matcher = BrowserCanvasMatcher()
-        if template_ids is None and include_roster:
-            result = self._farm_matcher.detect(png)
-        else:
-            result = self._farm_matcher.detect(
-                png,
-                template_ids=template_ids,
-                include_roster=include_roster,
-            )
+        result = self._farm_matcher.detect(png)
         return result, surface, self._png_dimensions(png)
 
     def last_farm_capture_png(self) -> bytes | None:
@@ -1577,6 +1570,8 @@ class ChromeProfileSession:
     def repair_synced_input_runtime(self) -> None:
         """Reconnect input dispatch after a follower frame/page navigation."""
         page = self.page
+        self._sync_pointer_target_box = None
+        self._sync_last_target_box = None
         self._detach_page_cdp_session()
         self._runtime_page = None
         self._configured_frames.clear()
@@ -1768,6 +1763,8 @@ class ChromeProfileSession:
                 button=button,
                 buttons=buttons,
             )
+            if event_type == "pointerup":
+                self._sync_pointer_target_box = None
         elif event_type == "wheel":
             wheel = event.get("wheel", {})
             ProfileInputEngine.wheel(
@@ -1778,21 +1775,31 @@ class ChromeProfileSession:
             )
 
     def _synced_pointer_target_box(self, event: dict[str, Any]) -> dict[str, float]:
-        """Resolve the follower canvas, falling back to its live viewport.
+        """Resolve and retain one viewport transform for a complete gesture.
 
         During iframe navigation Chrome can visibly retain the game frame
-        while Playwright temporarily cannot enumerate its canvas. The game is
-        fitted to the full renderer, so viewport-ratio dispatch is a safe
-        fallback and prevents one slow follower from dropping the click.
+        while Playwright temporarily cannot enumerate its canvas. Reuse the
+        last measured box before falling back to the viewport so a temporary
+        detached frame does not move the click to a different origin.
         """
+        event_type = str(event.get("type", ""))
+        active_box = getattr(self, "_sync_pointer_target_box", None)
+        if event_type in {"pointermove", "pointerup"} and active_box is not None:
+            return dict(active_box)
         try:
             frame = self._frame_for_input(event)
             canvas = event.get("canvas")
             if isinstance(canvas, dict):
-                return self._canvas_box(frame, int(canvas.get("index", 0)))
-            return self._frame_box(frame)
+                box = self._canvas_box(frame, int(canvas.get("index", 0)))
+            else:
+                box = self._frame_box(frame)
         except Exception:
-            return self._viewport_surface_box()
+            cached = getattr(self, "_sync_last_target_box", None)
+            box = dict(cached) if cached is not None else self._viewport_surface_box()
+        self._sync_last_target_box = dict(box)
+        if event_type == "pointerdown":
+            self._sync_pointer_target_box = dict(box)
+        return box
 
     def _apply_synced_keyboard_input(self, event: dict[str, Any], event_type: str) -> None:
         keyboard = event.get("keyboard")
@@ -1973,7 +1980,10 @@ class ChromeProfileSession:
             largest = max(boxes, key=lambda item: item["width"] * item["height"])
             if getattr(self, "_automation_game_frame_fixed", False):
                 return _fixed_game_surface_box()
-            return _origin_surface_box(largest)
+            # CDP pointer coordinates use the top-level page viewport. Keep
+            # the follower's freshly measured canvas origin; this is a live
+            # transform, not a hard-coded iframe offset.
+            return dict(largest)
         return self._frame_box(frame)
 
     def _frame_box(self, frame: Frame) -> dict[str, float]:
@@ -1991,7 +2001,7 @@ class ChromeProfileSession:
         if box:
             if getattr(self, "_automation_game_frame_fixed", False):
                 return _fixed_game_surface_box()
-            return _origin_surface_box(box)
+            return dict(box)
         raise RuntimeError("Không xác định được vị trí frame đích để đồng bộ thao tác")
 
     def pump(self, milliseconds: int = 50) -> None:

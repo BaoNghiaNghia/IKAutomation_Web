@@ -14,7 +14,6 @@ from ik_chrome_auto.browser import (
     _low_gpu_init_script,
 )
 from ik_chrome_auto.image_utils import RGBImage, decode_png
-from ik_chrome_auto.farm_vision import FarmTemplateId
 from ik_chrome_auto.input_helpers import (
     CanvasReferencePoint,
     CanvasTransformSnapshot,
@@ -545,24 +544,6 @@ def test_farm_state_keeps_browser_capture_when_headless() -> None:
     assert capture_preferences == [True]
 
 
-def test_farm_state_forwards_selective_detection_plan() -> None:
-    session, _canvas, _context, _page = make_session()
-    session.capture_game_surface_png = lambda *, prefer_browser_capture: (ASSET_PNG, BOX.copy())
-    calls: list[dict[str, object]] = []
-    session._farm_matcher = SimpleNamespace(
-        detect=lambda _png, **kwargs: calls.append(kwargs) or "detected"
-    )
-    templates = (FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON,)
-
-    detected, _surface, _image_size = session.detect_farm_state(
-        template_ids=templates,
-        include_roster=False,
-    )
-
-    assert detected == "detected"
-    assert calls == [{"template_ids": templates, "include_roster": False}]
-
-
 def test_scroll_game_surface_sends_wheel_at_canvas_centre() -> None:
     session, _canvas, context, _page = make_session()
 
@@ -805,6 +786,57 @@ def test_synced_pointer_uses_largest_target_canvas_not_source_canvas_index() -> 
     box = session._canvas_box(frame, 0)
 
     assert box == {"x": 0.0, "y": 0.0, "width": 1280.0, "height": 720.0}
+
+
+def test_synced_pointer_keeps_live_canvas_viewport_origin() -> None:
+    frame = SimpleNamespace(
+        locator=lambda _selector: SimpleNamespace(
+            count=lambda: 1,
+            nth=lambda _index: SimpleNamespace(
+                bounding_box=lambda: {
+                    "x": 17.0,
+                    "y": 29.0,
+                    "width": 640.0,
+                    "height": 360.0,
+                }
+            ),
+        )
+    )
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session._automation_game_frame_fixed = False
+
+    box = session._canvas_box(frame, 0)
+
+    assert box == {"x": 17.0, "y": 29.0, "width": 640.0, "height": 360.0}
+
+
+def test_synced_pointer_reuses_one_transform_until_pointer_up() -> None:
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session._sync_pointer_target_box = None
+    session._sync_last_target_box = None
+    session._frame_for_input = lambda _event: object()
+    boxes = iter(
+        (
+            {"x": 10.0, "y": 20.0, "width": 640.0, "height": 360.0},
+            {"x": 30.0, "y": 40.0, "width": 800.0, "height": 450.0},
+        )
+    )
+    session._canvas_box = lambda _frame, _index: next(boxes)
+    down = {"type": "pointerdown", "canvas": {"index": 0}}
+    move = {"type": "pointermove", "canvas": {"index": 0}}
+    up = {"type": "pointerup", "canvas": {"index": 0}}
+
+    first = session._synced_pointer_target_box(down)
+    assert session._synced_pointer_target_box(move) == first
+    assert session._synced_pointer_target_box(up) == first
+    session._sync_pointer_target_box = None
+
+    assert session._synced_pointer_target_box(down) == {
+        "x": 30.0,
+        "y": 40.0,
+        "width": 800.0,
+        "height": 450.0,
+    }
 
 
 def test_native_window_falls_back_to_managed_chrome_process(monkeypatch: Any) -> None:

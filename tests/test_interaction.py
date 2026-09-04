@@ -19,14 +19,14 @@ def test_calculate_canvas_target_point() -> None:
     event = {"canvas": {"ratio_x": 0.25, "ratio_y": 0.75}}
     box = {"x": 100.0, "y": 50.0, "width": 800.0, "height": 400.0}
 
-    assert calculate_target_point(event, box) == (200.0, 300.0)
+    assert calculate_target_point(event, box) == (300.0, 350.0)
 
 
 def test_calculate_viewport_target_clamps_ratio() -> None:
     event = {"viewport": {"ratio_x": 2.0, "ratio_y": -1.0}}
     box = {"x": 10.0, "y": 20.0, "width": 100.0, "height": 50.0}
 
-    assert calculate_target_point(event, box) == (100.0, 0.0)
+    assert calculate_target_point(event, box) == (110.0, 20.0)
 
 
 def test_format_canvas_coordinate() -> None:

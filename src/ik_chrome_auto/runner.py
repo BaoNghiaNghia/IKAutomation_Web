@@ -105,58 +105,6 @@ FARM_SEARCH_RESULT_SETTLE_SECONDS = 10.0
 # intentionally persistent and ends only through the user's Stop Farm command.
 FARM_MAX_RECOVERY_ATTEMPTS = 3
 FARM_RECOVERY_BASE_DELAY_SECONDS = 3.0
-# Templates that distinguish every screen which can interrupt a normal farm
-# step.  Expensive step-specific controls are appended only while that step is
-# active instead of rescanning the complete template pack on every frame.
-FARM_STATE_TEMPLATES = (
-    FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON,
-    FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON,
-    FarmTemplateId.WORLD_MAP_ANCHOR,
-    FarmTemplateId.BROWSER_WORLD_MAP_BACK_BUTTON,
-    FarmTemplateId.BROWSER_WORLD_MAP_COORDINATE_PIN,
-    FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON,
-    FarmTemplateId.BROWSER_CANVAS_READY_ANCHOR,
-    FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON,
-    FarmTemplateId.CONTINENT_MAP_TITLE,
-    FarmTemplateId.CONTINENT_MAP_HOME_TERRITORY_ANCHOR,
-    FarmTemplateId.CONTINENT_MAP_PIN_BUTTON,
-    FarmTemplateId.BROWSER_RESOURCE_SEARCH_PANEL,
-    FarmTemplateId.BROWSER_GATHER_BUTTON_ENABLED,
-    FarmTemplateId.BROWSER_TEAM_SELECTION_PANEL,
-    FarmTemplateId.BROWSER_TEAM_ACTION_BUTTON,
-    FarmTemplateId.STORAGE_LIMIT_DIALOG_ANCHOR,
-    FarmTemplateId.STORAGE_LIMIT_CANCEL_BUTTON,
-    FarmTemplateId.RESOURCE_EXPIRY_DIALOG_ANCHOR,
-)
-FARM_SEARCH_TEMPLATES = (
-    FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON,
-    FarmTemplateId.BROWSER_RESOURCE_TAB_BUTTON,
-    FarmTemplateId.BROWSER_FOOD_RESOURCE_BUTTON,
-    FarmTemplateId.BROWSER_WOOD_RESOURCE_BUTTON,
-    FarmTemplateId.BROWSER_STONE_RESOURCE_BUTTON,
-    FarmTemplateId.BROWSER_IRON_RESOURCE_BUTTON,
-    FarmTemplateId.BROWSER_FOOD_RESOURCE_ACTIVE,
-    FarmTemplateId.BROWSER_WOOD_RESOURCE_ACTIVE,
-    FarmTemplateId.BROWSER_STONE_RESOURCE_ACTIVE,
-    FarmTemplateId.BROWSER_IRON_RESOURCE_ACTIVE,
-    FarmTemplateId.BROWSER_RESOURCE_LEVEL_6,
-    FarmTemplateId.BROWSER_RESOURCE_LEVEL_7,
-    FarmTemplateId.BROWSER_SEARCH_TARGET_CHECKBOX_UNCHECKED,
-    FarmTemplateId.BROWSER_SEARCH_TARGET_CHECKBOX_CHECKED,
-    FarmTemplateId.BROWSER_SEARCH_BUTTON_ENABLED,
-    FarmTemplateId.BROWSER_TOAST_NOT_FOUND,
-    FarmTemplateId.BROWSER_TOAST_NOT_FOUND_SHORT,
-    FarmTemplateId.BROWSER_TOAST_OTHER_REGION,
-    FarmTemplateId.BROWSER_TOAST_LEVEL_TOO_LOW,
-)
-FARM_TEAM_TEMPLATES = (
-    FarmTemplateId.BROWSER_TEAM_2_BADGE,
-    FarmTemplateId.BROWSER_TEAM_3_BADGE,
-    FarmTemplateId.BROWSER_TEAM_4_BADGE,
-    FarmTemplateId.BROWSER_TEAM_SELECTED_BORDER,
-    FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_TOAST,
-    FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_CONFIRM,
-)
 FARM_RESOURCE_BUTTON_CENTERS: dict[str, tuple[float, float]] = {
     # Centres measured on the supplied account-2 1280x720 canvas.  The four
     # icons are not spaced by the older 0.12 estimate: the outer Food/Iron
@@ -1011,7 +959,7 @@ class ProfileWorker:
             return
         self._farm_renderer_waiting = False
         try:
-            detected, _surface, image_size = self._detect_farm_state_for_step()
+            detected, _surface, image_size = self.session.detect_farm_state()
             self._farm_capture_blocked_count = 0
             if not self._farm_canvas_is_usable(image_size):
                 self._farm_canvas_resize_attempts = (
@@ -1292,10 +1240,7 @@ class ProfileWorker:
                 storage_limit_dialog,
                 storage_limit_cancel,
             ):
-                fresh, _fresh_surface, fresh_size = self._detect_farm_evidence(
-                    FarmTemplateId.STORAGE_LIMIT_DIALOG_ANCHOR,
-                    FarmTemplateId.STORAGE_LIMIT_CANCEL_BUTTON,
-                )
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                 fresh_dialog = fresh.evidence_for(FarmTemplateId.STORAGE_LIMIT_DIALOG_ANCHOR)
                 fresh_cancel = fresh.evidence_for(FarmTemplateId.STORAGE_LIMIT_CANCEL_BUTTON)
                 if self._should_cancel_storage_limit(fresh_dialog, fresh_cancel):
@@ -1478,10 +1423,7 @@ class ProfileWorker:
                 target_resource_expiry_toast,
                 target_resource_expiry_confirm,
             ):
-                fresh, _fresh_surface, fresh_size = self._detect_farm_evidence(
-                    FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_TOAST,
-                    FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_CONFIRM,
-                )
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                 fresh_toast = fresh.evidence_for(FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_TOAST)
                 fresh_confirm = fresh.evidence_for(FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_CONFIRM)
                 if self._should_confirm_target_resource_expiry(
@@ -1785,10 +1727,7 @@ class ProfileWorker:
                 # could never satisfy its Resource Search postcondition.
                 # Re-check City, return to World Map once, then retry Search
                 # with the same workflow target and selected team.
-                fresh, _fresh_surface, fresh_size = self._detect_farm_evidence(
-                    FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON,
-                    classify_state=True,
-                )
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                 fresh_city = fresh.evidence_for(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
                 if fresh.state == DetectedGameState.CITY and fresh_city.actionable:
                     click_bounds = self._map_toggle_layout_bounds(fresh_size)
@@ -1843,10 +1782,7 @@ class ProfileWorker:
                     self._publish(WorkerState.RUNNING, "Auto Farm: đã yêu cầu về City, đang xác minh")
                     return
                 else:
-                    fresh, _fresh_surface, fresh_size = self._detect_farm_evidence(
-                        FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON,
-                        classify_state=True,
-                    )
+                    fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                     fresh_map_to_city = fresh.evidence_for(FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON)
                     if (
                         fresh.state == DetectedGameState.WORLD_MAP
@@ -1881,10 +1817,7 @@ class ProfileWorker:
                     )
                     return
             if decision.step == FarmStep.RETURN_TO_CITY and state == FarmGameState.WORLD_MAP:
-                fresh, _fresh_surface, fresh_size = self._detect_farm_evidence(
-                    FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON,
-                    classify_state=True,
-                )
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                 fresh_map_to_city = fresh.evidence_for(FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON)
                 if fresh.state != DetectedGameState.WORLD_MAP or not fresh_map_to_city.actionable:
                     self._farm_next_at = time.monotonic() + 0.8
@@ -1936,10 +1869,7 @@ class ProfileWorker:
                         screenshot,
                     )
                     return
-                fresh, _fresh_surface, fresh_size = self._detect_farm_evidence(
-                    FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON,
-                    classify_state=True,
-                )
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                 fresh_button = fresh.evidence_for(FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON)
                 fresh_world = fresh.evidence_for(FarmTemplateId.WORLD_MAP_ANCHOR)
                 fresh_coordinate_pin = fresh.evidence_for(FarmTemplateId.BROWSER_WORLD_MAP_COORDINATE_PIN)
@@ -1988,10 +1918,7 @@ class ProfileWorker:
                     self._farm_next_at = time.monotonic() + 0.8
                     self._publish(WorkerState.RUNNING, "Auto Farm: đã gửi lệnh mở World Map, chỉ đang xác minh")
                     return
-                fresh, _fresh_surface, fresh_size = self._detect_farm_evidence(
-                    FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON,
-                    classify_state=True,
-                )
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                 fresh_city = fresh.evidence_for(FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON)
                 if fresh.state != DetectedGameState.CITY or not fresh_city.actionable:
                     self._farm_next_at = time.monotonic() + 0.8
@@ -2028,10 +1955,7 @@ class ProfileWorker:
                         screenshot,
                     )
                     return
-                fresh, _fresh_surface, fresh_size = self._detect_farm_evidence(
-                    FarmTemplateId.BROWSER_GATHER_BUTTON_ENABLED,
-                    classify_state=True,
-                )
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                 fresh_gather = fresh.evidence_for(FarmTemplateId.BROWSER_GATHER_BUTTON_ENABLED)
                 if not fresh_gather.actionable:
                     self._farm_next_at = time.monotonic() + 0.8
@@ -2081,14 +2005,7 @@ class ProfileWorker:
                         team=decision.team,
                     )
                     return
-                fresh, _fresh_surface, fresh_size = self._detect_farm_evidence(
-                    FarmTemplateId.BROWSER_TEAM_SELECTION_PANEL,
-                    FarmTemplateId.BROWSER_TEAM_ACTION_BUTTON,
-                    FarmTemplateId.BROWSER_TEAM_2_BADGE,
-                    FarmTemplateId.BROWSER_TEAM_3_BADGE,
-                    FarmTemplateId.BROWSER_TEAM_4_BADGE,
-                    classify_state=True,
-                )
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                 fresh_panel = fresh.evidence_for(FarmTemplateId.BROWSER_TEAM_SELECTION_PANEL)
                 fresh_action = fresh.evidence_for(FarmTemplateId.BROWSER_TEAM_ACTION_BUTTON)
                 fresh_badges = {
@@ -2129,11 +2046,7 @@ class ProfileWorker:
                 self._publish(WorkerState.RUNNING, f"Auto Farm: đã chọn đội {decision.team}, đang xác minh viền chọn")
                 return
             if decision.step == FarmStep.DISPATCH and state == FarmGameState.TEAM_SELECTION:
-                fresh, _fresh_surface, fresh_size = self._detect_farm_evidence(
-                    FarmTemplateId.BROWSER_TEAM_SELECTION_PANEL,
-                    FarmTemplateId.BROWSER_TEAM_ACTION_BUTTON,
-                    classify_state=True,
-                )
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                 fresh_panel = fresh.evidence_for(FarmTemplateId.BROWSER_TEAM_SELECTION_PANEL)
                 fresh_action = fresh.evidence_for(FarmTemplateId.BROWSER_TEAM_ACTION_BUTTON)
                 if not fresh_panel.actionable or not fresh_action.actionable:
@@ -2171,10 +2084,7 @@ class ProfileWorker:
                 # template before the intended category was opened.
                 if not self._farm_resource_panel_verified:
                     if self._farm_resource_tab_clicked_at <= 0:
-                        fresh, _fresh_surface, fresh_size = self._detect_farm_evidence(
-                            FarmTemplateId.BROWSER_RESOURCE_TAB_BUTTON,
-                            classify_state=True,
-                        )
+                        fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                         fresh_tab = fresh.evidence_for(FarmTemplateId.BROWSER_RESOURCE_TAB_BUTTON)
                         if fresh.state != DetectedGameState.RESOURCE_SEARCH_PANEL:
                             self._farm_next_at = time.monotonic() + 0.5
@@ -2456,11 +2366,7 @@ class ProfileWorker:
                             self._farm_next_at = time.monotonic() + 0.5
                             self._publish(WorkerState.RUNNING, "Auto Farm: đang xác minh checkbox lọc mục tiêu")
                             return
-                        fresh, _fresh_surface, fresh_size = self._detect_farm_evidence(
-                            FarmTemplateId.BROWSER_SEARCH_TARGET_CHECKBOX_UNCHECKED,
-                            FarmTemplateId.BROWSER_SEARCH_TARGET_CHECKBOX_CHECKED,
-                            classify_state=True,
-                        )
+                        fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                         fresh_checkbox = fresh.evidence_for(
                             FarmTemplateId.BROWSER_SEARCH_TARGET_CHECKBOX_UNCHECKED
                         )
@@ -2540,10 +2446,7 @@ class ProfileWorker:
                                 screenshot,
                             )
                             return
-                        fresh, _fresh_surface, fresh_size = self._detect_farm_evidence(
-                            FarmTemplateId.BROWSER_SEARCH_BUTTON_ENABLED,
-                            classify_state=True,
-                        )
+                        fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                         fresh_find_resource = fresh.evidence_for(FarmTemplateId.BROWSER_SEARCH_BUTTON_ENABLED)
                         if fresh_find_resource.actionable:
                             # This WebGL button shares the compositor input
@@ -2858,54 +2761,6 @@ class ProfileWorker:
         width, height = image_size
         minimum_width, minimum_height = FARM_MINIMUM_CANVAS_SIZE
         return width >= minimum_width and height >= minimum_height
-
-    def _detect_farm_state_for_step(self) -> tuple[Any, dict[str, float], tuple[int, int]]:
-        """Capture only evidence relevant to the active workflow step.
-
-        Test doubles and older adapters retain the original no-argument call.
-        The production Chrome session receives a compact detection plan, which
-        avoids dozens of full-frame OpenCV searches before every guarded tap.
-        """
-        if self.session is None:
-            raise RuntimeError("Farm session is not available")
-        if not isinstance(self.session, ChromeProfileSession):
-            return self.session.detect_farm_state()
-        step = self._farm.step if self._farm is not None else FarmStep.PREFLIGHT
-        templates = list(FARM_STATE_TEMPLATES)
-        if step in {FarmStep.OPEN_SEARCH, FarmStep.FIND_RESOURCE}:
-            templates.extend(FARM_SEARCH_TEMPLATES)
-        if step in {
-            FarmStep.OPEN_TEAM_SELECTION,
-            FarmStep.SELECT_TEAM,
-            FarmStep.DISPATCH,
-        }:
-            templates.extend(FARM_TEAM_TEMPLATES)
-        include_roster = (
-            step in {FarmStep.PREFLIGHT, FarmStep.CHECK_TEAMS, FarmStep.WAITING}
-            or self._farm_post_dispatch_roster_scan_pending
-        )
-        return self.session.detect_farm_state(
-            template_ids=templates,
-            include_roster=include_roster,
-        )
-
-    def _detect_farm_evidence(
-        self,
-        *template_ids: FarmTemplateId,
-        classify_state: bool = False,
-        include_roster: bool = False,
-    ) -> tuple[Any, dict[str, float], tuple[int, int]]:
-        """Fresh guard capture with the smallest safe template set."""
-        if self.session is None:
-            raise RuntimeError("Farm session is not available")
-        if not isinstance(self.session, ChromeProfileSession):
-            return self.session.detect_farm_state()
-        selected = list(FARM_STATE_TEMPLATES) if classify_state else []
-        selected.extend(template_ids)
-        return self.session.detect_farm_state(
-            template_ids=selected,
-            include_roster=include_roster,
-        )
 
     @staticmethod
     def _canvas_ratio_bounds(
@@ -4216,15 +4071,9 @@ class MultiProfileRunner:
         if not enabled or source_profile_id != master_id:
             return
         event_type = str(event.get("type", ""))
-        if event_type == "pointermove":
-            # Keep dragging responsive without multiplying the source's 42 Hz
-            # stream into an unbounded 45-profile command storm.
-            move_interval = 0.06 if len(target_ids) >= 32 else 0.04 if len(target_ids) >= 16 else 0.0
-            now = time.monotonic()
-            last_move_at = getattr(self, "_sync_last_pointer_move_at", 0.0)
-            if move_interval and now - last_move_at < move_interval:
-                return
-            self._sync_last_pointer_move_at = now
+        # Do not throttle here. Each follower retains at most one pending
+        # pointermove, so the fan-out queue stays bounded without discarding
+        # the source trajectory globally for all 44 devices.
         delivered = 0
         for profile_id, worker in self.workers.items():
             if profile_id not in target_ids or worker.session is None:

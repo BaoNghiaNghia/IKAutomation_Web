@@ -125,7 +125,7 @@ def test_profile_worker_coalesces_stale_pointer_moves_before_reliable_input() ->
     assert pointer_up.payload["event"] == {"type": "pointerup", "sequence": 3}
 
 
-def test_large_sync_throttles_pointer_moves_but_never_drops_pointer_up(monkeypatch) -> None:
+def test_large_sync_fans_out_every_move_and_never_drops_pointer_up() -> None:
     runner = make_runner()
     followers = {f"follower-{index}" for index in range(44)}
     runner.workers = {
@@ -133,15 +133,11 @@ def test_large_sync_throttles_pointer_moves_but_never_drops_pointer_up(monkeypat
         **{profile_id: FakeWorker(object()) for profile_id in followers},
     }
     runner.sync_target_ids = followers
-    runner._sync_last_pointer_move_at = 0.0
-    clock = iter((100.0, 100.02))
-    monkeypatch.setattr(runner_module.time, "monotonic", lambda: next(clock))
-
     runner._on_input("master", {"type": "pointermove", "sequence": 1})
     runner._on_input("master", {"type": "pointermove", "sequence": 2})
     runner._on_input("master", {"type": "pointerup", "sequence": 3})
 
-    assert all(len(runner.workers[profile_id].commands) == 2 for profile_id in followers)
+    assert all(len(runner.workers[profile_id].commands) == 3 for profile_id in followers)
     assert all(
         runner.workers[profile_id].commands[-1].payload["event"]["type"] == "pointerup"
         for profile_id in followers

@@ -275,8 +275,8 @@ def calculate_target_point(event: dict[str, Any], box: dict[str, float]) -> tupl
     ratio_x = min(1.0, max(0.0, ratio_x))
     ratio_y = min(1.0, max(0.0, ratio_y))
     return (
-        float(box["width"]) * ratio_x,
-        float(box["height"]) * ratio_y,
+        float(box.get("x", 0.0)) + float(box["width"]) * ratio_x,
+        float(box.get("y", 0.0)) + float(box["height"]) * ratio_y,
     )
 
 
