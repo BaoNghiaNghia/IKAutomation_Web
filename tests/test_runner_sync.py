@@ -534,6 +534,38 @@ def test_progressive_arrangement_reserves_final_grid_size(monkeypatch) -> None:
     assert moves == [(100, 0, 355, 199), (101, 355, 355, 199)]
 
 
+def test_individually_opened_profile_uses_a_vacant_previous_grid_slot(monkeypatch) -> None:
+    runner = make_runner()
+    runner.config = SimpleNamespace(
+        profiles=[SimpleNamespace(id=profile_id) for profile_id in ("p0", "p1", "p2")]
+    )
+    runner.windows_topmost = False
+    runner.workers = {
+        "p0": FakeWorker(SimpleNamespace(window_handle=100)),
+        "p1": FakeWorker(None),
+        "p2": FakeWorker(SimpleNamespace(window_handle=102)),
+    }
+    runner._grid_slots = {
+        "p0": (0, 0, 500, 281),
+        "p1": (500, 0, 500, 281),
+        "p2": (0, 281, 500, 281),
+    }
+    runner._grid_slot_order = ("p0", "p1", "p2")
+    rect = WindowRect(0, 0, 500, 281)
+    monkeypatch.setattr(runner_module, "get_window_rect", lambda _hwnd: rect)
+    monkeypatch.setattr(runner_module, "get_visible_window_rect", lambda _hwnd: rect)
+    moves: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(
+        runner_module,
+        "move_window_outer",
+        lambda hwnd, x, y, _width, _height, **_kwargs: moves.append((hwnd, x, y)),
+    )
+    runner.workers["p1"].session = SimpleNamespace(window_handle=101)
+
+    assert runner.place_window_in_empty_grid_slot("p1", 2)
+    assert moves == [(101, 500, 0)]
+
+
 class FakeLog:
     def __init__(self) -> None:
         self.rows: list[tuple[str, dict[str, object]]] = []

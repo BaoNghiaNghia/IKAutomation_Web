@@ -117,6 +117,7 @@ class ProfileRow:
     resource: QLabel
     badge: QLabel
     card: CardWidget
+    open_button: PushButton | None = None
     last_message: str = ""
     last_state: WorkerState | None = None
     last_roster: tuple[tuple[int, str], ...] = ()
@@ -188,6 +189,7 @@ class Dashboard(QWidget):
         self._auto_arrange_targets: set[str] | None = None
         self._auto_arrange_states: dict[str, WorkerState] = {}
         self._auto_arrange_deadline = 0.0
+        self._individually_opening_profiles: set[str] = set()
         self.drag_visible = False
         self.scrollbars_visible = False
         self._responsive_icon_buttons: list[ToolButton] = []
@@ -492,6 +494,10 @@ class Dashboard(QWidget):
             badge = QLabel("Đã dừng")
             badge.setStyleSheet(f"background:#f1f5f9;color:#475569;border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;")
             top.addWidget(badge)
+            open_button = self._compact_profile_button(PushButton("Mở"))
+            open_button.setToolTip("Mở riêng Chrome của profile này")
+            open_button.clicked.connect(lambda _checked=False, profile_id=profile.id: self._open_profile(profile_id))
+            top.addWidget(open_button)
             layout.addLayout(top)
             status = self._muted("Đã dừng")
             roster = QLabel()
@@ -509,8 +515,93 @@ class Dashboard(QWidget):
             layout.addLayout(details)
             index = len(self.rows)
             self.table_layout.addWidget(card, index // 2, index % 2)
-            self.rows[profile.id] = ProfileRow(status, roster, resource, badge, card)
+            self.rows[profile.id] = ProfileRow(status, roster, resource, badge, card, open_button)
         self.table_layout.setRowStretch((len(self.rows) + 1) // 2, 1)
+
+    def _open_profile(self, profile_id: str) -> None:
+        """Open one closed profile while retaining its normal tool eligibility."""
+        row = self.rows.get(profile_id)
+        if row is None or self.runner.has_open_session(profile_id):
+            return
+        # Hide immediately so a double click cannot enqueue two OPEN commands
+        # while the worker is still creating Chrome.
+        self._set_profile_open_control(row, opened=True)
+        individually_opening = getattr(self, "_individually_opening_profiles", None)
+        if individually_opening is None:
+            individually_opening = self._individually_opening_profiles = set()
+        individually_opening.add(profile_id)
+        try:
+            self.runner.submit(profile_id, CommandKind.OPEN)
+        except Exception as error:
+            individually_opening.discard(profile_id)
+            self._set_profile_open_control(row, opened=False)
+            self._error("Không mở được profile", str(error))
+            return
+        self._append_log(f"Đang mở riêng profile {profile_id}")
+
+    def _place_individually_opened_profile(self, profile_id: str) -> None:
+        place_in_grid = getattr(self.runner, "place_window_in_empty_grid_slot", None)
+        if not callable(place_in_grid):
+            return
+        try:
+            placed = place_in_grid(profile_id, self.config.browser.windows_per_row)
+        except Exception as error:
+            self._append_log(f"Không xếp được profile {profile_id} vào grid: {error}")
+            return
+        if placed:
+            self._append_log(f"Đã xếp profile {profile_id} vào ô trống của grid")
+
+    def _include_opened_profile_in_active_tools(self, profile_id: str) -> None:
+        """Enroll a newly ready tab in each tool that is already active.
+
+        A per-card Open command is only a different launch path.  Once its
+        Chrome session is ready, it must behave exactly like a tab opened by
+        the bulk launcher: it joins live Sync, AutoFarms, and mail monitoring.
+        """
+        if getattr(self.runner, "sync_enabled", False):
+            master_id = getattr(self.runner, "sync_master_id", None)
+            if master_id and profile_id != master_id:
+                targets = set(getattr(self.runner, "sync_target_ids", set()))
+                if profile_id not in targets:
+                    targets.add(profile_id)
+                    self.runner.enable_sync(master_id, targets)
+                    self._sync_available_profiles.add(profile_id)
+                    self._sync_target_profiles.add(profile_id)
+                    if hasattr(self, "sync_status"):
+                        self.sync_status.setText(
+                            f"MASTER: {self.master.currentText()} → {len(targets)} thiết bị"
+                        )
+                    self._append_log(f"Đã thêm {profile_id} vào đồng bộ đang chạy")
+
+        if getattr(self, "_farm_all_running", False) and profile_id not in self.farm_profiles:
+            self.farm_profiles.add(profile_id)
+            restore = getattr(self.runner, "restore_profile_windows", None)
+            if callable(restore):
+                restore({profile_id})
+            self.runner.submit(profile_id, CommandKind.START_FARM)
+            self._append_log(f"Đã thêm {profile_id} vào AutoFarms đang chạy")
+
+        if getattr(self, "_monitoring_enabled", False):
+            enable_monitor = getattr(self.runner, "enable_mail_monitor", None)
+            if callable(enable_monitor):
+                enable_monitor({profile_id})
+            queued = getattr(self, "_monitor_queue", None)
+            active = (
+                set(getattr(self, "_monitor_batch_pending", ()))
+                | set(getattr(self, "_monitor_batch_profiles", set()))
+                | set(getattr(self, "_monitor_in_flight", {}))
+            )
+            if queued is not None and profile_id not in queued and profile_id not in active:
+                queued.append(profile_id)
+            self._append_log(f"Đã thêm {profile_id} vào giám sát đang chạy")
+
+    @staticmethod
+    def _set_profile_open_control(row: ProfileRow, *, opened: bool) -> None:
+        """Show the per-card Open action only while its Chrome is closed."""
+        if row.open_button is None:
+            return
+        row.open_button.setVisible(not opened)
+        row.open_button.setEnabled(not opened)
 
     @staticmethod
     def _mask_username(username: str) -> str:
@@ -1289,9 +1380,12 @@ class Dashboard(QWidget):
                 self._stop_monitoring()
             # Closing every worker at once makes Chrome race to tear down its
             # profiles. Queue an explicit STOP per selected profile instead.
+            # A card-level Open is a normal managed tab once ready.  Close
+            # every currently open profile here, including tabs that were not
+            # part of the original bulk-launch selection.
             self._farm_close_queue = deque(
                 profile.id for profile in self.config.profiles
-                if profile.id in self._farm_launch_profiles
+                if self.runner.has_open_session(profile.id)
             )
             self._farm_close_total = sum(
                 1
@@ -1752,6 +1846,14 @@ class Dashboard(QWidget):
             row=self.rows.get(snap.profile_id)
             if row:
                 self._apply_profile_snapshot(row, snap)
+                if snap.state == WorkerState.READY and self.runner.has_open_session(snap.profile_id):
+                    if snap.profile_id in self._individually_opening_profiles:
+                        self._individually_opening_profiles.discard(snap.profile_id)
+                        self._place_individually_opened_profile(snap.profile_id)
+                        self._farm_launch_profiles.add(snap.profile_id)
+                    self._include_opened_profile_in_active_tools(snap.profile_id)
+                elif snap.state in {WorkerState.STOPPED, WorkerState.ERROR}:
+                    self._individually_opening_profiles.discard(snap.profile_id)
                 if snap.state in {WorkerState.STOPPED, WorkerState.ERROR} or "Đã dừng Auto Farm" in snap.message:
                     self.farm_profiles.discard(snap.profile_id); self._refresh_sync_control()
             try:
@@ -1831,6 +1933,10 @@ class Dashboard(QWidget):
                 f"padding:{_ui_px(3)}px {_ui_px(8)}px;"
             )
             self._set_profile_card_state(row, snap.state)
+            if snap.state == WorkerState.STARTING:
+                self._set_profile_open_control(row, opened=True)
+            elif snap.state == WorkerState.STOPPED:
+                self._set_profile_open_control(row, opened=False)
             row.last_state = snap.state
         if row.last_roster != snap.farm_roster:
             self._set_roster_tooltip(row.card, snap.farm_roster)
@@ -1895,6 +2001,7 @@ class Dashboard(QWidget):
             row = self.rows.get(item.profile_id)
             if row is None:
                 continue
+            self._set_profile_open_control(row, opened=item.opened)
             value = "—" if not item.opened else f"{item.ram_bytes/1_048_576:.0f} MB | {item.cpu_percent:.1f}%"
             if row.last_resource != value:
                 row.resource.setText(value)

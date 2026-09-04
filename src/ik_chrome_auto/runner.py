@@ -3671,6 +3671,12 @@ class MultiProfileRunner:
         self.drag_items_visible = False
         self.scrollbars_visible = False
         self.windows_topmost = False
+        # The last resolved grid stores every cell, including cells reserved
+        # for profiles which were closed when the grid was arranged.  It lets
+        # an individually opened profile occupy a vacant cell without moving
+        # the existing Chrome windows.
+        self._grid_slots: dict[str, tuple[int, int, int, int]] = {}
+        self._grid_slot_order: tuple[str, ...] = ()
         self._resource_cpu_samples: dict[str, tuple[float, float]] = {}
         self._sync_lock = threading.Lock()
         # A compact 5-column grid must never create five concurrent 720p
@@ -3917,6 +3923,7 @@ class MultiProfileRunner:
             opened[profile.id] = (profile.id, hwnd, outer, visible)
         if not opened:
             return 0
+        self._grid_slots = {}
         layout_ids = [
             profile.id
             for profile in self.config.profiles
@@ -3955,11 +3962,15 @@ class MultiProfileRunner:
             for profile_id, position in zip(
                 monitor_profile_ids, positions, strict=True
             ):
+                self._grid_slots[profile_id] = (
+                    position[0], position[1], visible_width, visible_height
+                )
                 profile = opened.get(profile_id)
                 if profile is not None:
                     layouts.append(
                         (profile, position, visible_width, visible_height)
                     )
+        self._grid_slot_order = tuple(layout_ids)
         moved = 0
         resized = 0
         pending_resizes = sum(
@@ -4016,6 +4027,63 @@ class MultiProfileRunner:
             except Exception:
                 continue
         return moved
+
+    def place_window_in_empty_grid_slot(
+        self,
+        profile_id: str,
+        columns_per_row: int | None = None,
+    ) -> bool:
+        """Move one newly opened profile into a vacant cell of the last grid.
+
+        The method never repositions an existing profile while a recorded
+        cell is free.  If the grid has no spare cell (for example, the first
+        two profiles were opened one-by-one), it expands the grid once through
+        the normal arranger instead of leaving the new Chrome window stacked.
+        """
+        worker = self.workers.get(profile_id)
+        session = worker.session if worker else None
+        hwnd = session.window_handle if session is not None else None
+        if hwnd is None:
+            return False
+        slots = getattr(self, "_grid_slots", {})
+        ordered_slots = getattr(self, "_grid_slot_order", ())
+        if not slots or not ordered_slots:
+            return bool(self.arrange_windows(columns_per_row))
+        occupied = {
+            candidate_id
+            for candidate_id in ordered_slots
+            if candidate_id != profile_id and self.has_open_session(candidate_id)
+        }
+        # Reopening a previously closed profile restores its own old cell.
+        candidates = (profile_id,) + tuple(
+            candidate_id for candidate_id in ordered_slots if candidate_id != profile_id
+        )
+        slot_id = next((candidate_id for candidate_id in candidates if candidate_id in slots and candidate_id not in occupied), None)
+        if slot_id is None:
+            return bool(self.arrange_windows(columns_per_row))
+        try:
+            outer = get_window_rect(hwnd)
+            visible = get_visible_window_rect(hwnd)
+            visible_x, visible_y, visible_width, visible_height = slots[slot_id]
+            frame_width = visible_width + (outer.width - visible.width)
+            frame_height = visible_height + (outer.height - visible.height)
+            target_x = visible_x - (visible.left - outer.left)
+            target_y = visible_y - (visible.top - outer.top)
+            move_window_outer(
+                hwnd,
+                target_x,
+                target_y,
+                frame_width,
+                frame_height,
+                topmost=self.windows_topmost,
+                resize=(
+                    abs(outer.width - frame_width) > 2
+                    or abs(outer.height - frame_height) > 2
+                ),
+            )
+            return True
+        except Exception:
+            return False
 
     def has_open_session(self, profile_id: str) -> bool:
         worker = self.workers.get(profile_id)

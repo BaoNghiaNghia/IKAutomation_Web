@@ -115,6 +115,84 @@ class FakeActionButton:
         self.icon = icon
 
 
+class FakeProfileOpenButton(FakeActionButton):
+    def __init__(self) -> None:
+        super().__init__()
+        self.visible = True
+
+    def setVisible(self, visible: bool) -> None:
+        self.visible = visible
+
+
+def test_open_closed_profile_submits_one_open_command_and_hides_its_button() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    button = FakeProfileOpenButton()
+    row = SimpleNamespace(open_button=button)
+    commands: list[tuple[str, CommandKind]] = []
+    dashboard.rows = {"account-2": row}
+    dashboard.runner = SimpleNamespace(
+        has_open_session=lambda _profile_id: False,
+        submit=lambda profile_id, command: commands.append((profile_id, command)),
+    )
+    dashboard._append_log = lambda _message: None
+    dashboard._error = lambda _title, _message: None
+
+    dashboard._open_profile("account-2")
+
+    assert commands == [("account-2", CommandKind.OPEN)]
+    assert not button.visible
+    assert not button.enabled
+
+
+def test_open_profile_does_not_repeat_command_for_an_open_session() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    button = FakeProfileOpenButton()
+    dashboard.rows = {"account-2": SimpleNamespace(open_button=button)}
+    dashboard.runner = SimpleNamespace(
+        has_open_session=lambda _profile_id: True,
+        submit=lambda *_args: (_ for _ in ()).throw(AssertionError("must not submit")),
+    )
+
+    dashboard._open_profile("account-2")
+
+    assert button.visible
+
+
+def test_individually_opened_profile_joins_active_tools() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    sync_calls: list[tuple[str, set[str]]] = []
+    commands: list[tuple[str, CommandKind]] = []
+    monitor_calls: list[set[str]] = []
+    restore_calls: list[set[str]] = []
+    dashboard.runner = SimpleNamespace(
+        sync_enabled=True,
+        sync_master_id="account-1",
+        sync_target_ids={"account-2"},
+        enable_sync=lambda master_id, targets: sync_calls.append((master_id, set(targets))),
+        submit=lambda profile_id, command: commands.append((profile_id, command)),
+        enable_mail_monitor=lambda profile_ids: monitor_calls.append(set(profile_ids)),
+        restore_profile_windows=lambda profile_ids: restore_calls.append(set(profile_ids)),
+    )
+    dashboard._sync_available_profiles = {"account-2"}
+    dashboard._sync_target_profiles = {"account-2"}
+    dashboard.farm_profiles = set()
+    dashboard._farm_all_running = True
+    dashboard._monitoring_enabled = True
+    dashboard._monitor_queue = deque()
+    dashboard._monitor_batch_pending = deque()
+    dashboard._monitor_batch_profiles = set()
+    dashboard._monitor_in_flight = {}
+    dashboard._append_log = lambda _message: None
+
+    dashboard._include_opened_profile_in_active_tools("account-3")
+
+    assert sync_calls == [("account-1", {"account-2", "account-3"})]
+    assert commands == [("account-3", CommandKind.START_FARM)]
+    assert restore_calls == [{"account-3"}]
+    assert monitor_calls == [{"account-3"}]
+    assert list(dashboard._monitor_queue) == ["account-3"]
+
+
 def test_sync_control_stays_available_while_farm_is_running() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     dashboard.sync = FakeActionButton()
