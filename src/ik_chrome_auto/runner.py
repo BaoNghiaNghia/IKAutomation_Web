@@ -16,6 +16,11 @@ from ik_chrome_auto.event_log import JsonLineLog, migrate_legacy_profile_log, pr
 from ik_chrome_auto.farm_vision import DetectedGameState, FarmTemplateId, TeamRosterRow
 from ik_chrome_auto.farm_workflow import FarmGameState, FarmStep, FarmWorkflow
 from ik_chrome_auto.image_utils import decode_png
+from ik_chrome_auto.input_helpers import (
+    GAME_REFERENCE_HEIGHT,
+    GAME_REFERENCE_WIDTH,
+    control_center_ratio,
+)
 from ik_chrome_auto.models import (
     AppConfig,
     CommandKind,
@@ -75,15 +80,13 @@ AUTOMATION_RENDERER_SIZE = (1280, 720)
 AUTOMATION_RENDERER_WINDOW_SIZE = AUTOMATION_RENDERER_SIZE
 FARM_MINIMUM_CANVAS_SIZE = AUTOMATION_RENDERER_SIZE
 # One high-detail WebGL renderer at a time prevents five compact profiles from
-# becoming five simultaneous 720p GPU surfaces.  A Farm lease survives the
-# short internal workflow steps and is released for long waits; monitoring
-# holds the same lease only for its bounded mailbox flow.
+# becoming five simultaneous 720p GPU surfaces. A Farm lease survives the
+# complete dispatch flow and is released only at a safe workflow boundary;
+# monitoring holds the same lease only for its bounded mailbox flow.
 AUTOMATION_RENDERER_WAIT_SECONDS = 30.0
-# A Farm state that takes a second or more to settle (map loading, an unknown
-# frame, a search result) must yield the one true 1280×720 renderer.  Keeping
-# the old four-second lease made the first profile monopolise it indefinitely
-# while another profile was waiting for its initial scan.
-FARM_RENDERER_IDLE_RELEASE_SECONDS = 0.9
+FARM_RENDERER_YIELD_STEPS = frozenset(
+    {FarmStep.PREFLIGHT, FarmStep.WAITING, FarmStep.STOPPED}
+)
 FARM_NO_READY_TEAM_RESCAN_SECONDS = 120.0
 FARM_MAP_TRANSITION_RENDERER_HOLD_SECONDS = 2.0
 # A click is not complete until its fresh 1280×720 postcondition has been
@@ -103,10 +106,13 @@ FARM_SEARCH_RESULT_SETTLE_SECONDS = 10.0
 FARM_MAX_RECOVERY_ATTEMPTS = 3
 FARM_RECOVERY_BASE_DELAY_SECONDS = 3.0
 FARM_RESOURCE_BUTTON_CENTERS: dict[str, tuple[float, float]] = {
-    "food": (0.286, 0.735),
-    "wood": (0.406, 0.735),
-    "stone": (0.526, 0.735),
-    "iron": (0.646, 0.735),
+    # Centres measured on the supplied account-2 1280x720 canvas.  The four
+    # icons are not spaced by the older 0.12 estimate: the outer Food/Iron
+    # slots sit farther apart.  Keep each fallback on the middle of its icon.
+    "food": (347 / 1280, 529 / 720),
+    "wood": (513 / 1280, 529 / 720),
+    "stone": (679 / 1280, 529 / 720),
+    "iron": (847 / 1280, 529 / 720),
 }
 FARM_RESOURCE_BUTTON_SIZE = (0.095, 0.18)
 # The City/World Map toggle keeps the same bottom-left slot in both directions.
@@ -138,8 +144,13 @@ FARM_TEAM_ROW_STRIDE_RATIO = 0.205
 # Both coordinate fields sit on the same row immediately left of the freshly
 # matched Continent Map pin. Keeping the horizontal offsets as canvas ratios
 # avoids treating the reference 1280x720 capture as desktop coordinates.
-FARM_COORDINATE_X_FIELD_OFFSET_X_RATIO = -144 / 1280
-FARM_COORDINATE_Y_FIELD_OFFSET_X_RATIO = -61 / 1280
+# The pin template contains asymmetric background padding on its right.  On
+# the supplied live 1280x720 crop its matched bounds are (187, 76, 42, 34),
+# while the actual three-digit centres are X=(56, 93), Y=(140, 93). Offsets
+# are therefore measured from the match-bounds centre, not the visible pin
+# glyph, and intentionally compensate for that padding.
+FARM_COORDINATE_X_FIELD_OFFSET_X_RATIO = -152 / 1280
+FARM_COORDINATE_Y_FIELD_OFFSET_X_RATIO = -68 / 1280
 
 # Measured from the 1260×674 video supplied on 2026-08-28.  They are declared
 # as direct X/Y canvas percentages (rather than retained pixel references), so
@@ -254,6 +265,7 @@ class ProfileWorker:
         # the freshly resolved row as the authoritative post-tap target.
         self._farm_expected_team_row: tuple[int, int, int, int] | None = None
         self._farm_dispatch_click_at = 0.0
+        self._farm_dispatch_clicks = 0
         self._farm_area_selector = ResourceAreaPointSelector()
         self._farm_area_epoch = 0
         self._farm_run_id = ""
@@ -391,12 +403,12 @@ class ProfileWorker:
             self._automation_renderer_lock.release()
 
     def _release_farm_renderer_when_idle(self) -> None:
-        """Restore the grid only after the active 720p interaction is complete.
+        """Restore the grid only at a safe boundary between complete flows.
 
-        Once a Farm input has been sent, every following capture and
-        post-condition in that cycle must use the same 1280x720 renderer.
-        Releasing merely because the next verification is 1-2 seconds away
-        creates a compact-grid frame between click and verification.
+        One profile owns the 1280x720 renderer from the first verified
+        transition through dispatch. Switching profiles between those steps
+        changes the live WebGL layout and can strand an open team panel while
+        its workflow is restarted from preflight.
         """
         if not getattr(self, "_automation_renderer_locked", False):
             return
@@ -404,11 +416,11 @@ class ProfileWorker:
         # game is consuming and verifying a Map transition click.
         if time.monotonic() < getattr(self, "_automation_renderer_hold_until", 0.0):
             return
-        # The post-click hold above is the only period that must retain the
-        # renderer. Afterwards always yield, including before a short
-        # 0.35–0.8s poll: otherwise one profile can reacquire every short tick
-        # and starve another profile already waiting at a resource popup. The
-        # next Farm tick reacquires 1280×720 before it captures or clicks.
+        farm = getattr(self, "_farm", None)
+        if farm is not None and farm.step not in FARM_RENDERER_YIELD_STEPS:
+            return
+        # PREFLIGHT, WAITING and STOPPED are safe hand-off boundaries. The
+        # next cycle reacquires a full renderer before taking its first frame.
         self._release_automation_renderer()
 
     def _capture_mail_canvas(self) -> tuple[bytes, tuple[int, int]]:
@@ -423,6 +435,21 @@ class ProfileWorker:
     ) -> None:
         if self.session is None:
             raise RuntimeError("Profile chưa mở")
+        dispatch_point = getattr(self.session, "dispatch_game_surface_point", None)
+        if callable(dispatch_point):
+            dispatch_point(
+                normalized_x * GAME_REFERENCE_WIDTH,
+                normalized_y * GAME_REFERENCE_HEIGHT,
+                input_kind="mouse",
+            )
+            return
+        dispatch = getattr(self.session, "dispatch_game_surface_input_ratio", None)
+        if callable(dispatch):
+            dispatch(normalized_x, normalized_y, input_kind="mouse")
+            return
+
+        # Compatibility for lightweight test doubles and sessions retained
+        # from a version before the shared renderer input dispatcher.
         width, height = image_size
         x = max(1, min(width - 2, round(width * normalized_x)))
         y = max(1, min(height - 2, round(height * normalized_y)))
@@ -614,6 +641,7 @@ class ProfileWorker:
                     self._farm_team_selection_clicks = 0
                     self._farm_expected_team_row = None
                     self._farm_dispatch_click_at = 0.0
+                    self._farm_dispatch_clicks = 0
                     self._farm_area_selector = ResourceAreaPointSelector()
                     self._farm_area_epoch = 0
                     self._farm_run_id = f"{self.profile.id}-{time.monotonic_ns()}"
@@ -1223,14 +1251,17 @@ class ProfileWorker:
             # game shows a confirmation dialog in that exact case. Never
             # infer this from a red button alone: the invariant message prefix
             # and Confirm button must both match on a fresh frame.
-            if (
-                target_resource_expiry_toast.found
-                and target_resource_expiry_confirm.actionable
+            if self._should_confirm_target_resource_expiry(
+                target_resource_expiry_toast,
+                target_resource_expiry_confirm,
             ):
                 fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                 fresh_toast = fresh.evidence_for(FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_TOAST)
                 fresh_confirm = fresh.evidence_for(FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_CONFIRM)
-                if fresh_toast.found and fresh_confirm.actionable:
+                if self._should_confirm_target_resource_expiry(
+                    fresh_toast,
+                    fresh_confirm,
+                ):
                     input_method = self._click_farm_panel_control(fresh_confirm.bounds, fresh_size)  # type: ignore[arg-type]
                     self._farm_dispatch_click_at = time.monotonic()
                     self._farm_next_at = self._farm_dispatch_click_at + 0.9
@@ -1307,12 +1338,67 @@ class ProfileWorker:
                     else:
                         self._publish(WorkerState.RUNNING, "Auto Farm: đã bấm Thu thập, đang xác minh đoàn quân xuất phát")
                     return
+                if (
+                    state == FarmGameState.TEAM_SELECTION
+                    and team_panel.actionable
+                    and team_action.actionable
+                    and expected_team_selected
+                    and self._farm_dispatch_clicks < 2
+                ):
+                    # The verified panel is still open, so the first WebGL
+                    # input was not consumed. Keep this flow and selected team
+                    # intact and retry the action once; resetting to PREFLIGHT
+                    # here strands the worker on a team-selection screen.
+                    self._farm_dispatch_click_at = 0.0
+                    self._farm_next_at = time.monotonic() + 0.35
+                    self._log_farm(
+                        "dispatch_retry_scheduled",
+                        {"team": self._farm.team, "attempt": self._farm_dispatch_clicks + 1},
+                    )
+                    self._publish(
+                        WorkerState.RUNNING,
+                        f"Auto Farm: nút Thu thập chưa được nhận; giữ đội {self._farm.team} và bấm lại",
+                    )
+                    return
                 screenshot = self._save_farm_debug_capture("dispatch-unverified")
                 self._retry_farm_or_stop(
                     "dispatch_unverified",
                     "không xác minh được đoàn quân xuất phát sau khi bấm Thu thập",
                     screenshot,
                     team=self._farm.team,
+                )
+                return
+            # Recovery for a team-row input that closed the panel and sent
+            # the march before the explicit action click was logged. A fresh
+            # World Map roster proving the expected team changed to Busy is
+            # an authoritative dispatch postcondition; do not wait forever
+            # for a selected border that no longer exists.
+            if (
+                self._farm.step == FarmStep.SELECT_TEAM
+                and self._farm_team_selection_clicks > 0
+                and state == FarmGameState.WORLD_MAP
+                and self._selected_team_became_busy(self._farm.team, roster)
+            ):
+                completed_team = self._farm.team
+                self._log_farm(
+                    "dispatch_verified_after_team_panel_closed",
+                    {
+                        "team": completed_team,
+                        "roster": [
+                            {
+                                "team": row.team,
+                                "state": row.state.value,
+                                "evidence": row.evidence,
+                            }
+                            for row in roster
+                        ],
+                    },
+                )
+                self._reset_farm_cycle()
+                self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
+                self._publish(
+                    WorkerState.RUNNING,
+                    f"Auto Farm: đội {completed_team} đã xuất phát; chờ 15 giây rồi quét lại đội sẵn sàng",
                 )
                 return
             # The website fades the normal HUD while World Map is loading.
@@ -1707,7 +1793,15 @@ class ProfileWorker:
                     self._farm_next_at = time.monotonic() + 0.8
                     self._publish(WorkerState.RUNNING, "Auto Farm: nút Thu thập thay đổi, đang nhận diện lại")
                     return
-                input_method = self._click_farm_panel_control(fresh_gather.bounds, fresh_size)  # type: ignore[arg-type]
+                # Gather is a WebGL gameplay button, not an HTML panel input.
+                # Production logs showed locator-mouse input surviving the
+                # map transition and landing on a City building afterwards.
+                # Dispatch compositor touch so this verified popup consumes
+                # the input immediately, consistent with resource selection.
+                input_method = self._tap_farm_game_control(
+                    fresh_gather.bounds,  # type: ignore[arg-type]
+                    fresh_size,
+                )
                 self._farm_gather_clicks += 1
                 self._farm_next_at = time.monotonic() + 1.5
                 self._log_farm(
@@ -1764,7 +1858,10 @@ class ProfileWorker:
                     self._farm_next_at = time.monotonic() + 0.8
                     self._publish(WorkerState.RUNNING, "Auto Farm: panel chọn đội thay đổi, đang nhận diện lại")
                     return
-                input_method = self._click_farm_panel_control(row_bounds, fresh_size)
+                # Team rows are WebGL gameplay controls. Use immediate touch;
+                # locator-mouse input was observed closing the panel and
+                # leaving the workflow stuck on World Map.
+                input_method = self._tap_farm_game_control(row_bounds, fresh_size)
                 self._farm_expected_team_row = row_bounds
                 self._farm_team_selection_clicks += 1
                 self._farm_next_at = time.monotonic() + 1.2
@@ -1788,8 +1885,15 @@ class ProfileWorker:
                     self._farm_next_at = time.monotonic() + 0.8
                     self._publish(WorkerState.RUNNING, "Auto Farm: panel điều quân thay đổi, đang nhận diện lại")
                     return
-                input_method = self._click_farm_panel_control(fresh_action.bounds, fresh_size)  # type: ignore[arg-type]
+                # This action is part of the WebGL game surface. The live log
+                # recorded a mouse input at the exact bounds without the game
+                # consuming it, while touch reliably opened this same panel.
+                input_method = self._tap_farm_game_control(
+                    fresh_action.bounds,  # type: ignore[arg-type]
+                    fresh_size,
+                )
                 self._farm_dispatch_click_at = time.monotonic()
+                self._farm_dispatch_clicks += 1
                 self._log_farm(
                     "tap_dispatch",
                     {"team": decision.team, "bounds": fresh_action.bounds, "input": input_method},
@@ -1888,14 +1992,28 @@ class ProfileWorker:
                     # before this click can return a transient frame and lose
                     # the already confirmed Wood match. Use the same fresh
                     # evidence, then verify the next UI state after input.
-                    self._click_farm_panel_control(target_resource_button.bounds, image_size)  # type: ignore[arg-type]
+                    # Resource icons are WebGL controls. The live log showed
+                    # a mouse click being acknowledged while Food remained
+                    # active (0.993) for a Stone/Iron plan. Use the same
+                    # compositor-touch path that reliably switches the
+                    # resource category tab.
+                    input_method = self._tap_farm_game_control(
+                        target_resource_button.bounds,  # type: ignore[arg-type]
+                        image_size,
+                    )
                     self._farm_resource_selected_at = time.monotonic()
                     self._farm_resource_selected_by_layout = False
                     self._farm_resource_template_misses = 0
                     self._farm_next_at = self._farm_resource_selected_at + 1.2
                     self._log_farm(
                         "tap_resource",
-                        {"resource": decision.resource, "bounds": target_resource_button.bounds, "level": decision.level},
+                        {
+                            "resource": decision.resource,
+                            "bounds": target_resource_button.bounds,
+                            "level": decision.level,
+                            "input": input_method,
+                            "method": "verified_inactive_template",
+                        },
                     )
                     self._publish(WorkerState.RUNNING, f"Auto Farm: đã chọn {decision.resource} cấp {decision.level}, đang xác minh")
                     return
@@ -1919,7 +2037,7 @@ class ProfileWorker:
                     # supplied active-state template on the next frame.
                     if self._farm_resource_template_misses >= 2:
                         layout_bounds = self._resource_button_layout_bounds(target_resource, image_size)
-                        self._click_farm_panel_control(layout_bounds, image_size)
+                        input_method = self._tap_farm_game_control(layout_bounds, image_size)
                         self._farm_resource_selected_at = time.monotonic()
                         self._farm_resource_selected_by_layout = True
                         self._farm_next_at = self._farm_resource_selected_at + 1.0
@@ -1930,6 +2048,7 @@ class ProfileWorker:
                                 "level": decision.level,
                                 "bounds": layout_bounds,
                                 "method": "verified_panel_layout_fallback",
+                                "input": input_method,
                             },
                         )
                         self._publish(
@@ -1950,15 +2069,10 @@ class ProfileWorker:
                     # selected-state template.  Previously the worker only
                     # waited for a timeout after tapping an inactive icon, so
                     # it could keep waiting forever and never submit Search.
-                    active_verified = bool(target_resource_active and target_resource_active.found)
-                    # The click above is allowed only after the resource panel
-                    # and enabled Search control were both verified. On skins
-                    # where icon art differs, preserve that verified layout
-                    # post-condition rather than falsely failing a successful
-                    # selection solely because the active icon template is
-                    # from another skin.
-                    if self._farm_resource_selected_by_layout and find_resource.actionable:
-                        active_verified = True
+                    active_resource = self._active_resource_from_evidence(
+                        resource_active_buttons
+                    )
+                    active_verified = active_resource == target_resource
                     if not active_verified:
                         if elapsed >= 5.0:
                             screenshot = self._save_farm_debug_capture("resource-active-unverified")
@@ -1969,6 +2083,7 @@ class ProfileWorker:
                                 resource=target_resource,
                                 level=decision.level,
                                 active=self._evidence_payload(target_resource_active),
+                                detected_active_resource=active_resource,
                             )
                             return
                         self._farm_next_at = time.monotonic() + 0.45
@@ -1981,8 +2096,15 @@ class ProfileWorker:
                     # until the supplied checked-state tick is visible on a
                     # freshly matched panel.
                     if not self._farm_target_checkbox_verified:
-                        if target_checkbox_checked.found:
+                        checkbox_state = self._search_target_checkbox_state(
+                            target_checkbox_checked,
+                            target_checkbox_unchecked,
+                        )
+                        if checkbox_state == "checked":
                             self._farm_target_checkbox_verified = True
+                            self._farm_target_checkbox_click_at = 0.0
+                            self._farm_target_checkbox_clicks = 0
+                            self._farm_target_checkbox_seen_unchecked = False
                             self._log_farm("search_target_checkbox_already_checked", {})
                             self._publish(
                                 WorkerState.RUNNING,
@@ -2070,15 +2192,36 @@ class ProfileWorker:
                         fresh_checkbox = fresh.evidence_for(
                             FarmTemplateId.BROWSER_SEARCH_TARGET_CHECKBOX_UNCHECKED
                         )
-                        checkbox_bounds = fresh_checkbox.bounds if fresh_checkbox.actionable else None
-                        method = "template"
-                        # A failed unchecked-template match is not proof that
-                        # the option is checked. With a live panel and enabled
-                        # Search button, tap its fixed panel-relative slot once
-                        # and verify the post-click frame before Search.
-                        if checkbox_bounds is None and find_resource.actionable:
-                            checkbox_bounds = self._search_target_checkbox_layout_bounds(fresh_size)
-                            method = "verified_panel_layout_fallback"
+                        fresh_checked = fresh.evidence_for(
+                            FarmTemplateId.BROWSER_SEARCH_TARGET_CHECKBOX_CHECKED
+                        )
+                        fresh_checkbox_state = self._search_target_checkbox_state(
+                            fresh_checked,
+                            fresh_checkbox,
+                        )
+                        # State can change while the extra verification frame
+                        # is captured. Checked always wins, so a stale/missed
+                        # outer-frame result can never cause us to untick it.
+                        if fresh_checkbox_state == "checked":
+                            self._farm_target_checkbox_verified = True
+                            self._farm_target_checkbox_click_at = 0.0
+                            self._farm_target_checkbox_clicks = 0
+                            self._farm_target_checkbox_seen_unchecked = False
+                            self._log_farm(
+                                "search_target_checkbox_already_checked",
+                                {"source": "fresh_pre_click_frame"},
+                            )
+                            self._publish(
+                                WorkerState.RUNNING,
+                                "Auto Farm: checkbox lọc mục tiêu đã được tick, không bấm lại",
+                            )
+                            self._farm_next_at = time.monotonic() + 0.35
+                            return
+                        checkbox_bounds = (
+                            fresh_checkbox.bounds
+                            if fresh_checkbox_state == "unchecked"
+                            else None
+                        )
                         if checkbox_bounds is not None:
                             # Search is allowed only after an unchecked state
                             # was actually observed and then changed.  This
@@ -2096,7 +2239,7 @@ class ProfileWorker:
                                 "tap_search_target_checkbox",
                                 {
                                     "bounds": checkbox_bounds,
-                                    "method": method,
+                                    "method": "verified_unchecked_template",
                                     "input": input_method,
                                 },
                             )
@@ -2107,7 +2250,10 @@ class ProfileWorker:
                             self._farm_next_at = self._farm_target_checkbox_click_at + 0.8
                             return
                         self._farm_next_at = time.monotonic() + 0.5
-                        self._publish(WorkerState.RUNNING, "Auto Farm: đang chờ checkbox lọc mục tiêu")
+                        self._publish(
+                            WorkerState.RUNNING,
+                            "Auto Farm: chưa xác minh được trạng thái checkbox; không bấm và chờ ảnh mới",
+                        )
                         return
                     if elapsed >= 0.8 and find_resource.actionable:
                         if self._farm_find_resource_clicks >= 2:
@@ -2121,11 +2267,27 @@ class ProfileWorker:
                         fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
                         fresh_find_resource = fresh.evidence_for(FarmTemplateId.BROWSER_SEARCH_BUTTON_ENABLED)
                         if fresh_find_resource.actionable:
-                            self._click_farm_panel_control(fresh_find_resource.bounds, fresh_size)  # type: ignore[arg-type]
+                            # This WebGL button shares the compositor input
+                            # path used successfully by the nearby checkbox.
+                            # Locator-mouse input on the affected portal was
+                            # acknowledged at Search's bounds but toggled the
+                            # checkbox instead, leaving the panel unchanged.
+                            input_method = self._tap_farm_game_control(
+                                fresh_find_resource.bounds,  # type: ignore[arg-type]
+                                fresh_size,
+                            )
                             self._farm_find_resource_clicks += 1
                             self._farm_find_resource_click_at = time.monotonic()
                             self._farm_next_at = self._farm_find_resource_click_at + 0.6
-                            self._log_farm("tap_find_resource", {"bounds": fresh_find_resource.bounds, "resource": decision.resource, "level": decision.level})
+                            self._log_farm(
+                                "tap_find_resource",
+                                {
+                                    "bounds": fresh_find_resource.bounds,
+                                    "resource": decision.resource,
+                                    "level": decision.level,
+                                    "input": input_method,
+                                },
+                            )
                             self._publish(WorkerState.RUNNING, f"Auto Farm: đang tìm {decision.resource} cấp {decision.level}, đang xác minh mục tiêu")
                             return
                     if elapsed >= 5.0:
@@ -2289,6 +2451,7 @@ class ProfileWorker:
         self._farm_team_selection_clicks = 0
         self._farm_expected_team_row = None
         self._farm_dispatch_click_at = 0.0
+        self._farm_dispatch_clicks = 0
         # The coordinate bag belongs to the user-started AutoFarm session,
         # not to one dispatch/recovery cycle. START_FARM creates it and a
         # STOP/START creates the next one. Keeping it here prevents a failed
@@ -2599,18 +2762,16 @@ class ProfileWorker:
         if not getattr(self, "_automation_renderer_locked", False):
             raise RuntimeError("Control Farm chỉ được bấm sau khi renderer đã khóa ở 1280×720")
 
-        click = getattr(self.session, "click_farm_control", None)
+        click = getattr(self.session, "click_game_control", None)
+        if not callable(click):
+            click = getattr(self.session, "click_farm_control", None)
         if callable(click):
             method = str(click(bounds, image_size, input_kind=input_kind))
         elif input_kind == "touch":
             tap_ratio = getattr(self.session, "tap_game_surface_ratio", None)
-            left, top, width, height = bounds
-            image_width, image_height = image_size
-            if callable(tap_ratio) and image_width > 0 and image_height > 0:
-                tap_ratio(
-                    (left + width / 2) / image_width,
-                    (top + height / 2) / image_height,
-                )
+            if callable(tap_ratio):
+                x_ratio, y_ratio = control_center_ratio(bounds, image_size)
+                tap_ratio(x_ratio, y_ratio)
                 method = "cdp_touch_canvas_ratio"
             else:
                 tap = getattr(self.session, "tap_farm_template", None)
@@ -2638,11 +2799,10 @@ class ProfileWorker:
         if callable(click_mouse):
             click_mouse(bounds, image_size)
             return "mouse_canvas_template"
-        left, top, width, height = bounds
-        image_width, image_height = image_size
         background_click = getattr(self.session, "dispatch_game_surface_mouse_ratio", None)
-        if callable(background_click) and image_width > 0 and image_height > 0:
-            background_click((left + width / 2) / image_width, (top + height / 2) / image_height)
+        if callable(background_click):
+            x_ratio, y_ratio = control_center_ratio(bounds, image_size)
+            background_click(x_ratio, y_ratio)
             return "cdp_canvas_ratio"
         self.session.tap_farm_template(bounds, image_size)
         return "touch_template"
@@ -2661,6 +2821,56 @@ class ProfileWorker:
             center=FARM_SEARCH_TARGET_CHECKBOX_CENTER,
             size=FARM_SEARCH_TARGET_CHECKBOX_SIZE,
             minimum_size=(20, 20),
+        )
+
+    @staticmethod
+    def _search_target_checkbox_state(checked: object, unchecked: object) -> str:
+        """Classify checkbox evidence without ever toggling an unknown state.
+
+        The checked template deliberately has priority if both match during a
+        transition frame. A click is authorised only by actionable unchecked
+        evidence; absence of either template is not treated as unchecked.
+        """
+        if bool(getattr(checked, "found", False)):
+            return "checked"
+        if bool(getattr(unchecked, "actionable", False)):
+            return "unchecked"
+        return "unknown"
+
+    @staticmethod
+    def _active_resource_from_evidence(
+        evidence_by_resource: dict[str, object],
+    ) -> str | None:
+        """Return the uniquely strongest visibly active resource.
+
+        Search must not continue merely because its button is enabled.  The
+        selected icon must be the target itself.  If two active templates are
+        too close to distinguish, keep waiting instead of searching the wrong
+        resource.
+        """
+        matches = sorted(
+            (
+                (float(getattr(evidence, "confidence", 0.0)), resource)
+                for resource, evidence in evidence_by_resource.items()
+                if bool(getattr(evidence, "found", False))
+            ),
+            reverse=True,
+        )
+        if not matches:
+            return None
+        if len(matches) > 1 and matches[0][0] - matches[1][0] < 0.05:
+            return None
+        return matches[0][1]
+
+    @staticmethod
+    def _should_confirm_target_resource_expiry(
+        message: object,
+        confirm_button: object,
+    ) -> bool:
+        """Require both the target-resource sentence and red Confirm button."""
+        return bool(
+            getattr(message, "found", False)
+            and getattr(confirm_button, "actionable", False)
         )
 
     def _try_resource_area_relocation(self, resource: str, level: int) -> str:
@@ -2830,6 +3040,18 @@ class ProfileWorker:
         x_field, y_field = self._coordinate_fields_from_pin(pin.bounds, continent_size)  # type: ignore[arg-type]
         original_x = self.session.read_focused_numeric_farm_input(x_field, continent_size)
         original_y = self.session.read_focused_numeric_farm_input(y_field, continent_size)
+        self._log_farm(
+            "resource_area_coordinate_fields_read",
+            {
+                "pin_bounds": pin.bounds,
+                "x_field": x_field,
+                "y_field": y_field,
+                "original_x": original_x,
+                "original_y": original_y,
+                "point": point,
+                "attempt": selection.attempt,
+            },
+        )
         if original_x is None or original_y is None:
             self._log_farm("resource_area_navigation_blocked", {
                 "reason": "original_coordinates_unreadable", "point": point, "attempt": selection.attempt,
@@ -2951,14 +3173,22 @@ class ProfileWorker:
     def _coordinate_fields_from_pin(
         pin_bounds: tuple[int, int, int, int], image_size: tuple[int, int]
     ) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
-        """Port the ADB's pin-relative X/Y input geometry to this canvas."""
+        """Return 2x2 bounds centred on the live X/Y three-digit text."""
         left, top, width, height = pin_bounds
         image_width, image_height = image_size
         center_x = left + width // 2
         center_y = top + height // 2
         x_center = center_x + round(image_width * FARM_COORDINATE_X_FIELD_OFFSET_X_RATIO)
         y_center = center_x + round(image_width * FARM_COORDINATE_Y_FIELD_OFFSET_X_RATIO)
-        return (x_center, center_y, 2, 2), (y_center, center_y, 2, 2)
+        # The centralized control helper uses the geometric centre. Subtract
+        # one so a 2x2 box centres exactly on the intended integer point
+        # instead of drifting one pixel down and right.
+        return (x_center - 1, center_y - 1, 2, 2), (
+            y_center - 1,
+            center_y - 1,
+            2,
+            2,
+        )
 
     def _log_farm(self, event: str, payload: dict[str, object]) -> None:
         self.farm_log.write(event, {"profile_id": self.profile.id, **payload})
@@ -2995,6 +3225,20 @@ class ProfileWorker:
     def _ready_teams_from_roster(roster: tuple[TeamRosterRow, ...]) -> tuple[int, ...]:
         """Derive the current ready set from one complete, readable roster."""
         return tuple(row.team for row in roster if row.state.value == "ready")
+
+    @staticmethod
+    def _selected_team_became_busy(
+        expected_team: int | None,
+        roster: tuple[TeamRosterRow, ...],
+    ) -> bool:
+        """Confirm an implicit dispatch from one fresh readable roster."""
+        return bool(
+            expected_team is not None
+            and any(
+                row.team == expected_team and row.state.value == "busy"
+                for row in roster
+            )
+        )
 
     @staticmethod
     def _is_expected_team_selected(

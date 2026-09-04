@@ -58,6 +58,28 @@ class _MouseSession(_TapSession):
         self.mouse_clicks.append((bounds, image_size))
 
 
+class _SharedInputSession(_TapSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.inputs: list[tuple[float, float, str]] = []
+
+    def dispatch_game_surface_input_ratio(
+        self, x: float, y: float, *, input_kind: str
+    ) -> None:
+        self.inputs.append((x, y, input_kind))
+
+
+class _ReferencePointSession(_TapSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.points: list[tuple[float, float, str]] = []
+
+    def dispatch_game_surface_point(
+        self, x: float, y: float, *, input_kind: str
+    ) -> None:
+        self.points.append((x, y, input_kind))
+
+
 class _RendererSession(_TapSession):
     def __init__(self) -> None:
         super().__init__()
@@ -116,6 +138,26 @@ def test_monitor_controls_prefer_mouse_clicks_at_the_same_relative_xy() -> None:
     # The alternate browser input is still derived solely from the live game
     # canvas. It is not a desktop-pixel click and therefore scales per tab.
     assert worker.session.mouse_clicks == [((68, 251, 2, 2), (600, 312))]
+    assert worker.session.taps == []
+
+
+def test_monitor_controls_use_the_shared_renderer_input_dispatcher() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker.session = _SharedInputSession()
+
+    worker._tap_monitor_viewport_point(MAIL_BUTTON_POINT, (600, 312))
+
+    assert worker.session.inputs == [(*MAIL_BUTTON_POINT, "mouse")]
+    assert worker.session.taps == []
+
+
+def test_monitor_controls_use_the_canonical_1280_by_720_canvas_origin() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker.session = _ReferencePointSession()
+
+    worker._tap_monitor_viewport_point((0.25, 0.75), (600, 312))
+
+    assert worker.session.points == [(320.0, 540.0, "mouse")]
     assert worker.session.taps == []
 
 

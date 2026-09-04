@@ -193,6 +193,20 @@ class FarmWorkflow:
         if self.step == FarmStep.OPEN_TEAM_SELECTION:
             if state != FarmGameState.TEAM_SELECTION:
                 return FarmDecision(self.step, "Chờ panel chọn đội được xác minh")
+            # The game often opens the panel with the intended first Ready
+            # team already selected. Do not click that row again: on the web
+            # renderer a repeated click can submit/close the panel before the
+            # workflow records its dispatch action.
+            if team_selected:
+                self.step = FarmStep.DISPATCH
+                return FarmDecision(
+                    self.step,
+                    f"Đội {self.team} đã được chọn; điều quân",
+                    resource,
+                    level,
+                    self.team,
+                    target_verified,
+                )
             self.step = FarmStep.SELECT_TEAM
             return FarmDecision(self.step, f"Chọn đội {self.team}", resource, level, self.team, target_verified)
         if self.step == FarmStep.SELECT_TEAM:

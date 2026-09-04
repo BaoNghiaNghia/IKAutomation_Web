@@ -14,6 +14,11 @@ from ik_chrome_auto.browser import (
     _low_gpu_init_script,
 )
 from ik_chrome_auto.image_utils import RGBImage, decode_png
+from ik_chrome_auto.input_helpers import (
+    CanvasReferencePoint,
+    CanvasTransformSnapshot,
+    control_center_reference_point,
+)
 
 
 ASSET = (
@@ -25,6 +30,20 @@ ASSET = (
 )
 ASSET_PNG = ASSET.read_bytes()
 BOX = {"x": 12.5, "y": 34.25, "width": 500.0, "height": 300.0}
+
+
+def test_one_canvas_origin_maps_capture_bounds_to_local_and_viewport() -> None:
+    point = control_center_reference_point((630, 350, 20, 20), (1280, 720))
+    transform = CanvasTransformSnapshot(
+        viewport_left=118.0,
+        viewport_top=8.0,
+        css_width=640.0,
+        css_height=360.0,
+    )
+
+    assert point == CanvasReferencePoint(640.0, 360.0)
+    assert transform.to_local(point) == (320.0, 180.0)
+    assert transform.to_viewport(point) == (438.0, 188.0)
 
 
 def test_fps_limiter_can_update_a_retained_profile_to_22_fps() -> None:
@@ -82,30 +101,129 @@ def test_focused_farm_input_is_read_from_the_inner_game_frame() -> None:
 def test_numeric_farm_input_uses_background_renderer_focus_before_reading() -> None:
     session = ChromeProfileSession.__new__(ChromeProfileSession)
     clicks = []
-    session.dispatch_game_surface_mouse_ratio = lambda x, y: clicks.append((x, y))
+    session.dispatch_game_surface_point = (
+        lambda x, y, *, input_kind, viewport_hit_test=False: clicks.append(
+            (x, y, input_kind, viewport_hit_test)
+        )
+    )
     session._focused_farm_input_value = lambda: "592"
 
     value = session.read_focused_numeric_farm_input((36, 76, 56, 34), (1280, 720))
 
     assert value == 592
-    assert clicks == [(64 / 1280, 93 / 720)]
+    assert clicks == [(64.0, 93.0, "mouse", True)]
+
+
+def test_numeric_farm_input_prefers_nearest_dom_overlay_without_mouse_dispatch(
+    monkeypatch,
+) -> None:
+    class Root:
+        def __init__(self) -> None:
+            self.arguments = []
+
+        def evaluate(self, _expression, argument):
+            self.arguments.append(argument)
+            return "523"
+
+    root = Root()
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session._frame_roots = lambda: [root]
+    session._focused_farm_input_value = lambda: "523"
+    session.dispatch_game_surface_point = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("A visible DOM input must not use coordinate dispatch")
+    )
+    monkeypatch.setattr(browser_module.time, "sleep", lambda _seconds: None)
+
+    value = session.read_focused_numeric_farm_input((36, 76, 56, 34), (1280, 720))
+
+    assert value == 523
+    assert root.arguments == [{
+        "referenceX": 64.0,
+        "referenceY": 93.0,
+        "referenceWidth": 1280.0,
+        "referenceHeight": 720.0,
+    }]
+
+
+def test_coordinate_input_moves_to_end_deletes_all_then_inserts_new_value(monkeypatch) -> None:
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    cdp = FakeCDP()
+    session._page = FakePage()
+    session._get_page_cdp_session = lambda _page: cdp
+    observed_values = iter(("511", "650"))
+    session._focused_farm_input_value = lambda: next(observed_values)
+    delays = []
+    monkeypatch.setattr(browser_module.time, "sleep", delays.append)
+
+    assert session.replace_focused_farm_input(650) is True
+
+    key_events = [params for method, params in cdp.calls if method == "Input.dispatchKeyEvent"]
+    assert [(event["type"], event["key"]) for event in key_events] == [
+        ("keyDown", "End"),
+        ("keyUp", "End"),
+        ("keyDown", "Backspace"),
+        ("keyUp", "Backspace"),
+        ("keyDown", "Backspace"),
+        ("keyUp", "Backspace"),
+        ("keyDown", "Backspace"),
+        ("keyUp", "Backspace"),
+    ]
+    assert cdp.calls[-1] == ("Input.insertText", {"text": "650"})
+    # End, each of the three Backspaces, and paste-like insert are separated.
+    assert delays == [0.12, 0.12, 0.12, 0.12, 0.12]
+
+
+def test_escape_uses_the_shared_complete_cdp_key_helper() -> None:
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    cdp = FakeCDP()
+    session._page = FakePage()
+    session._get_page_cdp_session = lambda _page: cdp
+
+    session.press_escape()
+
+    assert cdp.calls == [
+        (
+            "Input.dispatchKeyEvent",
+            {
+                "type": "keyDown",
+                "key": "Escape",
+                "code": "Escape",
+                "windowsVirtualKeyCode": 27,
+                "nativeVirtualKeyCode": 27,
+            },
+        ),
+        (
+            "Input.dispatchKeyEvent",
+            {
+                "type": "keyUp",
+                "key": "Escape",
+                "code": "Escape",
+                "windowsVirtualKeyCode": 27,
+                "nativeVirtualKeyCode": 27,
+            },
+        ),
+    ]
 
 
 def test_farm_click_helper_uses_exact_fresh_capture_center_for_touch() -> None:
     session = ChromeProfileSession.__new__(ChromeProfileSession)
-    taps: list[tuple[float, float]] = []
-    session.tap_game_surface_ratio = lambda x, y: taps.append((x, y))
+    taps: list[tuple[float, float, str]] = []
+    session.dispatch_game_surface_point = (
+        lambda x, y, *, input_kind: taps.append((x, y, input_kind))
+    )
 
     method = session.click_farm_control((433, 560, 41, 41), (1280, 720), input_kind="touch")
 
     assert method == "cdp_touch_canvas_ratio"
-    assert taps == [(453.5 / 1280, 580.5 / 720)]
+    assert taps == [(453.5, 580.5, "touch")]
 
 
 def test_farm_click_helper_rejects_bounds_outside_latest_capture() -> None:
     session = ChromeProfileSession.__new__(ChromeProfileSession)
-    session.dispatch_game_surface_mouse_ratio = lambda *_args: (_ for _ in ()).throw(
-        AssertionError("invalid bounds must never dispatch input")
+    session.dispatch_game_surface_input_ratio = (
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid bounds must never dispatch input")
+        )
     )
 
     with pytest.raises(ValueError, match="ngoài ảnh game"):
@@ -132,33 +250,106 @@ def test_background_renderer_click_dispatches_cdp_mouse_without_native_window() 
     assert cdp.calls[0][1]["y"] == 360.0
 
 
-def test_background_renderer_click_uses_canvas_local_coordinates_inside_iframe() -> None:
-    session = ChromeProfileSession.__new__(ChromeProfileSession)
-    canvas = FakeCanvas()
-    session._canvas_or_viewport = lambda: (
-        canvas,
-        {"x": 118.0, "y": 8.0, "width": 1280.0, "height": 720.0},
+def test_background_renderer_click_uses_canvas_local_point_inside_iframe() -> None:
+    canvas = FakeCanvas(
+        bounding_box={"x": 118.0, "y": 8.0, "width": 1280.0, "height": 720.0}
     )
-    session.config = SimpleNamespace(browser=SimpleNamespace(startup_timeout_ms=12_345))
-    session._get_page_cdp_session = lambda _page: (_ for _ in ()).throw(
-        AssertionError("A visible iframe canvas must not use page-relative CDP input")
-    )
-    session._page = FakePage()
+    session, _canvas, context, _page = make_session(canvas=canvas)
 
     session.dispatch_game_surface_mouse_ratio(53 / 1280, 666 / 720)
 
+    assert context.sessions[0].calls == []
     assert canvas.click_calls == [
         {
             "position": {"x": 53.0, "y": 666.0},
             "force": True,
-            "timeout": 12_345,
+            "timeout": 90_000,
         }
     ]
 
 
+def test_touch_uses_fresh_canvas_transform_inside_iframe() -> None:
+    canvas = FakeCanvas(
+        bounding_box={"x": 118.0, "y": 8.0, "width": 640.0, "height": 360.0}
+    )
+    session, _canvas, context, _page = make_session(canvas=canvas)
+
+    session.dispatch_game_surface_input_ratio(0.25, 0.5, input_kind="touch")
+
+    assert context.sessions[0].calls == [
+        (
+            "Input.dispatchTouchEvent",
+            {
+                "type": "touchStart",
+                "touchPoints": [
+                    {
+                        "x": 278.0,
+                        "y": 188.0,
+                        "radiusX": 2,
+                        "radiusY": 2,
+                        "force": 1,
+                        "id": 1,
+                    }
+                ],
+            },
+        ),
+        ("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []}),
+    ]
+
+
+def test_mouse_uses_fresh_canvas_local_size_for_webgl_control() -> None:
+    canvas = FakeCanvas(
+        bounding_box={"x": 118.0, "y": 8.0, "width": 640.0, "height": 360.0}
+    )
+    session, _canvas, context, _page = make_session(canvas=canvas)
+
+    session.dispatch_game_surface_input_ratio(0.25, 0.5, input_kind="mouse")
+
+    assert context.sessions[0].calls == []
+    assert canvas.click_calls == [
+        {
+            "position": {"x": 160.0, "y": 180.0},
+            "force": True,
+            "timeout": 90_000,
+        }
+    ]
+
+
+def test_mouse_overlay_focus_uses_fresh_canvas_transform_and_viewport_hit_testing() -> None:
+    canvas = FakeCanvas(
+        bounding_box={"x": 118.0, "y": 8.0, "width": 640.0, "height": 360.0}
+    )
+    session, _canvas, context, _page = make_session(canvas=canvas)
+
+    session.dispatch_game_surface_input_ratio(
+        0.25,
+        0.5,
+        input_kind="mouse",
+        viewport_hit_test=True,
+    )
+
+    assert canvas.click_calls == []
+    assert context.sessions[0].calls == [
+        (
+            "Input.dispatchMouseEvent",
+            {"type": "mousePressed", "x": 278.0, "y": 188.0, "button": "left", "clickCount": 1},
+        ),
+        (
+            "Input.dispatchMouseEvent",
+            {"type": "mouseReleased", "x": 278.0, "y": 188.0, "button": "left", "clickCount": 1},
+        ),
+    ]
+
+
 class FakeCanvas:
-    def __init__(self, direct_png: bytes | None = None) -> None:
+    def __init__(
+        self,
+        direct_png: bytes | None = None,
+        *,
+        bounding_box: dict[str, float] | None = None,
+    ) -> None:
         self.direct_png = direct_png or (b"\x89PNG\r\n\x1a\n" + b"\0" * 1_200)
+        self.box = bounding_box
         self.evaluate_calls = 0
         self.screenshot_calls = 0
         self.click_calls: list[dict[str, Any]] = []
@@ -174,6 +365,9 @@ class FakeCanvas:
 
     def click(self, **kwargs: Any) -> None:
         self.click_calls.append(kwargs)
+
+    def bounding_box(self) -> dict[str, float] | None:
+        return self.box
 
 
 class FakeCDP:
@@ -366,6 +560,20 @@ def test_scroll_game_surface_sends_wheel_at_canvas_centre() -> None:
         "modifiers": 0,
         "pointerType": "mouse",
     }
+
+
+def test_scroll_game_surface_uses_the_same_live_canvas_transform_as_clicks() -> None:
+    canvas = FakeCanvas(
+        bounding_box={"x": 118.0, "y": 8.0, "width": 640.0, "height": 360.0}
+    )
+    session, _canvas, context, _page = make_session(canvas=canvas)
+
+    session.scroll_game_surface(480)
+
+    method, params = context.sessions[0].calls[0]
+    assert method == "Input.dispatchMouseEvent"
+    assert params["x"] == 438.0
+    assert params["y"] == 188.0
 
 
 def test_escape_is_dispatched_without_focusing_real_window() -> None:
@@ -611,10 +819,7 @@ def test_mouse_fallback_click_uses_the_template_center() -> None:
 
     assert context.sessions[0].calls == []
     assert _canvas.click_calls == [{
-        "position": {
-            "x": 320.0,
-            "y": 288.0,
-        },
+        "position": {"x": 320.0, "y": 288.0},
         "force": True,
         "timeout": session.config.browser.startup_timeout_ms,
     }]
@@ -627,10 +832,7 @@ def test_canvas_ratio_mouse_click_uses_locator_in_the_correct_frame() -> None:
 
     assert context.sessions[0].calls == []
     assert _canvas.click_calls == [{
-        "position": {
-            "x": 53.0,
-            "y": 666.0,
-        },
+        "position": {"x": 53.0, "y": 666.0},
         "force": True,
         "timeout": 90_000,
     }]

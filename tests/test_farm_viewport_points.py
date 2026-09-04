@@ -13,7 +13,6 @@ from ik_chrome_auto.runner import (
     FARM_MINIMUM_CANVAS_SIZE,
     FARM_MAX_RECOVERY_ATTEMPTS,
     FARM_NO_READY_TEAM_RESCAN_SECONDS,
-    FARM_RENDERER_IDLE_RELEASE_SECONDS,
     FARM_REFERENCE_ASPECT_RATIO,
     FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS,
     ProfileWorker,
@@ -26,7 +25,10 @@ def test_farm_layout_fallbacks_use_relative_canvas_positions_at_16_by_9() -> Non
     """Fallback controls retain their 16:9 locations without desktop pixels."""
     assert FARM_REFERENCE_ASPECT_RATIO == 16 / 9
     assert ProfileWorker._resource_tab_layout_bounds((1280, 720)) == (164, 647, 92, 47)
-    assert ProfileWorker._resource_button_layout_bounds("wood", (1280, 720)) == (459, 464, 122, 130)
+    assert ProfileWorker._resource_button_layout_bounds("food", (1280, 720)) == (286, 464, 122, 130)
+    assert ProfileWorker._resource_button_layout_bounds("wood", (1280, 720)) == (452, 464, 122, 130)
+    assert ProfileWorker._resource_button_layout_bounds("stone", (1280, 720)) == (618, 464, 122, 130)
+    assert ProfileWorker._resource_button_layout_bounds("iron", (1280, 720)) == (786, 464, 122, 130)
     assert ProfileWorker._map_toggle_layout_bounds((1280, 720)) == (13, 621, 80, 90)
     assert ProfileWorker._city_to_world_map_layout_bounds((1280, 720)) == (13, 621, 80, 90)
     assert ProfileWorker._world_map_search_layout_bounds((1280, 720)) == (425, 552, 57, 57)
@@ -293,10 +295,29 @@ def test_new_farm_cycle_preserves_the_running_sessions_coordinate_bag() -> None:
 def test_farm_layout_fallbacks_scale_for_a_compact_five_profile_viewport() -> None:
     """Each profile uses its own captured canvas rather than screen geometry."""
     assert ProfileWorker._resource_tab_layout_bounds((384, 216)) == (41, 184, 44, 32)
-    assert ProfileWorker._resource_button_layout_bounds("wood", (384, 216)) == (138, 139, 36, 39)
+    assert ProfileWorker._resource_button_layout_bounds("wood", (384, 216)) == (136, 139, 36, 39)
     assert ProfileWorker._city_to_world_map_layout_bounds((384, 216)) == (0, 152, 60, 64)
     assert ProfileWorker._world_map_search_layout_bounds((384, 216)) == (117, 156, 38, 36)
     assert ProfileWorker._search_target_checkbox_layout_bounds((384, 216)) == (272, 144, 20, 20)
+
+
+def test_resource_selection_requires_the_exact_strongest_active_type() -> None:
+    evidence = {
+        "food": TemplateEvidence(
+            FarmTemplateId.BROWSER_FOOD_RESOURCE_ACTIVE, True, 0.993, (280, 470, 130, 140)
+        ),
+        "wood": TemplateEvidence(FarmTemplateId.BROWSER_WOOD_RESOURCE_ACTIVE, False, 0.31),
+        "stone": TemplateEvidence(FarmTemplateId.BROWSER_STONE_RESOURCE_ACTIVE, False, 0.29),
+        "iron": TemplateEvidence(FarmTemplateId.BROWSER_IRON_RESOURCE_ACTIVE, False, 0.25),
+    }
+
+    assert ProfileWorker._active_resource_from_evidence(evidence) == "food"
+    assert ProfileWorker._active_resource_from_evidence({
+        "food": evidence["food"],
+        "stone": TemplateEvidence(
+            FarmTemplateId.BROWSER_STONE_RESOURCE_ACTIVE, True, 0.995, (620, 470, 130, 140)
+        ),
+    }) is None
 
 
 def test_farm_map_toggle_uses_exact_canvas_percentage_and_excludes_mail() -> None:
@@ -339,7 +360,19 @@ def test_farm_map_toggle_prefers_background_cdp_touch_ratio() -> None:
     assert worker.session.background_ratios == []
     assert worker.session.synthetic_ratios == []
     assert worker.session.touches == []
-    assert worker._automation_renderer_hold_until > 0.0
+
+
+def test_gather_game_control_uses_touch_not_panel_mouse() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    calls = []
+    worker._click_farm_control = lambda bounds, size, *, input_kind: (
+        calls.append((bounds, size, input_kind)) or "cdp_touch_canvas_ratio"
+    )
+
+    result = worker._tap_farm_game_control((837, 457, 172, 70), (1280, 720))
+
+    assert result == "cdp_touch_canvas_ratio"
+    assert calls == [((837, 457, 172, 70), (1280, 720), "touch")]
 
 
 def test_farm_panel_control_uses_mouse_only_after_720p_renderer_lock() -> None:
@@ -452,11 +485,6 @@ def test_farm_allows_a_slow_world_map_portal_transition() -> None:
     assert FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS >= 30.0
 
 
-def test_farm_can_yield_the_high_resolution_renderer_during_completed_waits() -> None:
-    """Long completed waits still yield the one shared renderer."""
-    assert FARM_RENDERER_IDLE_RELEASE_SECONDS < 1.0
-
-
 def test_no_ready_team_wait_is_two_minutes_before_the_next_scan() -> None:
     assert FARM_NO_READY_TEAM_RESCAN_SECONDS == 120.0
 
@@ -478,8 +506,8 @@ def test_ready_team_keeps_the_short_world_map_follow_up() -> None:
     assert worker._world_map_decision_delay(decision, open_search_delay=0.35) == 0.35
 
 
-def test_farm_yields_720p_renderer_during_long_postcondition_wait(monkeypatch) -> None:
-    """A later tick reacquires 720p, so a long settle cannot starve peers."""
+def test_farm_keeps_720p_renderer_during_active_world_map_flow(monkeypatch) -> None:
+    """A profile owns 720p until its current dispatch flow reaches a boundary."""
     worker = ProfileWorker.__new__(ProfileWorker)
     worker._automation_renderer_locked = True
     worker._automation_renderer_hold_until = 0.0
@@ -493,7 +521,7 @@ def test_farm_yields_720p_renderer_during_long_postcondition_wait(monkeypatch) -
 
     worker._release_farm_renderer_when_idle()
 
-    assert released == [True]
+    assert released == []
 
 
 def test_farm_restores_grid_after_waiting_cycle_is_complete(monkeypatch) -> None:
@@ -541,10 +569,43 @@ def test_continent_coordinate_fields_use_canvas_ratio_offsets() -> None:
     # by normalized canvas distances, which gives the same target for any
     # profile viewport.
     assert ProfileWorker._coordinate_fields_from_pin((400, 100, 40, 40), (1280, 720)) == (
-        (276, 120, 2, 2),
-        (359, 120, 2, 2),
+        (267, 119, 2, 2),
+        (351, 119, 2, 2),
     )
     assert ProfileWorker._coordinate_fields_from_pin((120, 50, 20, 20), (384, 216)) == (
-        (87, 60, 2, 2),
-        (112, 60, 2, 2),
+        (83, 59, 2, 2),
+        (109, 59, 2, 2),
     )
+    # Exact live screenshot geometry: click centres become (56,93)/(140,93).
+    assert ProfileWorker._coordinate_fields_from_pin((187, 76, 42, 34), (1280, 720)) == (
+        (55, 92, 2, 2),
+        (139, 92, 2, 2),
+    )
+
+
+def test_checked_search_checkbox_always_wins_and_is_not_clicked_again() -> None:
+    checked = SimpleNamespace(found=True, actionable=True)
+    false_unchecked_match = SimpleNamespace(found=True, actionable=True)
+
+    assert (
+        ProfileWorker._search_target_checkbox_state(checked, false_unchecked_match)
+        == "checked"
+    )
+
+
+def test_search_checkbox_click_requires_verified_unchecked_template() -> None:
+    checked = SimpleNamespace(found=False, actionable=False)
+    unchecked = SimpleNamespace(found=True, actionable=True)
+    unknown = SimpleNamespace(found=False, actionable=False)
+
+    assert ProfileWorker._search_target_checkbox_state(checked, unchecked) == "unchecked"
+    assert ProfileWorker._search_target_checkbox_state(checked, unknown) == "unknown"
+
+
+def test_target_resource_expiry_requires_message_and_confirm_button() -> None:
+    found = SimpleNamespace(found=True, actionable=True)
+    missing = SimpleNamespace(found=False, actionable=False)
+
+    assert ProfileWorker._should_confirm_target_resource_expiry(found, found) is True
+    assert ProfileWorker._should_confirm_target_resource_expiry(found, missing) is False
+    assert ProfileWorker._should_confirm_target_resource_expiry(missing, found) is False

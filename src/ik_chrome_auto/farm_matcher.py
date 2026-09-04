@@ -34,8 +34,13 @@ _BUSY_TEAM_INDICATOR_WIDTH = 26
 # pattern.  Its glyph edges must also match before a row becomes schedulable.
 # The live false-positive reported on account 2 scored 0.2205 here, while its
 # two genuine Ready rows scored 0.2610 and 0.2584.
-_READY_TEAM_MIN_EDGE_SCORE = 0.21
-_READY_TEAM_MIN_GRAYSCALE_SCORE = 0.80
+_READY_TEAM_MIN_EDGE_SCORE = 0.18
+_READY_TEAM_MIN_GRAYSCALE_SCORE = 0.76
+# A changing countdown can weaken the compact Busy prefix, but the supplied
+# false-ready rows remain above 0.52 while genuine Ready rows stay below 0.20.
+# Reject Busy first so a snowy Ready label with slightly softer glyph edges
+# can be admitted without making an active march schedulable.
+_BUSY_TEAM_MIN_SCORE = 0.52
 # Browser screenshots have their own HUD scaling. These are stable roster
 # layout proportions, not gameplay click coordinates. A matched Ready label
 # is mapped to its actual row before any scheduler decision is made.
@@ -329,7 +334,11 @@ SPECS: dict[FarmTemplateId, TemplateSpec] = {
         # Crop from the supplied 1280×720 confirmation dialog. It stops
         # before the changing countdown and amount, so only the invariant
         # prefix authorises confirmation together with its red button.
-        "browser_target_resource_expiry_toast.png", threshold=0.78,
+        # Current live dialog scores 0.73 because the timer and resource
+        # amounts alter glyph anti-aliasing around the invariant prefix. Other
+        # observed screens stay at or below 0.30, and this signal never clicks
+        # alone: the red Confirm button must independently match as well.
+        "browser_target_resource_expiry_toast.png", threshold=0.70,
         reference_width=1280, reference_height=720,
         scale_variants=(0.97, 1.0, 1.03), grayscale=True,
     ),
@@ -525,7 +534,7 @@ class BrowserCanvasMatcher:
             # evidence is decisively stronger than the observed busy label.
             # This excludes the sidebar's repeated background which used to
             # make every row score as `Sẵn sàng` at the old 0.66 threshold.
-            if busy_score >= 0.62:
+            if busy_score >= _BUSY_TEAM_MIN_SCORE:
                 states[team] = TeamRowState.BUSY
             elif self._is_ready_team_label(ready_score, ready_edge_score, busy_score):
                 states[team] = TeamRowState.READY
@@ -561,7 +570,8 @@ class BrowserCanvasMatcher:
     ) -> bool:
         """Require both the tone and glyph shape of the Vietnamese label."""
         return (
-            grayscale_score >= _READY_TEAM_MIN_GRAYSCALE_SCORE
+            busy_score < _BUSY_TEAM_MIN_SCORE
+            and grayscale_score >= _READY_TEAM_MIN_GRAYSCALE_SCORE
             and edge_score >= _READY_TEAM_MIN_EDGE_SCORE
             and grayscale_score >= busy_score + 0.06
         )

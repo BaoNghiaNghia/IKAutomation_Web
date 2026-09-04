@@ -164,6 +164,9 @@ def test_busy_resource_text_cannot_become_ready_from_grayscale_correlation_alone
     # weaker edges than City, but its tone is strong and no busy prefix exists.
     assert classify(0.8200, 0.2167, 0.0735) is True
     assert classify(0.7556, 0.2512, 0.6734) is False
+    # Account-1 snowy World Map row 4 from the reported debug frame. The
+    # genuine Ready label is softer, while its Busy-prefix score is absent.
+    assert classify(0.7726, 0.1915, 0.1892) is True
 
 
 def test_roster_is_refreshed_on_stable_city_and_world_map_only() -> None:
@@ -328,6 +331,15 @@ def test_expiring_resource_confirmation_uses_the_supplied_1280_dialog() -> None:
     ):
         spec = matcher_module.SPECS[template_id]
         assert (spec.reference_width, spec.reference_height) == (1280, 720)
+
+    # The current live prefix scores about 0.73; confirmation remains guarded
+    # independently by the exact red button template.
+    assert (
+        matcher_module.SPECS[
+            FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_TOAST
+        ].threshold
+        == 0.70
+    )
 
 
 def test_status_like_footer_without_portrait_does_not_create_fourth_team() -> None:

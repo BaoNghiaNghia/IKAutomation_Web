@@ -109,3 +109,13 @@ def test_all_busy_roster_produces_no_ready_team_for_post_dispatch_scan() -> None
     )
 
     assert ProfileWorker._ready_teams_from_roster(roster) == ()
+
+
+def test_selected_team_turning_busy_recovers_an_implicit_dispatch() -> None:
+    roster = (
+        TeamRosterRow(1, TeamRowState.BUSY, "BusyLabel"),
+        TeamRosterRow(2, TeamRowState.READY, "ReadyLabel"),
+    )
+
+    assert ProfileWorker._selected_team_became_busy(1, roster) is True
+    assert ProfileWorker._selected_team_became_busy(2, roster) is False

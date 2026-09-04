@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ik_chrome_auto.browser import ChromeProfileSession
+from ik_chrome_auto.input_helpers import GAME_REFERENCE_HEIGHT, GAME_REFERENCE_WIDTH
 from ik_chrome_auto.storage import prune_profile_images, upscale_png_for_diagnostics, write_retained_png
 
 StatusCallback = Callable[[str], None]
@@ -113,6 +114,14 @@ class AutomationFunctions:
         self._check_cancelled()
         if not 0 <= x <= 1 or not 0 <= y <= 1:
             raise ValueError("click_ratio yêu cầu x và y trong khoảng 0..1")
+        if target == "canvas":
+            dispatch_point = getattr(self.session, "dispatch_game_surface_point", None)
+            if callable(dispatch_point):
+                reference_x = x * GAME_REFERENCE_WIDTH
+                reference_y = y * GAME_REFERENCE_HEIGHT
+                dispatch_point(reference_x, reference_y, input_kind="mouse")
+                self.status(f"Click canvas chuẩn tại ({reference_x:.1f}, {reference_y:.1f})")
+                return
         box = self.session.surface_box(target=target, frame_url_contains=frame_url_contains)
         click_x = box["width"] * x
         click_y = box["height"] * y

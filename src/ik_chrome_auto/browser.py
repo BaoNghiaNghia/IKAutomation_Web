@@ -20,6 +20,13 @@ from ik_chrome_auto.interaction import (
     validate_viewport,
 )
 from ik_chrome_auto.image_utils import RGBImage, decode_png
+from ik_chrome_auto.input_helpers import (
+    GAME_REFERENCE_HEIGHT,
+    GAME_REFERENCE_WIDTH,
+    CanvasReferencePoint,
+    CanvasTransformSnapshot,
+    control_center_reference_point,
+)
 from ik_chrome_auto.config import is_allowed_url
 from ik_chrome_auto.chrome_preferences import suppress_browser_prompts
 from ik_chrome_auto.models import AppConfig, ProfileConfig, ProfileMode
@@ -54,6 +61,9 @@ _PROFILE_CDP_PORT_MIN = 21000
 _PROFILE_CDP_PORT_SPAN = 20_000
 _GAME_SURFACE_WIDTH = 1280.0
 _GAME_SURFACE_HEIGHT = 720.0
+_FARM_INPUT_FOCUS_DELAY_SECONDS = 0.25
+_FARM_INPUT_ACTION_DELAY_SECONDS = 0.12
+_FARM_INPUT_VERIFY_TIMEOUT_SECONDS = 0.8
 
 
 def _fixed_game_surface_box() -> dict[str, float]:
@@ -1154,6 +1164,23 @@ class ChromeProfileSession:
         image = decode_png(png)
         return image.width, image.height
 
+    def click_game_control(
+        self,
+        bounds: tuple[int, int, int, int],
+        image_size: tuple[int, int],
+        *,
+        input_kind: str = "touch",
+    ) -> str:
+        """Click the exact centre of a control found in a fresh game capture.
+
+        Detection coordinates always belong to the captured game surface.
+        Convert them once into the canonical 1280x720 canvas origin and send
+        them through the single renderer input dispatcher.
+        """
+        point = control_center_reference_point(bounds, image_size)
+        self.dispatch_game_surface_point(point.x, point.y, input_kind=input_kind)
+        return f"cdp_{input_kind}_canvas_ratio"
+
     def click_farm_control(
         self,
         bounds: tuple[int, int, int, int],
@@ -1161,22 +1188,8 @@ class ChromeProfileSession:
         *,
         input_kind: str = "touch",
     ) -> str:
-        """Click the exact centre of a control found in the latest farm capture.
-
-        Farm detection coordinates always belong to the captured game surface,
-        never to the desktop or outer iframe.  Convert them once to normalized
-        canvas ratios and let the renderer input path resolve the current
-        1280x720 surface.  This works for covered/minimized profiles and avoids
-        every caller inventing its own iframe or window offset.
-        """
-        x_ratio, y_ratio = self._farm_control_center_ratio(bounds, image_size)
-        if input_kind == "touch":
-            self.tap_game_surface_ratio(x_ratio, y_ratio)
-            return "cdp_touch_canvas_ratio"
-        if input_kind == "mouse":
-            self.dispatch_game_surface_mouse_ratio(x_ratio, y_ratio)
-            return "cdp_mouse_canvas_ratio"
-        raise ValueError(f"Farm input kind không được hỗ trợ: {input_kind}")
+        """Compatibility wrapper for callers using the former Farm-only name."""
+        return self.click_game_control(bounds, image_size, input_kind=input_kind)
 
     def tap_farm_template(self, bounds: tuple[int, int, int, int], image_size: tuple[int, int]) -> None:
         """Compatibility wrapper for the centralized farm click helper."""
@@ -1193,23 +1206,104 @@ class ChromeProfileSession:
         World Map coordinates unless the browser exposes a readable input, so
         the original X/Y values remain available for rollback.
         """
-        left, top, width, height = bounds
-        image_width, image_height = image_size
-        if width <= 0 or height <= 0 or image_width <= 0 or image_height <= 0:
-            return None
-        # These are text-entry controls, not ordinary WebGL buttons. Send a
-        # compositor mouse event into this profile's renderer; it focuses the
-        # iframe editor without raising, restoring or exposing the window.
-        self.dispatch_game_surface_mouse_ratio(
-            (left + width / 2) / image_width,
-            (top + height / 2) / image_height,
-        )
-        time.sleep(0.08)
-        value = self._focused_farm_input_value()
         try:
-            return int(str(value).strip())
-        except (TypeError, ValueError):
+            point = control_center_reference_point(bounds, image_size)
+        except ValueError:
             return None
+        # Prefer the actual numeric DOM input when the portal exposes it. This
+        # avoids relying on compositor timing for an HTML control layered over
+        # the WebGL canvas and remains profile-local while windows overlap.
+        value = self._focus_numeric_farm_input_dom(point.x, point.y)
+        if value is not None:
+            time.sleep(_FARM_INPUT_FOCUS_DELAY_SECONDS)
+            value = self._focused_farm_input_value() or value
+            try:
+                return int(str(value).strip())
+            except (TypeError, ValueError):
+                return None
+
+        # Fallback for portal variants whose editor is not exposed in the DOM.
+        # Chromium hit-tests the canvas-relative viewport point without using
+        # the native cursor or bringing this profile window to the foreground.
+        self.dispatch_game_surface_point(
+            point.x,
+            point.y,
+            input_kind="mouse",
+            viewport_hit_test=True,
+        )
+        time.sleep(_FARM_INPUT_FOCUS_DELAY_SECONDS)
+        deadline = time.monotonic() + _FARM_INPUT_VERIFY_TIMEOUT_SECONDS
+        while True:
+            value = self._focused_farm_input_value()
+            try:
+                return int(str(value).strip())
+            except (TypeError, ValueError):
+                if time.monotonic() >= deadline:
+                    return None
+                time.sleep(_FARM_INPUT_ACTION_DELAY_SECONDS)
+
+    def _focus_numeric_farm_input_dom(
+        self,
+        reference_x: float,
+        reference_y: float,
+    ) -> str | None:
+        """Focus the visible numeric input nearest a canvas-relative point."""
+        expression = """
+        ({ referenceX, referenceY, referenceWidth, referenceHeight }) => {
+          const canvases = Array.from(document.querySelectorAll('canvas')).flatMap((canvas) => {
+            const rect = canvas.getBoundingClientRect();
+            const style = getComputedStyle(canvas);
+            if (
+              rect.width < 10 || rect.height < 10 ||
+              style.display === 'none' || style.visibility === 'hidden'
+            ) return [];
+            return [{ canvas, rect, area: rect.width * rect.height }];
+          }).sort((left, right) => right.area - left.area);
+          if (!canvases.length) return null;
+          const canvasRect = canvases[0].rect;
+          const targetX = canvasRect.left + canvasRect.width * referenceX / referenceWidth;
+          const targetY = canvasRect.top + canvasRect.height * referenceY / referenceHeight;
+          const candidates = Array.from(document.querySelectorAll('input')).flatMap((element) => {
+            const rect = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            const value = String(element.value ?? '').trim();
+            if (
+              rect.width < 10 || rect.height < 10 ||
+              style.display === 'none' || style.visibility === 'hidden' ||
+              !/^\\d{1,4}$/.test(value)
+            ) return [];
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+            return [{ element, distance: Math.hypot(centerX - targetX, centerY - targetY) }];
+          }).sort((left, right) => left.distance - right.distance);
+          if (!candidates.length || candidates[0].distance > 120) return null;
+          const input = candidates[0].element;
+          input.focus({ preventScroll: true });
+          input.click();
+          try { input.setSelectionRange(input.value.length, input.value.length); } catch (_) {}
+          return String(input.value ?? '');
+        }
+        """
+        try:
+            roots = tuple(reversed(self._frame_roots()))
+        except Exception:
+            return None
+        for root in roots:
+            try:
+                value = root.evaluate(
+                    expression,
+                    {
+                        "referenceX": float(reference_x),
+                        "referenceY": float(reference_y),
+                        "referenceWidth": GAME_REFERENCE_WIDTH,
+                        "referenceHeight": GAME_REFERENCE_HEIGHT,
+                    },
+                )
+            except Exception:
+                continue
+            if value is not None and re.fullmatch(r"\d{1,4}", str(value).strip()):
+                return str(value).strip()
+        return None
 
     def _focused_farm_input_value(self) -> str | None:
         """Read the focused input from the document that owns the game UI.
@@ -1231,22 +1325,35 @@ class ChromeProfileSession:
         return None
 
     def replace_focused_farm_input(self, value: int) -> bool:
-        """Replace the currently verified browser input and confirm its value."""
+        """Replace one focused X/Y value from its end and confirm the result.
+
+        The game coordinate editor does not handle Ctrl+A consistently across
+        portal profiles. Read the current value, move its caret to the end,
+        delete every existing character with Backspace, then insert the new
+        text directly through CDP. ``Input.insertText`` provides paste-like
+        input without reading or overwriting the user's system clipboard.
+        """
         if value < 0:
             return False
+        current = self._focused_farm_input_value()
+        if current is None:
+            return False
         cdp = self._get_page_cdp_session(self.page)
-        for event in (
-            {"type": "keyDown", "key": "Control", "code": "ControlLeft", "windowsVirtualKeyCode": 17},
-            {"type": "keyDown", "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65, "modifiers": 2},
-            {"type": "keyUp", "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65, "modifiers": 2},
-            {"type": "keyUp", "key": "Control", "code": "ControlLeft", "windowsVirtualKeyCode": 17},
-            {"type": "keyDown", "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8},
-            {"type": "keyUp", "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8},
-        ):
-            cdp.send("Input.dispatchKeyEvent", event)
+        self._press_cdp_key("End", "End", 35, cdp=cdp)
+        time.sleep(_FARM_INPUT_ACTION_DELAY_SECONDS)
+        for _ in str(current):
+            self._press_cdp_key("Backspace", "Backspace", 8, cdp=cdp)
+            time.sleep(_FARM_INPUT_ACTION_DELAY_SECONDS)
         cdp.send("Input.insertText", {"text": str(value)})
-        observed = self._focused_farm_input_value()
-        return str(observed).strip() == str(value)
+        time.sleep(_FARM_INPUT_ACTION_DELAY_SECONDS)
+        deadline = time.monotonic() + _FARM_INPUT_VERIFY_TIMEOUT_SECONDS
+        while True:
+            observed = self._focused_farm_input_value()
+            if str(observed).strip() == str(value):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(_FARM_INPUT_ACTION_DELAY_SECONDS)
 
     def click_farm_template_mouse(
         self,
@@ -1260,34 +1367,6 @@ class ChromeProfileSession:
         not changed state; gameplay controls continue to prefer touch.
         """
         self.click_farm_control(bounds, image_size, input_kind="mouse")
-
-    @staticmethod
-    def _farm_control_center_ratio(
-        bounds: tuple[int, int, int, int],
-        image_size: tuple[int, int],
-    ) -> tuple[float, float]:
-        """Validate fresh detection bounds and return their canvas ratios."""
-        left, top, width, height = bounds
-        image_width, image_height = image_size
-        if width <= 0 or height <= 0 or image_width <= 0 or image_height <= 0:
-            raise ValueError("Farm template bounds không hợp lệ")
-        if left < 0 or top < 0 or left + width > image_width or top + height > image_height:
-            raise ValueError("Farm template bounds nằm ngoài ảnh game vừa chụp")
-        return (
-            (left + width / 2) / image_width,
-            (top + height / 2) / image_height,
-        )
-
-    def _farm_template_center(
-        self,
-        bounds: tuple[int, int, int, int],
-        image_size: tuple[int, int],
-    ) -> tuple[float, float]:
-        x_ratio, y_ratio = self._farm_control_center_ratio(bounds, image_size)
-        _canvas, surface = self._canvas_or_viewport()
-        x = float(surface["width"]) * x_ratio
-        y = float(surface["height"]) * y_ratio
-        return x, y
 
     def _capture_visible_canvas_png(
         self,
@@ -1332,9 +1411,10 @@ class ChromeProfileSession:
 
     def scroll_game_surface(self, delta_y: float) -> None:
         """Send a wheel event at the canvas centre without moving the real cursor."""
-        _canvas, surface = self._canvas_or_viewport()
-        x = float(surface["width"]) / 2.0
-        y = float(surface["height"]) / 2.0
+        _canvas, transform = self._game_surface_transform_snapshot()
+        x, y = transform.to_viewport(
+            CanvasReferencePoint(GAME_REFERENCE_WIDTH / 2, GAME_REFERENCE_HEIGHT / 2)
+        )
         self._get_page_cdp_session(self.page).send(
             "Input.dispatchMouseEvent",
             {
@@ -1350,92 +1430,100 @@ class ChromeProfileSession:
 
     def press_escape(self) -> None:
         """Dismiss the current WebGL popup without focusing the real window."""
-        cdp = self._get_page_cdp_session(self.page)
+        self._press_cdp_key("Escape", "Escape", 27)
+
+    def _press_cdp_key(
+        self,
+        key: str,
+        code: str,
+        virtual_key_code: int,
+        *,
+        cdp: Any | None = None,
+    ) -> None:
+        """Send one complete profile-local key press through CDP."""
+        target = cdp or self._get_page_cdp_session(self.page)
         for event_type in ("keyDown", "keyUp"):
-            cdp.send(
+            target.send(
                 "Input.dispatchKeyEvent",
                 {
                     "type": event_type,
-                    "key": "Escape",
-                    "code": "Escape",
-                    "windowsVirtualKeyCode": 27,
-                    "nativeVirtualKeyCode": 27,
+                    "key": key,
+                    "code": code,
+                    "windowsVirtualKeyCode": virtual_key_code,
+                    "nativeVirtualKeyCode": virtual_key_code,
                 },
             )
 
     def tap_game_surface_ratio(self, x_ratio: float, y_ratio: float) -> None:
-        """Tap a canvas-relative point without moving the physical mouse."""
-        if not 0.0 <= x_ratio <= 1.0 or not 0.0 <= y_ratio <= 1.0:
-            raise ValueError("Canvas ratios must be between 0 and 1")
-        _canvas, surface = self._canvas_or_viewport()
-        x = float(surface["width"]) * float(x_ratio)
-        y = float(surface["height"]) * float(y_ratio)
-        point = {
-            "x": x,
-            "y": y,
-            "radiusX": 2,
-            "radiusY": 2,
-            "force": 1,
-            "id": 1,
-        }
-        cdp = self._get_page_cdp_session(self.page)
-        cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [point]})
-        cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        """Compatibility wrapper for a canvas-relative touch."""
+        self.dispatch_game_surface_point(
+            x_ratio * GAME_REFERENCE_WIDTH,
+            y_ratio * GAME_REFERENCE_HEIGHT,
+            input_kind="touch",
+        )
 
     def click_game_surface_ratio(self, x_ratio: float, y_ratio: float) -> None:
-        """Mouse-click an exact point through the canvas locator in its frame.
-
-        The game is hosted in an iframe on some portal variants. Raw page CDP
-        coordinates can then use a different origin from a renderer capture.
-        Playwright's canvas locator resolves the correct frame and transform,
-        while ``position`` remains the requested canvas ratio.
-        """
-        if not 0.0 <= x_ratio <= 1.0 or not 0.0 <= y_ratio <= 1.0:
-            raise ValueError("Canvas ratios must be between 0 and 1")
-        canvas, surface = self._canvas_or_viewport()
-        local_x = float(surface["width"]) * float(x_ratio)
-        local_y = float(surface["height"]) * float(y_ratio)
-        if canvas is not None:
-            canvas.click(
-                position={"x": local_x, "y": local_y},
-                force=True,
-                timeout=self.config.browser.startup_timeout_ms,
-            )
-            return
-
-        # The WebGL OOPIF is composited into the page even when Chrome does
-        # not attach it to Playwright's DOM frame tree. Page-level CDP input
-        # is hit-tested by Chromium's compositor and reaches that child
-        # surface at the same coordinates used for the verified screenshot.
-        x = local_x
-        y = local_y
-        cdp = self._get_page_cdp_session(self.page)
-        cdp.send(
-            "Input.dispatchMouseEvent",
-            {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
-        )
-        cdp.send(
-            "Input.dispatchMouseEvent",
-            {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
+        """Compatibility wrapper for a canvas-relative mouse click."""
+        self.dispatch_game_surface_point(
+            x_ratio * GAME_REFERENCE_WIDTH,
+            y_ratio * GAME_REFERENCE_HEIGHT,
+            input_kind="mouse",
         )
 
     def dispatch_game_surface_mouse_ratio(self, x_ratio: float, y_ratio: float) -> None:
-        """Click through Chrome's compositor without touching the OS cursor.
+        """Compatibility wrapper for the centralized mouse dispatcher."""
+        self.dispatch_game_surface_point(
+            x_ratio * GAME_REFERENCE_WIDTH,
+            y_ratio * GAME_REFERENCE_HEIGHT,
+            input_kind="mouse",
+        )
 
-        Prefer the canvas locator when Chromium exposes it. Its ``position``
-        is already local to the fixed 1280x720 surface. No measured iframe or
-        page offset is added in either this path or the CDP fallback.
+    def dispatch_game_surface_input_ratio(
+        self,
+        x_ratio: float,
+        y_ratio: float,
+        *,
+        input_kind: str,
+        viewport_hit_test: bool = False,
+    ) -> None:
+        """Compatibility wrapper accepting normalized canvas coordinates."""
+        self.dispatch_game_surface_point(
+            x_ratio * GAME_REFERENCE_WIDTH,
+            y_ratio * GAME_REFERENCE_HEIGHT,
+            input_kind=input_kind,
+            viewport_hit_test=viewport_hit_test,
+        )
+
+    def dispatch_game_surface_point(
+        self,
+        reference_x: float,
+        reference_y: float,
+        *,
+        input_kind: str,
+        viewport_hit_test: bool = False,
+    ) -> None:
+        """Dispatch input from the one canonical 1280x720 canvas origin.
+
+        Prefer the canvas locator when Chromium exposes it. A fresh
+        ``bounding_box`` supplies both its actual local size and its transform
+        into the main viewport. Ordinary WebGL mouse controls use a local
+        canvas click, which is the path accepted consistently by the portal.
+        HTML controls layered over the game (the X/Y inputs) opt into viewport
+        hit testing so Chromium can focus the overlay instead of the canvas.
+        Touch remains compositor input. No fixed or remembered iframe offset
+        is involved.
 
         The page-level CDP path remains the fallback for an OOPIF whose canvas
         is visible in the compositor but absent from Playwright's frame tree.
         Neither path moves the OS cursor or changes window z-order.
         """
-        if not 0.0 <= x_ratio <= 1.0 or not 0.0 <= y_ratio <= 1.0:
-            raise ValueError("Canvas ratios must be between 0 and 1")
-        canvas, surface = self._canvas_or_viewport()
-        local_x = float(surface["width"]) * float(x_ratio)
-        local_y = float(surface["height"]) * float(y_ratio)
-        if canvas is not None:
+        point = CanvasReferencePoint(float(reference_x), float(reference_y))
+        if input_kind not in {"mouse", "touch"}:
+            raise ValueError(f"Game input kind không được hỗ trợ: {input_kind}")
+        canvas, transform = self._game_surface_transform_snapshot()
+        local_x, local_y = transform.to_local(point)
+        viewport_x, viewport_y = transform.to_viewport(point)
+        if input_kind == "mouse" and canvas is not None and not viewport_hit_test:
             canvas.click(
                 position={"x": local_x, "y": local_y},
                 force=True,
@@ -1443,17 +1531,75 @@ class ChromeProfileSession:
             )
             return
 
-        x = local_x
-        y = local_y
         cdp = self._get_page_cdp_session(self.page)
+        if input_kind == "touch":
+            touch_point = {
+                "x": viewport_x,
+                "y": viewport_y,
+                "radiusX": 2,
+                "radiusY": 2,
+                "force": 1,
+                "id": 1,
+            }
+            cdp.send(
+                "Input.dispatchTouchEvent",
+                {"type": "touchStart", "touchPoints": [touch_point]},
+            )
+            cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+            return
+
         cdp.send(
             "Input.dispatchMouseEvent",
-            {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
+            {
+                "type": "mousePressed",
+                "x": viewport_x,
+                "y": viewport_y,
+                "button": "left",
+                "clickCount": 1,
+            },
         )
         cdp.send(
             "Input.dispatchMouseEvent",
-            {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
+            {
+                "type": "mouseReleased",
+                "x": viewport_x,
+                "y": viewport_y,
+                "button": "left",
+                "clickCount": 1,
+            },
         )
+
+    def _game_surface_transform_snapshot(
+        self,
+    ) -> tuple[Any | None, CanvasTransformSnapshot]:
+        """Measure once and return the sole mapping from 1280x720 to live canvas."""
+        canvas, surface = self._canvas_or_viewport()
+        canvas_box: dict[str, float] | None = None
+        if canvas is not None:
+            bounding_box = getattr(canvas, "bounding_box", None)
+            if callable(bounding_box):
+                try:
+                    measured = bounding_box()
+                    if (
+                        isinstance(measured, dict)
+                        and float(measured.get("width", 0)) > 0
+                        and float(measured.get("height", 0)) > 0
+                    ):
+                        canvas_box = {
+                            "x": float(measured.get("x", 0)),
+                            "y": float(measured.get("y", 0)),
+                            "width": float(measured["width"]),
+                            "height": float(measured["height"]),
+                        }
+                except Exception:
+                    canvas_box = None
+        point_surface = canvas_box or {
+            "x": 0.0,
+            "y": 0.0,
+            "width": float(surface["width"]),
+            "height": float(surface["height"]),
+        }
+        return canvas, CanvasTransformSnapshot.from_box(point_surface)
 
     def set_sync_source(self, enabled: bool) -> int:
         enabled = bool(enabled)
