@@ -1753,23 +1753,20 @@ class ChromeProfileSession:
         x, y = calculate_target_point(event, box)
         button_number = int(event.get("pointer", {}).get("button", 0))
         button = {0: "left", 1: "middle", 2: "right"}.get(button_number, "left")
-        buttons = int(event.get("pointer", {}).get("buttons", 0) or 0)
-        cdp = self._get_page_cdp_session(self.page)
         point = ViewportPoint(x, y)
         if event_type in {"pointerdown", "pointermove", "pointerup"}:
-            ProfileInputEngine.pointer(
-                cdp,
+            ProfileInputEngine.mirrored_pointer(
+                self.page,
                 point,
                 event_type=event_type,
                 button=button,
-                buttons=buttons,
             )
             if event_type == "pointerup":
                 self._sync_pointer_target_box = None
         elif event_type == "wheel":
             wheel = event.get("wheel", {})
-            ProfileInputEngine.wheel(
-                cdp,
+            ProfileInputEngine.mirrored_wheel(
+                self.page,
                 point,
                 float(wheel.get("delta_x", 0.0)),
                 float(wheel.get("delta_y", 0.0)),

@@ -85,6 +85,44 @@ class ProfileInputEngine:
         cdp.send("Input.dispatchMouseEvent", params)
 
     @staticmethod
+    def mirrored_pointer(
+        page: Any,
+        point: ViewportPoint,
+        *,
+        event_type: str,
+        button: str = "left",
+    ) -> None:
+        """Dispatch mirrored input through Playwright's OOPIF-aware mouse.
+
+        This remains profile-local synthetic input and never moves the native
+        Windows cursor. Playwright owns routing into the visible game iframe,
+        which is more reliable than sending a raw page-target CDP event when
+        Chrome hosts that iframe in a separate renderer process.
+        """
+        mouse = page.mouse
+        if event_type == "pointerdown":
+            mouse.move(point.x, point.y)
+            mouse.down(button=button)
+        elif event_type == "pointermove":
+            mouse.move(point.x, point.y)
+        elif event_type == "pointerup":
+            mouse.move(point.x, point.y)
+            mouse.up(button=button)
+        else:
+            raise ValueError(f"Pointer event không được hỗ trợ: {event_type}")
+
+    @staticmethod
+    def mirrored_wheel(
+        page: Any,
+        point: ViewportPoint,
+        delta_x: float,
+        delta_y: float,
+    ) -> None:
+        """Route a mirrored wheel through the same profile-local mouse."""
+        page.mouse.move(point.x, point.y)
+        page.mouse.wheel(float(delta_x), float(delta_y))
+
+    @staticmethod
     def wheel(cdp: Any, point: ViewportPoint, delta_x: float, delta_y: float) -> None:
         cdp.send(
             "Input.dispatchMouseEvent",

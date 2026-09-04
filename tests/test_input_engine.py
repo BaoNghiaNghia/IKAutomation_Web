@@ -13,6 +13,20 @@ class RecordingCDP:
         self.calls.append((method, params))
 
 
+class RecordingMouse:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+
+    def move(self, *args: object, **kwargs: object) -> None:
+        self.calls.append(("move", args, kwargs))
+
+    def down(self, *args: object, **kwargs: object) -> None:
+        self.calls.append(("down", args, kwargs))
+
+    def up(self, *args: object, **kwargs: object) -> None:
+        self.calls.append(("up", args, kwargs))
+
+
 def test_mouse_click_reuses_one_immutable_point_for_complete_gesture() -> None:
     cdp = RecordingCDP()
 
@@ -63,6 +77,29 @@ def test_drag_pointer_preserves_pressed_button_mask() -> None:
                 "buttons": 1,
             },
         )
+    ]
+
+
+def test_mirrored_pointer_uses_profile_mouse_without_native_cursor() -> None:
+    mouse = RecordingMouse()
+    page = type("Page", (), {"mouse": mouse})()
+
+    ProfileInputEngine.mirrored_pointer(
+        page,
+        ViewportPoint(14.0, 8.0),
+        event_type="pointerdown",
+    )
+    ProfileInputEngine.mirrored_pointer(
+        page,
+        ViewportPoint(14.0, 8.0),
+        event_type="pointerup",
+    )
+
+    assert mouse.calls == [
+        ("move", (14.0, 8.0), {}),
+        ("down", (), {"button": "left"}),
+        ("move", (14.0, 8.0), {}),
+        ("up", (), {"button": "left"}),
     ]
 
 

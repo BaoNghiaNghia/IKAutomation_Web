@@ -77,6 +77,13 @@ class FakePage:
     def __init__(self, url: str = "https://ik.playfun.vn/play-game") -> None:
         self.url = url
         self.closed = False
+        self.mouse_calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+        self.mouse = SimpleNamespace(
+            move=lambda *args, **kwargs: self.mouse_calls.append(("move", args, kwargs)),
+            down=lambda *args, **kwargs: self.mouse_calls.append(("down", args, kwargs)),
+            up=lambda *args, **kwargs: self.mouse_calls.append(("up", args, kwargs)),
+            wheel=lambda *args, **kwargs: self.mouse_calls.append(("wheel", args, kwargs)),
+        )
 
     def is_closed(self) -> bool:
         return self.closed
@@ -577,12 +584,8 @@ def test_scroll_game_surface_uses_the_same_zero_origin_as_clicks() -> None:
     assert params["y"] == 180.0
 
 
-def test_synced_pointer_dispatches_through_profile_cdp_not_page_mouse() -> None:
+def test_synced_pointer_dispatches_through_oopif_aware_profile_mouse() -> None:
     session, _canvas, context, page = make_session()
-    page.mouse = SimpleNamespace(
-        move=lambda *_args: (_ for _ in ()).throw(AssertionError("must use CDP")),
-        down=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must use CDP")),
-    )
 
     resolved = session.apply_synced_input(
         {
@@ -593,18 +596,10 @@ def test_synced_pointer_dispatches_through_profile_cdp_not_page_mouse() -> None:
         }
     )
 
-    assert context.sessions[0].calls == [
-        (
-            "Input.dispatchMouseEvent",
-            {
-                "type": "mousePressed",
-                "x": 320.0,
-                "y": 360.0,
-                "button": "left",
-                "buttons": 0,
-                "clickCount": 1,
-            },
-        )
+    assert context.sessions[0].calls == []
+    assert page.mouse_calls == [
+        ("move", (320.0, 360.0), {}),
+        ("down", (), {"button": "left"}),
     ]
     assert resolved == {
         "x": 320.0,
