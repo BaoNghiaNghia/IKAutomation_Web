@@ -846,14 +846,24 @@ class ProfileWorker:
             now = time.monotonic()
             if now >= self._sync_rearm_at:
                 try:
-                    armed_frames = self.session.sync_capture_frame_count()
-                    if armed_frames <= 0:
-                        armed_frames = self.session.set_sync_source(True)
+                    previous_armed_frames = self.session.sync_capture_frame_count()
+                    # Repair every currently attached frame periodically. A
+                    # portal frame can stay armed while a same-URL game iframe
+                    # has replaced its document and lost both mouse and key
+                    # listeners, so checking only `count > 0` is insufficient.
+                    armed_frames = self.session.set_sync_source(True)
+                    if (
+                        previous_armed_frames <= 0
+                        or armed_frames > previous_armed_frames
+                    ):
                         self.event_log.write(
                             "sync_source_rearmed",
                             {
                                 "profile_id": self.profile.id,
                                 "armed_frame_count": int(armed_frames or 0),
+                                "previous_armed_frame_count": int(
+                                    previous_armed_frames or 0
+                                ),
                             },
                         )
                 finally:

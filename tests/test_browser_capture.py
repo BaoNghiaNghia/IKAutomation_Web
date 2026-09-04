@@ -643,8 +643,11 @@ def test_sync_probe_is_rearmed_for_a_retained_browser_frame() -> None:
         def __init__(self) -> None:
             self.arguments: list[list[bool]] = []
 
-        def evaluate(self, _script: str, argument: list[bool]) -> bool:
-            self.arguments.append(argument)
+        def evaluate(
+            self, _script: str, argument: list[bool] | None = None
+        ) -> bool:
+            if argument is not None:
+                self.arguments.append(argument)
             return True
 
     session = ChromeProfileSession.__new__(ChromeProfileSession)
@@ -661,6 +664,49 @@ def test_sync_probe_is_rearmed_for_a_retained_browser_frame() -> None:
     assert armed == 1
     assert frame.arguments == [[True, False]]
     assert id(frame) in session._configured_frames
+
+
+def test_sync_repair_installs_listeners_into_replaced_iframe_document() -> None:
+    class ReplacedFrame:
+        url = "https://ik.playfun.vn/play-game"
+
+        def __init__(self) -> None:
+            self.probe_installed = False
+            self.modes: list[list[bool]] = []
+
+        def evaluate(self, script: str, argument: object = None) -> object:
+            if argument is None and "window.__IK_INTERACTION_PROBE_INSTALLED = true" in script:
+                self.probe_installed = True
+                return None
+            if argument is None:
+                return self.probe_installed
+            self.modes.append(list(argument))
+            return self.probe_installed
+
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    frame = ReplacedFrame()
+    session._page = SimpleNamespace(frames=[frame], is_closed=lambda: False)
+    session._sync_source = True
+    session._inspector_enabled = False
+    session._drag_item_visible = False
+    session._scrollbars_visible = False
+    session._configured_frames = {id(frame): f"{frame.url}|True|False|False|False"}
+
+    armed = session._repair_and_count_sync_frames()
+
+    assert armed == 1
+    assert frame.probe_installed is True
+    assert frame.modes == [[True, False]]
+
+
+def test_unchanged_sync_source_repairs_frames_after_iframe_navigation() -> None:
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session._sync_source = True
+    repairs: list[bool] = []
+    session._repair_and_count_sync_frames = lambda: repairs.append(True) or 2
+
+    assert session.set_sync_source(True) == 2
+    assert repairs == [True]
 
 
 def test_unchanged_follower_sync_mode_does_not_reconfigure_slow_frames() -> None:

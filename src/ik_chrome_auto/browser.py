@@ -1607,7 +1607,10 @@ class ChromeProfileSession:
             # Followers already start with capture disabled. Reconfiguring all
             # of their frames when Sync is enabled can block a slow profile's
             # worker long enough for its input commands to pile up behind it.
-            return self.sync_capture_frame_count() if enabled else 0
+            # A source is different: its iframe document may have been
+            # replaced while the Python-side flag remained True. Reinstall a
+            # missing probe instead of repeatedly observing zero armed frames.
+            return self._repair_and_count_sync_frames() if enabled else 0
         self._sync_source = enabled
         self._configure_interaction_frames(force=True)
         return self._repair_and_count_sync_frames() if self._sync_source else 0
@@ -1626,6 +1629,18 @@ class ChromeProfileSession:
         armed = 0
         for frame in self.page.frames:
             try:
+                probe_installed = frame.evaluate(
+                    """() => Boolean(
+                        window.__IK_INTERACTION_PROBE_INSTALLED &&
+                        typeof window.__IK_SET_INTERACTION_MODES === 'function'
+                    )"""
+                )
+                if not probe_installed:
+                    # A same-URL iframe navigation may retain Playwright's
+                    # Frame object and configuration signature while replacing
+                    # its JavaScript world. Install the actual listeners, not
+                    # merely the mode variables.
+                    frame.evaluate(INTERACTION_PROBE)
                 ready = frame.evaluate(
                     """([syncSource, inspectEnabled]) => {
                         if (!Array.isArray(window.__IK_SYNC_EVENTS)) window.__IK_SYNC_EVENTS = [];
