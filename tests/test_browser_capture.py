@@ -251,7 +251,7 @@ def test_background_renderer_click_dispatches_cdp_mouse_without_native_window() 
     assert cdp.calls[0][1]["y"] == 360.0
 
 
-def test_background_renderer_click_uses_canvas_local_point_inside_iframe() -> None:
+def test_background_renderer_click_uses_canonical_cdp_point_inside_iframe() -> None:
     canvas = FakeCanvas(
         bounding_box={"x": 118.0, "y": 8.0, "width": 1280.0, "height": 720.0}
     )
@@ -259,14 +259,12 @@ def test_background_renderer_click_uses_canvas_local_point_inside_iframe() -> No
 
     session.dispatch_game_surface_mouse_ratio(53 / 1280, 666 / 720)
 
-    assert context.sessions[0].calls == []
-    assert canvas.click_calls == [
-        {
-            "position": {"x": 53.0, "y": 666.0},
-            "force": True,
-            "timeout": 90_000,
-        }
+    assert context.sessions[0].calls == [
+        ("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 53.0, "y": 666.0, "button": "none"}),
+        ("Input.dispatchMouseEvent", {"type": "mousePressed", "x": 53.0, "y": 666.0, "button": "left", "clickCount": 1}),
+        ("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": 53.0, "y": 666.0, "button": "left", "clickCount": 1}),
     ]
+    assert canvas.click_calls == []
 
 
 def test_touch_uses_fresh_canvas_transform_inside_iframe() -> None:
@@ -284,8 +282,8 @@ def test_touch_uses_fresh_canvas_transform_inside_iframe() -> None:
                 "type": "touchStart",
                 "touchPoints": [
                     {
-                        "x": 278.0,
-                        "y": 188.0,
+                        "x": 160.0,
+                        "y": 180.0,
                         "radiusX": 2,
                         "radiusY": 2,
                         "force": 1,
@@ -298,7 +296,7 @@ def test_touch_uses_fresh_canvas_transform_inside_iframe() -> None:
     ]
 
 
-def test_mouse_uses_fresh_canvas_local_size_for_webgl_control() -> None:
+def test_mouse_uses_cdp_and_fresh_canvas_size_for_webgl_control() -> None:
     canvas = FakeCanvas(
         bounding_box={"x": 118.0, "y": 8.0, "width": 640.0, "height": 360.0}
     )
@@ -306,14 +304,12 @@ def test_mouse_uses_fresh_canvas_local_size_for_webgl_control() -> None:
 
     session.dispatch_game_surface_input_ratio(0.25, 0.5, input_kind="mouse")
 
-    assert context.sessions[0].calls == []
-    assert canvas.click_calls == [
-        {
-            "position": {"x": 160.0, "y": 180.0},
-            "force": True,
-            "timeout": 90_000,
-        }
+    assert context.sessions[0].calls == [
+        ("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 160.0, "y": 180.0, "button": "none"}),
+        ("Input.dispatchMouseEvent", {"type": "mousePressed", "x": 160.0, "y": 180.0, "button": "left", "clickCount": 1}),
+        ("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": 160.0, "y": 180.0, "button": "left", "clickCount": 1}),
     ]
+    assert canvas.click_calls == []
 
 
 def test_mouse_overlay_focus_uses_fresh_canvas_transform_and_viewport_hit_testing() -> None:
@@ -333,15 +329,15 @@ def test_mouse_overlay_focus_uses_fresh_canvas_transform_and_viewport_hit_testin
     assert context.sessions[0].calls == [
         (
             "Input.dispatchMouseEvent",
-            {"type": "mouseMoved", "x": 278.0, "y": 188.0, "button": "none"},
+            {"type": "mouseMoved", "x": 160.0, "y": 180.0, "button": "none"},
         ),
         (
             "Input.dispatchMouseEvent",
-            {"type": "mousePressed", "x": 278.0, "y": 188.0, "button": "left", "clickCount": 1},
+            {"type": "mousePressed", "x": 160.0, "y": 180.0, "button": "left", "clickCount": 1},
         ),
         (
             "Input.dispatchMouseEvent",
-            {"type": "mouseReleased", "x": 278.0, "y": 188.0, "button": "left", "clickCount": 1},
+            {"type": "mouseReleased", "x": 160.0, "y": 180.0, "button": "left", "clickCount": 1},
         ),
     ]
 
@@ -567,7 +563,7 @@ def test_scroll_game_surface_sends_wheel_at_canvas_centre() -> None:
     }
 
 
-def test_scroll_game_surface_uses_the_same_live_canvas_transform_as_clicks() -> None:
+def test_scroll_game_surface_uses_the_same_zero_origin_as_clicks() -> None:
     canvas = FakeCanvas(
         bounding_box={"x": 118.0, "y": 8.0, "width": 640.0, "height": 360.0}
     )
@@ -577,8 +573,39 @@ def test_scroll_game_surface_uses_the_same_live_canvas_transform_as_clicks() -> 
 
     method, params = context.sessions[0].calls[0]
     assert method == "Input.dispatchMouseEvent"
-    assert params["x"] == 438.0
-    assert params["y"] == 188.0
+    assert params["x"] == 320.0
+    assert params["y"] == 180.0
+
+
+def test_synced_pointer_dispatches_through_profile_cdp_not_page_mouse() -> None:
+    session, _canvas, context, page = make_session()
+    page.mouse = SimpleNamespace(
+        move=lambda *_args: (_ for _ in ()).throw(AssertionError("must use CDP")),
+        down=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must use CDP")),
+    )
+
+    session.apply_synced_input(
+        {
+            "type": "pointerdown",
+            "canvas": {"ratio_x": 0.25, "ratio_y": 0.5, "index": 0},
+            "pointer": {"button": 0},
+            "frame_url": "https://game.example/frame",
+        }
+    )
+
+    assert context.sessions[0].calls == [
+        (
+            "Input.dispatchMouseEvent",
+            {
+                "type": "mousePressed",
+                "x": 320.0,
+                "y": 360.0,
+                "button": "left",
+                "buttons": 0,
+                "clickCount": 1,
+            },
+        )
+    ]
 
 
 def test_escape_is_dispatched_without_focusing_real_window() -> None:
@@ -868,25 +895,27 @@ def test_mouse_fallback_click_uses_the_template_center() -> None:
 
     session.click_farm_template_mouse((10, 20, 30, 40), (100, 100))
 
-    assert context.sessions[0].calls == []
-    assert _canvas.click_calls == [{
-        "position": {"x": 320.0, "y": 288.0},
-        "force": True,
-        "timeout": session.config.browser.startup_timeout_ms,
-    }]
+    assert [method for method, _params in context.sessions[0].calls] == [
+        "Input.dispatchMouseEvent",
+        "Input.dispatchMouseEvent",
+        "Input.dispatchMouseEvent",
+    ]
+    assert all(params["x"] == 320.0 and params["y"] == 288.0 for _method, params in context.sessions[0].calls)
+    assert _canvas.click_calls == []
 
 
-def test_canvas_ratio_mouse_click_uses_locator_in_the_correct_frame() -> None:
+def test_canvas_ratio_mouse_click_uses_profile_local_cdp() -> None:
     session, _canvas, context, _page = make_session()
 
     session.click_game_surface_ratio(53 / 1280, 666 / 720)
 
-    assert context.sessions[0].calls == []
-    assert _canvas.click_calls == [{
-        "position": {"x": 53.0, "y": 666.0},
-        "force": True,
-        "timeout": 90_000,
-    }]
+    assert [method for method, _params in context.sessions[0].calls] == [
+        "Input.dispatchMouseEvent",
+        "Input.dispatchMouseEvent",
+        "Input.dispatchMouseEvent",
+    ]
+    assert all(params["x"] == 53.0 and params["y"] == 666.0 for _method, params in context.sessions[0].calls)
+    assert _canvas.click_calls == []
 
 
 def test_cdp_capture_uses_exact_canvas_clip() -> None:

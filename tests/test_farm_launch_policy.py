@@ -5,21 +5,31 @@ from ik_chrome_auto.farm_launch_policy import FarmLaunchPolicy
 GIB = 1_073_741_824
 
 
-def test_large_workstation_uses_gentle_three_profile_batches() -> None:
+def test_large_workstation_uses_fast_six_profile_batches() -> None:
     policy = FarmLaunchPolicy.for_total_memory(96 * GIB)
 
-    assert policy.batch_size == 3
-    assert policy.profile_interval_seconds == 3.0
-    assert policy.batch_pause_seconds == 15.0
+    assert policy.batch_size == 6
+    assert policy.profile_interval_seconds == 1.0
+    assert policy.batch_pause_seconds == 5.0
+    assert policy.resource_constrained_interval_seconds == 4.0
     assert policy.min_available_memory_bytes >= 16 * GIB
 
 
-def test_smaller_machine_gets_more_conservative_launch_policy() -> None:
+def test_mid_range_machine_keeps_a_short_stagger() -> None:
     policy = FarmLaunchPolicy.for_total_memory(32 * GIB)
 
-    assert policy.batch_size == 3
-    assert policy.profile_interval_seconds == 3.5
-    assert policy.batch_pause_seconds == 18.0
+    assert policy.batch_size == 4
+    assert policy.profile_interval_seconds == 1.25
+    assert policy.batch_pause_seconds == 6.0
+
+
+def test_low_memory_machine_still_opens_two_profiles_per_batch() -> None:
+    policy = FarmLaunchPolicy.for_total_memory(16 * GIB)
+
+    assert policy.batch_size == 2
+    assert policy.profile_interval_seconds == 2.0
+    assert policy.batch_pause_seconds == 8.0
+    assert policy.resource_constrained_interval_seconds == 5.0
 
 
 def test_resource_guard_blocks_low_memory_and_high_cpu() -> None:

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import queue
 import threading
 from dataclasses import dataclass, field
 from types import SimpleNamespace
+
+import pytest
 
 import ik_chrome_auto.runner as runner_module
 from ik_chrome_auto.models import CommandKind, WorkerCommand
@@ -86,7 +89,63 @@ def test_enable_sync_keeps_only_selected_targets_and_marks_master_as_source() ->
     assert runner.sync_master_id == "master"
     assert runner.sync_target_ids == {"follower-open"}
     assert runner.workers["master"].commands[-1].payload == {"enabled": True}
-    assert runner.workers["follower-open"].commands[-1].payload == {"enabled": False}
+    assert runner.workers["follower-open"].commands == []
+
+
+def test_disable_sync_only_reconfigures_the_previous_master() -> None:
+    runner = make_runner()
+
+    runner.disable_sync()
+
+    assert runner.sync_enabled is False
+    assert runner.sync_master_id is None
+    assert runner.sync_target_ids == set()
+    assert runner.workers["master"].commands[-1].payload == {"enabled": False}
+    assert runner.workers["follower-open"].commands == []
+    assert runner.workers["follower-closed"].commands == []
+
+
+def test_profile_worker_coalesces_stale_pointer_moves_before_reliable_input() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker.commands = queue.Queue()
+    worker._sync_move_lock = threading.Lock()
+    worker._sync_pending_move = None
+    worker._sync_move_command_queued = False
+    worker.submit = worker.commands.put
+
+    worker.submit_synced_input({"type": "pointermove", "sequence": 1})
+    worker.submit_synced_input({"type": "pointermove", "sequence": 2})
+    worker.submit_synced_input({"type": "pointerup", "sequence": 3})
+
+    assert worker.commands.qsize() == 2
+    marker = worker.commands.get_nowait()
+    assert marker.payload == {"coalesced_pointer_move": True}
+    assert worker._take_pending_sync_move() == {"type": "pointermove", "sequence": 2}
+    pointer_up = worker.commands.get_nowait()
+    assert pointer_up.payload["event"] == {"type": "pointerup", "sequence": 3}
+
+
+def test_large_sync_throttles_pointer_moves_but_never_drops_pointer_up(monkeypatch) -> None:
+    runner = make_runner()
+    followers = {f"follower-{index}" for index in range(44)}
+    runner.workers = {
+        "master": FakeWorker(object()),
+        **{profile_id: FakeWorker(object()) for profile_id in followers},
+    }
+    runner.sync_target_ids = followers
+    runner._sync_last_pointer_move_at = 0.0
+    clock = iter((100.0, 100.02))
+    monkeypatch.setattr(runner_module.time, "monotonic", lambda: next(clock))
+
+    runner._on_input("master", {"type": "pointermove", "sequence": 1})
+    runner._on_input("master", {"type": "pointermove", "sequence": 2})
+    runner._on_input("master", {"type": "pointerup", "sequence": 3})
+
+    assert all(len(runner.workers[profile_id].commands) == 2 for profile_id in followers)
+    assert all(
+        runner.workers[profile_id].commands[-1].payload["event"]["type"] == "pointerup"
+        for profile_id in followers
+    )
 
 
 def test_sync_ignores_non_master_event() -> None:
@@ -95,6 +154,36 @@ def test_sync_ignores_non_master_event() -> None:
     runner._on_input("follower-open", {"type": "pointerdown"})
 
     assert all(not worker.commands for worker in runner.workers.values())
+
+
+def test_runner_blocks_autonomous_input_while_sync_owns_profiles() -> None:
+    runner = make_runner()
+    events = []
+    runner.event_log = SimpleNamespace(
+        write=lambda event, payload: events.append((event, payload))
+    )
+
+    with pytest.raises(RuntimeError, match="quyền điều khiển"):
+        runner.submit("follower-open", CommandKind.START_FARM)
+
+    assert runner.workers["follower-open"].commands == []
+    assert events == [
+        (
+            "input_owner_conflict_blocked",
+            {
+                "profile_id": "follower-open",
+                "requested": "start_farm",
+                "current_owner": "sync",
+            },
+        )
+    ]
+
+
+def test_runner_blocks_monitor_engine_while_sync_owns_profiles() -> None:
+    runner = make_runner()
+
+    with pytest.raises(RuntimeError, match="tắt đồng bộ"):
+        runner.enable_mail_monitor({"follower-open"})
 
 
 def test_follower_input_repairs_stale_runtime_and_retries_once() -> None:

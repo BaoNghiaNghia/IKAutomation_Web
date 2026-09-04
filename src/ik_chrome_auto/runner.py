@@ -236,6 +236,9 @@ class ProfileWorker:
         self._thread_lock = threading.Lock()
         self._sync_source_enabled = False
         self._sync_rearm_at = 0.0
+        self._sync_move_lock = threading.Lock()
+        self._sync_pending_move: dict[str, Any] | None = None
+        self._sync_move_command_queued = False
         self._inspector_enabled = False
         self._drag_item_visible = drag_item_visible
         self._scrollbars_visible = scrollbars_visible
@@ -759,8 +762,13 @@ class ProfileWorker:
                         self._publish(WorkerState.READY, "Đã sắp xếp cửa sổ")
                     continue
                 if command.kind == CommandKind.SYNC_INPUT:
-                    if self.session is not None:
+                    if command.payload.get("coalesced_pointer_move"):
+                        sync_event = self._take_pending_sync_move()
+                        if sync_event is None:
+                            continue
+                    else:
                         sync_event = dict(command.payload["event"])
+                    if self.session is not None:
                         try:
                             self._apply_synced_input_with_retry(sync_event)
                         except Exception as error:
@@ -829,6 +837,36 @@ class ProfileWorker:
         elif navigate:
             self.session.goto()
         return self.session
+
+    def submit_synced_input(self, event: dict[str, Any]) -> None:
+        """Queue reliable input while retaining only the newest pointer move.
+
+        A 45-profile fan-out can otherwise accumulate thousands of stale drag
+        positions in front of the important pointer-up or keyboard command.
+        """
+        if str(event.get("type", "")) != "pointermove":
+            self.submit(WorkerCommand(CommandKind.SYNC_INPUT, {"event": dict(event)}))
+            return
+        should_queue = False
+        with self._sync_move_lock:
+            self._sync_pending_move = dict(event)
+            if not self._sync_move_command_queued:
+                self._sync_move_command_queued = True
+                should_queue = True
+        if should_queue:
+            self.submit(
+                WorkerCommand(
+                    CommandKind.SYNC_INPUT,
+                    {"coalesced_pointer_move": True},
+                )
+            )
+
+    def _take_pending_sync_move(self) -> dict[str, Any] | None:
+        with self._sync_move_lock:
+            event = self._sync_pending_move
+            self._sync_pending_move = None
+            self._sync_move_command_queued = False
+        return event
 
     def _apply_synced_input_with_retry(self, event: dict[str, Any]) -> None:
         """Retry once after repairing a follower's stale frame/CDP runtime."""
@@ -3613,6 +3651,7 @@ class MultiProfileRunner:
         self.sync_enabled = False
         self.sync_master_id: str | None = None
         self.sync_target_ids: set[str] = set()
+        self._sync_last_pointer_move_at = 0.0
         self.drag_items_visible = False
         self.scrollbars_visible = False
         self.windows_topmost = False
@@ -3646,9 +3685,33 @@ class MultiProfileRunner:
                 )
 
     def submit(self, profile_id: str, kind: CommandKind, **payload: object) -> None:
+        # Manual mirrored input owns every participating profile while Sync is
+        # active. Enforce this in the runner as well as the dashboard so a
+        # stale button signal, scheduler callback, or future API caller cannot
+        # silently start an autonomous input producer behind Sync's back.
+        if kind in {CommandKind.START_FARM, CommandKind.MONITOR_MAIL}:
+            with self._sync_lock:
+                sync_enabled = self.sync_enabled
+            if sync_enabled:
+                self.event_log.write(
+                    "input_owner_conflict_blocked",
+                    {
+                        "profile_id": profile_id,
+                        "requested": kind.value,
+                        "current_owner": "sync",
+                    },
+                )
+                raise RuntimeError(
+                    "Đồng bộ chuột - bàn phím đang sở hữu quyền điều khiển profile"
+                )
         self.workers[profile_id].submit(WorkerCommand(kind, dict(payload)))
 
     def enable_mail_monitor(self, profile_ids: set[str]) -> None:
+        with self._sync_lock:
+            if self.sync_enabled:
+                raise RuntimeError(
+                    "Hãy tắt đồng bộ chuột - bàn phím trước khi bật Giám sát"
+                )
         for profile_id in profile_ids:
             worker = self.workers.get(profile_id)
             if worker is not None:
@@ -3689,19 +3752,20 @@ class MultiProfileRunner:
         if not targets:
             raise ValueError("Hãy chọn ít nhất một profile nhận đồng bộ")
         with self._sync_lock:
+            previous_master = self.sync_master_id if self.sync_enabled else None
             self.sync_enabled = True
             self.sync_master_id = master_id
             self.sync_target_ids = targets
+            self._sync_last_pointer_move_at = 0.0
         self.event_log.write(
             "sync_enabled",
             {"master_profile_id": master_id, "target_profile_ids": sorted(targets)},
         )
-        for profile_id in self.workers:
-            self.submit(
-                profile_id,
-                CommandKind.SET_SYNC_SOURCE,
-                enabled=profile_id == master_id,
-            )
+        # Every worker starts as a follower. Only the old and new master need
+        # a mode command; broadcasting 45 no-op commands delayed large syncs.
+        if previous_master is not None and previous_master != master_id:
+            self.submit(previous_master, CommandKind.SET_SYNC_SOURCE, enabled=False)
+        self.submit(master_id, CommandKind.SET_SYNC_SOURCE, enabled=True)
 
     def disable_sync(self) -> None:
         with self._sync_lock:
@@ -3710,13 +3774,14 @@ class MultiProfileRunner:
             self.sync_enabled = False
             self.sync_master_id = None
             self.sync_target_ids.clear()
+            self._sync_last_pointer_move_at = 0.0
         if was_enabled:
             self.event_log.write(
                 "sync_disabled",
                 {"master_profile_id": previous_master},
             )
-        for profile_id in self.workers:
-            self.submit(profile_id, CommandKind.SET_SYNC_SOURCE, enabled=False)
+        if previous_master is not None and previous_master in self.workers:
+            self.submit(previous_master, CommandKind.SET_SYNC_SOURCE, enabled=False)
 
     def set_inspector(self, profile_id: str, enabled: bool) -> None:
         self.submit(profile_id, CommandKind.SET_INSPECTOR, enabled=enabled)
@@ -4005,13 +4070,26 @@ class MultiProfileRunner:
             target_ids = set(self.sync_target_ids)
         if not enabled or source_profile_id != master_id:
             return
+        event_type = str(event.get("type", ""))
+        if event_type == "pointermove":
+            # Keep dragging responsive without multiplying the source's 42 Hz
+            # stream into an unbounded 45-profile command storm.
+            move_interval = 0.06 if len(target_ids) >= 32 else 0.04 if len(target_ids) >= 16 else 0.0
+            now = time.monotonic()
+            last_move_at = getattr(self, "_sync_last_pointer_move_at", 0.0)
+            if move_interval and now - last_move_at < move_interval:
+                return
+            self._sync_last_pointer_move_at = now
         delivered = 0
         for profile_id, worker in self.workers.items():
             if profile_id not in target_ids or worker.session is None:
                 continue
-            worker.submit(WorkerCommand(CommandKind.SYNC_INPUT, {"event": event}))
+            submit_synced_input = getattr(worker, "submit_synced_input", None)
+            if callable(submit_synced_input):
+                submit_synced_input(event)
+            else:
+                worker.submit(WorkerCommand(CommandKind.SYNC_INPUT, {"event": event}))
             delivered += 1
-        event_type = str(event.get("type", ""))
         if event_type in {"pointerdown", "pointerup", "keydown", "keyup"}:
             self.event_log.write(
                 "sync_input_dispatched",

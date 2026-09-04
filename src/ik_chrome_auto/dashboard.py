@@ -136,6 +136,7 @@ class Dashboard(QWidget):
         self.last_coordinate: tuple[str, dict[str, object]] | None = None
         self.farm_profiles: set[str] = set()
         self._sync_target_profiles: set[str] = set()
+        self._sync_available_profiles: set[str] = set()
         self._telegram_results: queue.Queue[tuple[bool, str]] = queue.Queue()
         self._update_check_results: queue.Queue[GitUpdateStatus | Exception] = queue.Queue()
         self._resource_alert_samples: queue.Queue[tuple[float, float | None]] = queue.Queue()
@@ -615,12 +616,7 @@ class Dashboard(QWidget):
             row.card.setStyleSheet("")
     def _toggle_sync(self) -> None:
         if self.runner.sync_enabled:
-            self.runner.disable_sync()
-            self.master.setEnabled(True)
-            self.sync.setText("Bật đồng bộ")
-            self.sync_status.setText("Sync đang tắt")
-            self._set_sync_status_indicator(False)
-            self._refresh_sync_control()
+            self._set_sync_disabled_ui()
             return
         master = str(self.master.currentData() or "")
         opened_profiles = [
@@ -634,10 +630,12 @@ class Dashboard(QWidget):
         if not followers:
             self._warning("Chưa đủ profile", "Hãy mở ít nhất một profile nhận điều khiển.")
             return
+        follower_ids = {profile.id for profile in followers}
+        dialog_selection = self._default_sync_targets(follower_ids)
         dialog = FarmProfileDialog(
             self,
             followers,
-            self._sync_target_profiles & {profile.id for profile in followers},
+            dialog_selection,
             window_title="Chọn thiết bị nhận đồng bộ",
             heading="Thiết bị được điều khiển",
             description="Chọn các profile sẽ nhận thao tác chuột và bàn phím từ profile master.",
@@ -649,6 +647,7 @@ class Dashboard(QWidget):
         if not selected:
             self._warning("Chưa chọn thiết bị", "Chọn ít nhất một profile nhận điều khiển.")
             return
+        self._sync_available_profiles = follower_ids
         self._sync_target_profiles = selected
         self._stop_automation_for_sync()
         self.runner.enable_sync(master, selected)
@@ -656,6 +655,27 @@ class Dashboard(QWidget):
         self.sync.setText("Tắt đồng bộ")
         self.sync_status.setText(f"MASTER: {self.master.currentText()} → {len(selected)} thiết bị")
         self._set_sync_status_indicator(True)
+        self._refresh_sync_control()
+
+    def _default_sync_targets(self, follower_ids: set[str]) -> set[str]:
+        """Select every device when the opened profile group has changed."""
+        previous_available = getattr(self, "_sync_available_profiles", set())
+        previous_selected = getattr(self, "_sync_target_profiles", set())
+        if follower_ids != previous_available:
+            return set(follower_ids)
+        return set(previous_selected) & follower_ids
+
+    def _set_sync_disabled_ui(self) -> None:
+        """Disable runner sync and immediately restore its optional UI state."""
+        self.runner.disable_sync()
+        if hasattr(self, "master"):
+            self.master.setEnabled(True)
+        if hasattr(self, "sync"):
+            self.sync.setText("Bật đồng bộ")
+        if hasattr(self, "sync_status"):
+            self.sync_status.setText("Sync đang tắt")
+        if hasattr(self, "sync_status_icon"):
+            self._set_sync_status_indicator(False)
         self._refresh_sync_control()
 
     def _stop_automation_for_sync(self) -> None:
@@ -676,15 +696,15 @@ class Dashboard(QWidget):
         """Stop input mirroring before an autonomous task can click or type."""
         was_enabled = bool(getattr(self.runner, "sync_enabled", False))
         if was_enabled:
-            self.runner.disable_sync()
+            self._set_sync_disabled_ui()
             self._append_log(f"Đã tắt đồng bộ chuột - bàn phím trước khi chạy {task_name}")
-        if hasattr(self, "master"):
+        elif hasattr(self, "master"):
             self.master.setEnabled(True)
-        if hasattr(self, "sync"):
+        if not was_enabled and hasattr(self, "sync"):
             self.sync.setText("Bật đồng bộ")
-        if hasattr(self, "sync_status"):
+        if not was_enabled and hasattr(self, "sync_status"):
             self.sync_status.setText("Sync đang tắt")
-        if hasattr(self, "sync_status_icon"):
+        if not was_enabled and hasattr(self, "sync_status_icon"):
             self._set_sync_status_indicator(False)
         self._refresh_sync_control()
 
@@ -697,7 +717,9 @@ class Dashboard(QWidget):
         }
         sync_active = bool(getattr(getattr(self, "runner", None), "sync_enabled", False))
         if hasattr(self, "sync"):
-            self.sync.setEnabled(not blocked)
+            # Stopping sync is always safe and must remain available even if
+            # profile tabs are currently opening or closing.
+            self.sync.setEnabled(sync_active or not blocked)
         if hasattr(self, "farm_all_button") and not getattr(
             self, "_farm_all_running", False
         ):
@@ -1188,6 +1210,13 @@ class Dashboard(QWidget):
             selected = self._choose_farm_profiles()
             if not selected:
                 return
+            if self.runner.sync_enabled:
+                self._set_sync_disabled_ui()
+                self._append_log(
+                    "Đã tắt phiên đồng bộ cũ trước khi mở nhóm profile mới"
+                )
+            self._sync_target_profiles = set()
+            self._sync_available_profiles = set()
             self._farm_launch_profiles = selected
             self._farm_open_states = {
                 profile_id: WorkerState.READY
@@ -1236,6 +1265,11 @@ class Dashboard(QWidget):
             )
             return
         if self._farm_launcher_phase == "ready":
+            if self.runner.sync_enabled:
+                self._set_sync_disabled_ui()
+                self._append_log("Đã tắt đồng bộ trước khi đóng tabs")
+            self._sync_target_profiles = set()
+            self._sync_available_profiles = set()
             # Tabs may be farming either through the bulk button or through an
             # individual profile control. Always stop every tracked Farm job
             # before beginning the serial Chrome shutdown.

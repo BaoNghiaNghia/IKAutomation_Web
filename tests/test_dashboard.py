@@ -139,6 +139,19 @@ def test_sync_control_is_locked_only_while_tabs_are_transitioning() -> None:
     assert not dashboard.sync.enabled
 
 
+def test_active_sync_can_always_be_turned_off_while_tabs_are_transitioning() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.sync = FakeActionButton()
+    dashboard.runner = SimpleNamespace(sync_enabled=True)
+    dashboard.farm_profiles = set()
+    dashboard._farm_all_running = False
+    dashboard._farm_launcher_phase = "opening"
+
+    dashboard._refresh_sync_control()
+
+    assert dashboard.sync.enabled
+
+
 def test_enabling_sync_stops_automation_modes_first() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     dashboard.farm_profiles = {"account-1"}
@@ -490,6 +503,30 @@ def test_sync_master_profile_id_is_stored_as_combo_user_data() -> None:
     Dashboard._add_master_profile_option(combo, "cuongg********", "account-2")
 
     assert combo.items == [("cuongg********", None, "account-2")]
+
+
+def test_newly_opened_profile_group_defaults_sync_to_every_follower() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard._sync_available_profiles = {"account-2", "account-3"}
+    dashboard._sync_target_profiles = {"account-2"}
+
+    selected = dashboard._default_sync_targets(
+        {f"account-{index}" for index in range(2, 46)}
+    )
+
+    assert len(selected) == 44
+
+
+def test_unchanged_profile_group_preserves_manual_sync_subset() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard._sync_available_profiles = {"account-2", "account-3", "account-4"}
+    dashboard._sync_target_profiles = {"account-2", "account-4"}
+
+    selected = dashboard._default_sync_targets(
+        {"account-2", "account-3", "account-4"}
+    )
+
+    assert selected == {"account-2", "account-4"}
 
 
 def test_dashboard_uses_three_fifths_of_every_screen_height() -> None:

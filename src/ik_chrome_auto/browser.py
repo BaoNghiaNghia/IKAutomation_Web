@@ -27,6 +27,7 @@ from ik_chrome_auto.input_helpers import (
     CanvasTransformSnapshot,
     control_center_reference_point,
 )
+from ik_chrome_auto.input_engine import ProfileInputEngine, ViewportPoint
 from ik_chrome_auto.config import is_allowed_url
 from ik_chrome_auto.chrome_preferences import suppress_browser_prompts
 from ik_chrome_auto.models import AppConfig, ProfileConfig, ProfileMode
@@ -1344,7 +1345,7 @@ class ChromeProfileSession:
         for _ in str(current):
             self._press_cdp_key("Backspace", "Backspace", 8, cdp=cdp)
             time.sleep(_FARM_INPUT_ACTION_DELAY_SECONDS)
-        cdp.send("Input.insertText", {"text": str(value)})
+        ProfileInputEngine.insert_text(cdp, str(value))
         time.sleep(_FARM_INPUT_ACTION_DELAY_SECONDS)
         deadline = time.monotonic() + _FARM_INPUT_VERIFY_TIMEOUT_SECONDS
         while True:
@@ -1415,17 +1416,11 @@ class ChromeProfileSession:
         x, y = transform.to_viewport(
             CanvasReferencePoint(GAME_REFERENCE_WIDTH / 2, GAME_REFERENCE_HEIGHT / 2)
         )
-        self._get_page_cdp_session(self.page).send(
-            "Input.dispatchMouseEvent",
-            {
-                "type": "mouseWheel",
-                "x": x,
-                "y": y,
-                "deltaX": 0,
-                "deltaY": float(delta_y),
-                "modifiers": 0,
-                "pointerType": "mouse",
-            },
+        ProfileInputEngine.wheel(
+            self._get_page_cdp_session(self.page),
+            ViewportPoint(x, y),
+            0,
+            float(delta_y),
         )
 
     def press_escape(self) -> None:
@@ -1441,18 +1436,12 @@ class ChromeProfileSession:
         cdp: Any | None = None,
     ) -> None:
         """Send one complete profile-local key press through CDP."""
-        target = cdp or self._get_page_cdp_session(self.page)
-        for event_type in ("keyDown", "keyUp"):
-            target.send(
-                "Input.dispatchKeyEvent",
-                {
-                    "type": event_type,
-                    "key": key,
-                    "code": code,
-                    "windowsVirtualKeyCode": virtual_key_code,
-                    "nativeVirtualKeyCode": virtual_key_code,
-                },
-            )
+        ProfileInputEngine.key_press(
+            cdp or self._get_page_cdp_session(self.page),
+            key=key,
+            code=code,
+            virtual_key_code=virtual_key_code,
+        )
 
     def tap_game_surface_ratio(self, x_ratio: float, y_ratio: float) -> None:
         """Compatibility wrapper for a canvas-relative touch."""
@@ -1504,83 +1493,23 @@ class ChromeProfileSession:
     ) -> None:
         """Dispatch input from the one canonical 1280x720 canvas origin.
 
-        Prefer the canvas locator when Chromium exposes it. A fresh
-        ``bounding_box`` supplies both its actual local size and its transform
-        into the main viewport. Ordinary WebGL mouse controls use a local
-        canvas click, which is the path accepted consistently by the portal.
-        HTML controls layered over the game (the X/Y inputs) opt into viewport
-        hit testing so Chromium can focus the overlay instead of the canvas.
-        Touch remains compositor input. No fixed or remembered iframe offset
-        is involved.
-
-        The page-level CDP path remains the fallback for an OOPIF whose canvas
-        is visible in the compositor but absent from Playwright's frame tree.
-        Neither path moves the OS cursor or changes window z-order.
+        A fresh canvas measurement supplies only the live surface dimensions;
+        iframe/page offsets are deliberately discarded because CSS co-locates
+        the game surface with the renderer origin. Mouse and touch both use
+        the same page-level CDP dispatcher, including X/Y overlay focus. This
+        works for OOPIF canvases, never moves the OS cursor, and never changes
+        window z-order.
         """
         point = CanvasReferencePoint(float(reference_x), float(reference_y))
         if input_kind not in {"mouse", "touch"}:
             raise ValueError(f"Game input kind không được hỗ trợ: {input_kind}")
-        canvas, transform = self._game_surface_transform_snapshot()
-        local_x, local_y = transform.to_local(point)
+        _canvas, transform = self._game_surface_transform_snapshot()
         viewport_x, viewport_y = transform.to_viewport(point)
-        if input_kind == "mouse" and canvas is not None and not viewport_hit_test:
-            canvas.click(
-                position={"x": local_x, "y": local_y},
-                force=True,
-                timeout=self.config.browser.startup_timeout_ms,
-            )
-            return
-
         cdp = self._get_page_cdp_session(self.page)
-        if input_kind == "touch":
-            touch_point = {
-                "x": viewport_x,
-                "y": viewport_y,
-                "radiusX": 2,
-                "radiusY": 2,
-                "force": 1,
-                "id": 1,
-            }
-            cdp.send(
-                "Input.dispatchTouchEvent",
-                {"type": "touchStart", "touchPoints": [touch_point]},
-            )
-            cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
-            return
-
-        # Some portal builds cache the last pointer-move position and use it
-        # when handling the following button event. Sending only press/release
-        # could therefore activate the user's current OS-cursor location even
-        # though the CDP events carried another point. Prime Chromium's
-        # profile-local pointer position first; this never moves the OS cursor.
-        cdp.send(
-            "Input.dispatchMouseEvent",
-            {
-                "type": "mouseMoved",
-                "x": viewport_x,
-                "y": viewport_y,
-                "button": "none",
-            },
-        )
-        cdp.send(
-            "Input.dispatchMouseEvent",
-            {
-                "type": "mousePressed",
-                "x": viewport_x,
-                "y": viewport_y,
-                "button": "left",
-                "clickCount": 1,
-            },
-        )
-        cdp.send(
-            "Input.dispatchMouseEvent",
-            {
-                "type": "mouseReleased",
-                "x": viewport_x,
-                "y": viewport_y,
-                "button": "left",
-                "clickCount": 1,
-            },
+        ProfileInputEngine.click(
+            cdp,
+            ViewportPoint(viewport_x, viewport_y),
+            kind=input_kind,
         )
 
     def _game_surface_transform_snapshot(
@@ -1613,7 +1542,11 @@ class ChromeProfileSession:
             "width": float(surface["width"]),
             "height": float(surface["height"]),
         }
-        return canvas, CanvasTransformSnapshot.from_box(point_surface)
+        # Input has one origin: the top-left of the game surface. The portal
+        # and automation CSS make the iframe/canvas co-located, so carrying a
+        # locator's page offset into CDP would reintroduce the historical 8px
+        # (or host-layout) drift. Keep only the freshly measured dimensions.
+        return canvas, CanvasTransformSnapshot.from_box(_origin_surface_box(point_surface))
 
     def set_sync_source(self, enabled: bool) -> int:
         enabled = bool(enabled)
@@ -1812,18 +1745,22 @@ class ChromeProfileSession:
         x, y = calculate_target_point(event, box)
         button_number = int(event.get("pointer", {}).get("button", 0))
         button = {0: "left", 1: "middle", 2: "right"}.get(button_number, "left")
-        if event_type == "pointerdown":
-            self.page.mouse.move(x, y)
-            self.page.mouse.down(button=button)
-        elif event_type == "pointermove":
-            self.page.mouse.move(x, y)
-        elif event_type == "pointerup":
-            self.page.mouse.move(x, y)
-            self.page.mouse.up(button=button)
+        buttons = int(event.get("pointer", {}).get("buttons", 0) or 0)
+        cdp = self._get_page_cdp_session(self.page)
+        point = ViewportPoint(x, y)
+        if event_type in {"pointerdown", "pointermove", "pointerup"}:
+            ProfileInputEngine.pointer(
+                cdp,
+                point,
+                event_type=event_type,
+                button=button,
+                buttons=buttons,
+            )
         elif event_type == "wheel":
             wheel = event.get("wheel", {})
-            self.page.mouse.move(x, y)
-            self.page.mouse.wheel(
+            ProfileInputEngine.wheel(
+                cdp,
+                point,
                 float(wheel.get("delta_x", 0.0)),
                 float(wheel.get("delta_y", 0.0)),
             )
@@ -1876,7 +1813,7 @@ class ChromeProfileSession:
         if event_type == "keydown" and len(key) == 1 and not (modifiers & 0b0111):
             params["text"] = key
             params["unmodifiedText"] = key
-        self._get_page_cdp_session(self.page).send("Input.dispatchKeyEvent", params)
+        ProfileInputEngine.key_event(self._get_page_cdp_session(self.page), params)
 
     def _configure_interaction_frames(self, *, force: bool = False) -> None:
         if self._page is None or self._page.is_closed():
