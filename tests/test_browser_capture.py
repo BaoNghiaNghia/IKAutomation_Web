@@ -788,7 +788,7 @@ def test_synced_pointer_uses_largest_target_canvas_not_source_canvas_index() -> 
     assert box == {"x": 0.0, "y": 0.0, "width": 1280.0, "height": 720.0}
 
 
-def test_synced_pointer_keeps_live_canvas_viewport_origin() -> None:
+def test_synced_pointer_normalizes_live_canvas_to_shared_origin() -> None:
     frame = SimpleNamespace(
         locator=lambda _selector: SimpleNamespace(
             count=lambda: 1,
@@ -807,7 +807,7 @@ def test_synced_pointer_keeps_live_canvas_viewport_origin() -> None:
 
     box = session._canvas_box(frame, 0)
 
-    assert box == {"x": 17.0, "y": 29.0, "width": 640.0, "height": 360.0}
+    assert box == {"x": 0.0, "y": 0.0, "width": 640.0, "height": 360.0}
 
 
 def test_synced_pointer_reuses_one_transform_until_pointer_up() -> None:
@@ -832,8 +832,8 @@ def test_synced_pointer_reuses_one_transform_until_pointer_up() -> None:
     session._sync_pointer_target_box = None
 
     assert session._synced_pointer_target_box(down) == {
-        "x": 30.0,
-        "y": 40.0,
+        "x": 0.0,
+        "y": 0.0,
         "width": 800.0,
         "height": 450.0,
     }

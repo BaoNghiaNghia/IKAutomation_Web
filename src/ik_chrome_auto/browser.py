@@ -334,9 +334,9 @@ class ChromeProfileSession:
         self._direct_canvas_capture_supported: bool | None = None
         self._farm_matcher: Any | None = None
         self._last_farm_capture_png: bytes | None = None
-        # A synchronized gesture must use one immutable follower transform.
-        # Re-reading an iframe during pointerdown/move/up can produce different
-        # boxes while Chrome is laying out dozens of background profiles.
+        # A synchronized gesture must use one immutable, canvas-local follower
+        # transform. Re-reading an iframe during pointerdown/move/up can
+        # produce different sizes while Chrome lays out dozens of profiles.
         self._sync_pointer_target_box: dict[str, float] | None = None
         self._sync_last_target_box: dict[str, float] | None = None
         # Normal profile windows retain their responsive iframe dimensions.
@@ -1775,12 +1775,12 @@ class ChromeProfileSession:
             )
 
     def _synced_pointer_target_box(self, event: dict[str, Any]) -> dict[str, float]:
-        """Resolve and retain one viewport transform for a complete gesture.
+        """Resolve and retain one canvas-local transform for a complete gesture.
 
         During iframe navigation Chrome can visibly retain the game frame
         while Playwright temporarily cannot enumerate its canvas. Reuse the
-        last measured box before falling back to the viewport so a temporary
-        detached frame does not move the click to a different origin.
+        last measured size before falling back to the viewport so a temporary
+        detached frame does not change a gesture halfway through.
         """
         event_type = str(event.get("type", ""))
         active_box = getattr(self, "_sync_pointer_target_box", None)
@@ -1796,6 +1796,10 @@ class ChromeProfileSession:
         except Exception:
             cached = getattr(self, "_sync_last_target_box", None)
             box = dict(cached) if cached is not None else self._viewport_surface_box()
+        # Enforce the shared game origin at the final sync boundary as well.
+        # This protects the dispatcher if a future locator/frame fallback
+        # starts returning page-relative x/y again.
+        box = _origin_surface_box(box)
         self._sync_last_target_box = dict(box)
         if event_type == "pointerdown":
             self._sync_pointer_target_box = dict(box)
@@ -1980,10 +1984,10 @@ class ChromeProfileSession:
             largest = max(boxes, key=lambda item: item["width"] * item["height"])
             if getattr(self, "_automation_game_frame_fixed", False):
                 return _fixed_game_surface_box()
-            # CDP pointer coordinates use the top-level page viewport. Keep
-            # the follower's freshly measured canvas origin; this is a live
-            # transform, not a hard-coded iframe offset.
-            return dict(largest)
+            # Every game document is CSS-fitted to the renderer origin. Keep
+            # only its live dimensions: carrying the locator's x/y into CDP
+            # gives every profile a different origin in a large window grid.
+            return _origin_surface_box(largest)
         return self._frame_box(frame)
 
     def _frame_box(self, frame: Frame) -> dict[str, float]:
@@ -2001,7 +2005,7 @@ class ChromeProfileSession:
         if box:
             if getattr(self, "_automation_game_frame_fixed", False):
                 return _fixed_game_surface_box()
-            return dict(box)
+            return _origin_surface_box(box)
         raise RuntimeError("Không xác định được vị trí frame đích để đồng bộ thao tác")
 
     def pump(self, milliseconds: int = 50) -> None:
