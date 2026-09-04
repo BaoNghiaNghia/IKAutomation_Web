@@ -21,43 +21,39 @@ class FarmLaunchPolicy:
 
     @classmethod
     def for_total_memory(cls, total_memory_bytes: int) -> "FarmLaunchPolicy":
-        """Choose a fast stagger while retaining the live resource guard."""
+        """Choose conservative defaults without hard-coding one workstation."""
         total = max(1, int(total_memory_bytes))
         if total >= 64 * _GIB:
             return cls(
-                # Real startup logs show that a profile normally reaches READY
-                # in roughly two to three seconds.  A one-second stagger lets
-                # Chrome overlap process creation without creating one giant
-                # WebGL burst.
-                batch_size=6,
-                profile_interval_seconds=1.0,
-                batch_pause_seconds=5.0,
+                # Chrome launches allocate GPU textures and renderer processes
+                # before the first profile is fully visible. Three at a time
+                # remains deliberately gentle for 45-profile layouts, including
+                # machines with ample RAM but a consumer-grade GPU.
+                batch_size=3,
+                profile_interval_seconds=3.0,
+                batch_pause_seconds=15.0,
                 min_available_memory_bytes=max(16 * _GIB, int(total * 0.18)),
                 max_memory_load_percent=80.0,
-                max_profile_cpu_percent=78.0,
-                max_gpu_utilization_percent=84.0,
-                resource_constrained_interval_seconds=4.0,
+                max_profile_cpu_percent=72.0,
             )
         if total >= 32 * _GIB:
             return cls(
-                batch_size=4,
-                profile_interval_seconds=1.25,
-                batch_pause_seconds=6.0,
+                batch_size=3,
+                profile_interval_seconds=3.5,
+                batch_pause_seconds=18.0,
                 min_available_memory_bytes=max(6 * _GIB, int(total * 0.20)),
                 max_memory_load_percent=80.0,
-                max_profile_cpu_percent=76.0,
-                max_gpu_utilization_percent=82.0,
-                resource_constrained_interval_seconds=4.0,
+                max_profile_cpu_percent=70.0,
+                max_gpu_utilization_percent=76.0,
             )
         return cls(
-            batch_size=2,
-            profile_interval_seconds=2.0,
-            batch_pause_seconds=8.0,
+            batch_size=1,
+            profile_interval_seconds=5.0,
+            batch_pause_seconds=12.0,
             min_available_memory_bytes=max(4 * _GIB, int(total * 0.25)),
             max_memory_load_percent=78.0,
-            max_profile_cpu_percent=72.0,
-            max_gpu_utilization_percent=76.0,
-            resource_constrained_interval_seconds=5.0,
+            max_profile_cpu_percent=68.0,
+            max_gpu_utilization_percent=72.0,
         )
 
     def estimated_timeout_seconds(self, profile_count: int, startup_timeout_seconds: float) -> float:

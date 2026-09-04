@@ -14,6 +14,7 @@ from ik_chrome_auto.browser import (
     _low_gpu_init_script,
 )
 from ik_chrome_auto.image_utils import RGBImage, decode_png
+from ik_chrome_auto.farm_vision import FarmTemplateId
 from ik_chrome_auto.input_helpers import (
     CanvasReferencePoint,
     CanvasTransformSnapshot,
@@ -542,6 +543,24 @@ def test_farm_state_keeps_browser_capture_when_headless() -> None:
     session.detect_farm_state()
 
     assert capture_preferences == [True]
+
+
+def test_farm_state_forwards_selective_detection_plan() -> None:
+    session, _canvas, _context, _page = make_session()
+    session.capture_game_surface_png = lambda *, prefer_browser_capture: (ASSET_PNG, BOX.copy())
+    calls: list[dict[str, object]] = []
+    session._farm_matcher = SimpleNamespace(
+        detect=lambda _png, **kwargs: calls.append(kwargs) or "detected"
+    )
+    templates = (FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON,)
+
+    detected, _surface, _image_size = session.detect_farm_state(
+        template_ids=templates,
+        include_roster=False,
+    )
+
+    assert detected == "detected"
+    assert calls == [{"template_ids": templates, "include_roster": False}]
 
 
 def test_scroll_game_surface_sends_wheel_at_canvas_centre() -> None:

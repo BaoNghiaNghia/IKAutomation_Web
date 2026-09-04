@@ -1136,7 +1136,12 @@ class ChromeProfileSession:
             scale,
         )
 
-    def detect_farm_state(self) -> tuple[Any, dict[str, float], tuple[int, int]]:
+    def detect_farm_state(
+        self,
+        *,
+        template_ids: Any = None,
+        include_roster: bool = True,
+    ) -> tuple[Any, dict[str, float], tuple[int, int]]:
         """Classify the current game canvas with the ported ADB template pack."""
         from ik_chrome_auto.farm_matcher import BrowserCanvasMatcher
 
@@ -1153,7 +1158,14 @@ class ChromeProfileSession:
         self._last_farm_capture_png = png
         if self._farm_matcher is None:
             self._farm_matcher = BrowserCanvasMatcher()
-        result = self._farm_matcher.detect(png)
+        if template_ids is None and include_roster:
+            result = self._farm_matcher.detect(png)
+        else:
+            result = self._farm_matcher.detect(
+                png,
+                template_ids=template_ids,
+                include_roster=include_roster,
+            )
         return result, surface, self._png_dimensions(png)
 
     def last_farm_capture_png(self) -> bytes | None:
