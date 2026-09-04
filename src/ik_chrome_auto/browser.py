@@ -1796,7 +1796,7 @@ class ChromeProfileSession:
                 events.append(row)
         return events
 
-    def apply_synced_input(self, event: dict[str, Any]) -> dict[str, float] | None:
+    def apply_synced_input(self, event: dict[str, Any]) -> dict[str, Any] | None:
         """Apply one mirrored event and return its resolved pointer transform."""
         event_type = str(event.get("type", ""))
         if event_type in {"keydown", "keyup"}:
@@ -1825,6 +1825,11 @@ class ChromeProfileSession:
                 float(wheel.get("delta_y", 0.0)),
             )
         return {
+            # Keep this in the worker event log.  A successful raw CDP call is
+            # not sufficient evidence that an OOPIF game surface received a
+            # pointer event; mirrored input must go through Playwright's page
+            # mouse so Chromium performs the frame-aware hit test.
+            "dispatch_route": "playwright_page_mouse",
             "x": round(float(x), 3),
             "y": round(float(y), 3),
             "surface_x": round(float(box.get("x", 0.0)), 3),

@@ -884,7 +884,7 @@ class ProfileWorker:
 
     def _apply_synced_input_with_retry(
         self, event: dict[str, Any]
-    ) -> dict[str, float] | None:
+    ) -> dict[str, Any] | None:
         """Retry once after repairing a follower's stale frame/CDP runtime."""
         if self.session is None:
             return
@@ -3788,6 +3788,35 @@ class MultiProfileRunner:
         if previous_master is not None and previous_master != master_id:
             self.submit(previous_master, CommandKind.SET_SYNC_SOURCE, enabled=False)
         self.submit(master_id, CommandKind.SET_SYNC_SOURCE, enabled=True)
+
+    def add_sync_target(self, profile_id: str) -> bool:
+        """Add one ready follower without disturbing the active master.
+
+        A profile opened from its individual card can become ready while the
+        user is already controlling the master.  Reusing ``enable_sync`` for
+        that one membership change re-armed the master and could drop the
+        next gesture while its game iframe was being configured again.
+        """
+        with self._sync_lock:
+            if (
+                not self.sync_enabled
+                or profile_id == self.sync_master_id
+                or profile_id not in self.workers
+                or profile_id in self.sync_target_ids
+            ):
+                return False
+            self.sync_target_ids.add(profile_id)
+            master_id = self.sync_master_id
+            targets = sorted(self.sync_target_ids)
+        self.event_log.write(
+            "sync_target_added",
+            {
+                "master_profile_id": master_id,
+                "profile_id": profile_id,
+                "target_profile_ids": targets,
+            },
+        )
+        return True
 
     def disable_sync(self) -> None:
         with self._sync_lock:

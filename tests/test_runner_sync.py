@@ -130,6 +130,34 @@ def test_enable_sync_keeps_only_selected_targets_and_marks_master_as_source() ->
     assert runner.workers["follower-open"].commands == []
 
 
+def test_add_sync_target_does_not_rearm_or_reset_the_active_master() -> None:
+    runner = make_runner()
+    records: list[tuple[str, dict[str, object]]] = []
+    runner.event_log = SimpleNamespace(
+        write=lambda event, payload: records.append((event, payload))
+    )
+    runner.workers["follower-new"] = FakeWorker(object())
+
+    assert runner.add_sync_target("follower-new") is True
+
+    assert runner.sync_target_ids == {
+        "follower-open", "follower-closed", "follower-new"
+    }
+    assert runner.workers["master"].commands == []
+    assert records == [
+        (
+            "sync_target_added",
+            {
+                "master_profile_id": "master",
+                "profile_id": "follower-new",
+                "target_profile_ids": [
+                    "follower-closed", "follower-new", "follower-open"
+                ],
+            },
+        )
+    ]
+
+
 def test_disable_sync_only_reconfigures_the_previous_master() -> None:
     runner = make_runner()
 

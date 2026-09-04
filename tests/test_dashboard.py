@@ -161,6 +161,7 @@ def test_open_profile_does_not_repeat_command_for_an_open_session() -> None:
 def test_individually_opened_profile_joins_active_tools() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     sync_calls: list[tuple[str, set[str]]] = []
+    added_sync_targets: list[str] = []
     commands: list[tuple[str, CommandKind]] = []
     monitor_calls: list[set[str]] = []
     restore_calls: list[set[str]] = []
@@ -169,6 +170,7 @@ def test_individually_opened_profile_joins_active_tools() -> None:
         sync_master_id="account-1",
         sync_target_ids={"account-2"},
         enable_sync=lambda master_id, targets: sync_calls.append((master_id, set(targets))),
+        add_sync_target=lambda profile_id: added_sync_targets.append(profile_id) or True,
         submit=lambda profile_id, command: commands.append((profile_id, command)),
         enable_mail_monitor=lambda profile_ids: monitor_calls.append(set(profile_ids)),
         restore_profile_windows=lambda profile_ids: restore_calls.append(set(profile_ids)),
@@ -186,7 +188,8 @@ def test_individually_opened_profile_joins_active_tools() -> None:
 
     dashboard._include_opened_profile_in_active_tools("account-3")
 
-    assert sync_calls == [("account-1", {"account-2", "account-3"})]
+    assert sync_calls == []
+    assert added_sync_targets == ["account-3"]
     assert commands == [("account-3", CommandKind.START_FARM)]
     assert restore_calls == [{"account-3"}]
     assert monitor_calls == [{"account-3"}]

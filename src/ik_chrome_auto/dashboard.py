@@ -564,14 +564,21 @@ class Dashboard(QWidget):
                 targets = set(getattr(self.runner, "sync_target_ids", set()))
                 if profile_id not in targets:
                     targets.add(profile_id)
-                    self.runner.enable_sync(master_id, targets)
-                    self._sync_available_profiles.add(profile_id)
-                    self._sync_target_profiles.add(profile_id)
-                    if hasattr(self, "sync_status"):
-                        self.sync_status.setText(
-                            f"MASTER: {self.master.currentText()} → {len(targets)} thiết bị"
-                        )
-                    self._append_log(f"Đã thêm {profile_id} vào đồng bộ đang chạy")
+                    add_target = getattr(self.runner, "add_sync_target", None)
+                    if callable(add_target):
+                        added = bool(add_target(profile_id))
+                    else:
+                        # Compatibility with runners created by older builds.
+                        self.runner.enable_sync(master_id, targets)
+                        added = True
+                    if added:
+                        self._sync_available_profiles.add(profile_id)
+                        self._sync_target_profiles.add(profile_id)
+                        if hasattr(self, "sync_status"):
+                            self.sync_status.setText(
+                                f"MASTER: {self.master.currentText()} → {len(targets)} thiết bị"
+                            )
+                        self._append_log(f"Đã thêm {profile_id} vào đồng bộ đang chạy")
 
         if getattr(self, "_farm_all_running", False) and profile_id not in self.farm_profiles:
             self.farm_profiles.add(profile_id)

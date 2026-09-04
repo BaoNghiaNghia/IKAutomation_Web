@@ -602,6 +602,7 @@ def test_synced_pointer_dispatches_through_oopif_aware_profile_mouse() -> None:
         ("down", (), {"button": "left"}),
     ]
     assert resolved == {
+        "dispatch_route": "playwright_page_mouse",
         "x": 320.0,
         "y": 360.0,
         "surface_x": 0.0,
