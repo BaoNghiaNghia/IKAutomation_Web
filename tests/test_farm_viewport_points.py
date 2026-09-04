@@ -33,6 +33,7 @@ def test_farm_layout_fallbacks_use_relative_canvas_positions_at_16_by_9() -> Non
     assert ProfileWorker._city_to_world_map_layout_bounds((1280, 720)) == (13, 621, 80, 90)
     assert ProfileWorker._world_map_search_layout_bounds((1280, 720)) == (425, 552, 57, 57)
     assert ProfileWorker._search_target_checkbox_layout_bounds((1280, 720)) == (916, 488, 51, 47)
+    assert ProfileWorker._storage_limit_dismiss_layout_bounds((1280, 720)) == (1119, 359, 2, 2)
 
 
 def test_area_relocation_closes_search_panel_and_opens_continent_map_directly() -> None:
@@ -225,6 +226,87 @@ def test_area_relocation_resumes_coordinate_input_on_verified_continent_map() ->
         "resume_coordinate_input_on_verified_continent_map",
         {"point": (688, 907), "attempt": 1},
     ) in logs
+
+
+def test_area_relocation_edits_x_then_y_and_verifies_pair_from_new_screenshot() -> None:
+    continent_pin = TemplateEvidence(
+        FarmTemplateId.CONTINENT_MAP_PIN_BUTTON,
+        True,
+        1.0,
+        (191, 107, 38, 38),
+    )
+    target_pin = TemplateEvidence(
+        FarmTemplateId.CONTINENT_MAP_SEARCH_TARGET_PIN,
+        True,
+        1.0,
+        (690, 90, 42, 42),
+    )
+    actions = []
+
+    class Session:
+        def __init__(self) -> None:
+            self.frames = [
+                GameDetectionResult(DetectedGameState.CONTINENT_MAP, (continent_pin,)),
+                GameDetectionResult(DetectedGameState.CONTINENT_MAP, (continent_pin,)),
+                GameDetectionResult(DetectedGameState.CONTINENT_MAP, (target_pin,)),
+                GameDetectionResult(DetectedGameState.WORLD_MAP, ()),
+            ]
+            self.values = iter((592, 145, 592, 145, 650, 954))
+
+        def detect_farm_state(self):
+            actions.append(("screenshot",))
+            return self.frames.pop(0), {}, (1280, 720)
+
+        def read_focused_numeric_farm_input(self, bounds, _size):
+            value = next(self.values)
+            actions.append(("focus_and_read", bounds, value))
+            return value
+
+        def replace_focused_farm_input(self, value):
+            actions.append(("replace", value))
+            return True
+
+    session = Session()
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker.session = session
+    worker.profile = SimpleNamespace(id="account-4")
+    worker.stop_event = threading.Event()
+    worker._farm = FarmWorkflow()
+    worker._automation_renderer_locked = True
+    worker._farm_run_id = "run"
+    worker._farm_area_epoch = 0
+    worker._farm_area_pending_selection = SimpleNamespace(
+        point=(650, 954),
+        exhausted=False,
+        attempt=1,
+        max_attempts=3,
+        city_levels=(7, 8),
+    )
+    worker._farm_resource_tab_clicked_at = 1.0
+    worker._farm_resource_panel_verified = True
+    logs = []
+    worker._log_farm = lambda event, payload: logs.append((event, payload))
+    worker._publish = lambda *_args, **_kwargs: None
+    worker._tap_farm_game_control = lambda *_args: "touch_canvas_template"
+
+    assert worker._try_resource_area_relocation("wood", 6) == "moved"
+
+    assert actions[3:9] == [
+        ("focus_and_read", (65, 125, 2, 2), 592),
+        ("replace", 650),
+        ("focus_and_read", (149, 125, 2, 2), 145),
+        ("replace", 954),
+        ("screenshot",),
+        ("focus_and_read", (65, 125, 2, 2), 650),
+    ]
+    assert actions[9] == ("focus_and_read", (149, 125, 2, 2), 954)
+    assert any(
+        event == "resource_area_coordinate_input_verified"
+        and payload["expected"] == (650, 954)
+        and payload["observed"] == (650, 954)
+        and payload["verified"] is True
+        for event, payload in logs
+    )
 
 
 def test_missing_continent_map_icon_stays_in_relocation_instead_of_preflight() -> None:
@@ -569,17 +651,17 @@ def test_continent_coordinate_fields_use_canvas_ratio_offsets() -> None:
     # by normalized canvas distances, which gives the same target for any
     # profile viewport.
     assert ProfileWorker._coordinate_fields_from_pin((400, 100, 40, 40), (1280, 720)) == (
-        (267, 119, 2, 2),
-        (351, 119, 2, 2),
+        (275, 119, 2, 2),
+        (359, 119, 2, 2),
     )
     assert ProfileWorker._coordinate_fields_from_pin((120, 50, 20, 20), (384, 216)) == (
-        (83, 59, 2, 2),
-        (109, 59, 2, 2),
+        (86, 59, 2, 2),
+        (111, 59, 2, 2),
     )
-    # Exact live screenshot geometry: click centres become (56,93)/(140,93).
+    # Exact live screenshot geometry: click centres become (64,93)/(148,93).
     assert ProfileWorker._coordinate_fields_from_pin((187, 76, 42, 34), (1280, 720)) == (
-        (55, 92, 2, 2),
-        (139, 92, 2, 2),
+        (63, 92, 2, 2),
+        (147, 92, 2, 2),
     )
 
 
@@ -590,6 +672,32 @@ def test_checked_search_checkbox_always_wins_and_is_not_clicked_again() -> None:
     assert (
         ProfileWorker._search_target_checkbox_state(checked, false_unchecked_match)
         == "checked"
+    )
+
+
+def test_checked_search_checkbox_accepts_live_score_cluster_below_hard_threshold() -> None:
+    checked = SimpleNamespace(found=False, actionable=False, confidence=0.6898)
+    unchecked = SimpleNamespace(found=False, actionable=False, confidence=0.3627)
+
+    assert ProfileWorker._search_target_checkbox_state(checked, unchecked) == "checked"
+
+
+def test_unchecked_and_ambiguous_checkbox_scores_are_not_inferred_as_checked() -> None:
+    unchecked = SimpleNamespace(found=True, actionable=True, confidence=0.69)
+    checked_on_unchecked = SimpleNamespace(found=False, actionable=False, confidence=0.52)
+    ambiguous_checked = SimpleNamespace(found=False, actionable=False, confidence=0.68)
+    ambiguous_unchecked = SimpleNamespace(found=False, actionable=False, confidence=0.64)
+
+    assert (
+        ProfileWorker._search_target_checkbox_state(checked_on_unchecked, unchecked)
+        == "unchecked"
+    )
+    assert (
+        ProfileWorker._search_target_checkbox_state(
+            ambiguous_checked,
+            ambiguous_unchecked,
+        )
+        == "unknown"
     )
 
 
@@ -609,3 +717,12 @@ def test_target_resource_expiry_requires_message_and_confirm_button() -> None:
     assert ProfileWorker._should_confirm_target_resource_expiry(found, found) is True
     assert ProfileWorker._should_confirm_target_resource_expiry(found, missing) is False
     assert ProfileWorker._should_confirm_target_resource_expiry(missing, found) is False
+
+
+def test_storage_limit_requires_message_and_cancel_button() -> None:
+    found = SimpleNamespace(found=True, actionable=True)
+    missing = SimpleNamespace(found=False, actionable=False)
+
+    assert ProfileWorker._should_cancel_storage_limit(found, found) is True
+    assert ProfileWorker._should_cancel_storage_limit(found, missing) is False
+    assert ProfileWorker._should_cancel_storage_limit(missing, found) is False

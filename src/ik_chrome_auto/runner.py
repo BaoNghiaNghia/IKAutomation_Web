@@ -137,6 +137,17 @@ FARM_RESOURCE_TAB_SIZE = (92 / 1280, 47 / 720)
 # its right whenever the unchecked template was temporarily unavailable.
 FARM_SEARCH_TARGET_CHECKBOX_CENTER = (941 / 1280, 512 / 720)
 FARM_SEARCH_TARGET_CHECKBOX_SIZE = (0.04, 0.065)
+# Live logs form two separate score clusters: an unchecked box gives the
+# checked template about 0.52, while the affected checked skin gives 0.69
+# (just below the matcher's conservative 0.70 threshold). Admit that checked
+# skin only when it also wins decisively over the unchecked template.
+FARM_CHECKBOX_CHECKED_SCORE_FLOOR = 0.66
+FARM_CHECKBOX_STATE_SCORE_MARGIN = 0.10
+# After cancelling the storage-limit dialog, the team panel remains over the
+# left/centre of the map. A blank point on the right closes that panel. Keep
+# it canvas-relative and away from the dialog, team list and right-edge HUD.
+FARM_STORAGE_LIMIT_DISMISS_CENTER = (1120 / 1280, 360 / 720)
+FARM_STORAGE_LIMIT_DISMISS_SIZE = (2 / 1280, 2 / 720)
 FARM_TEAM_ROW_WIDTH_RATIO = 0.172
 FARM_TEAM_ROW_HEIGHT_RATIO = 0.19
 FARM_TEAM_ROW_FIRST_TOP_RATIO = 0.002
@@ -144,13 +155,13 @@ FARM_TEAM_ROW_STRIDE_RATIO = 0.205
 # Both coordinate fields sit on the same row immediately left of the freshly
 # matched Continent Map pin. Keeping the horizontal offsets as canvas ratios
 # avoids treating the reference 1280x720 capture as desktop coordinates.
-# The pin template contains asymmetric background padding on its right.  On
-# the supplied live 1280x720 crop its matched bounds are (187, 76, 42, 34),
-# while the actual three-digit centres are X=(56, 93), Y=(140, 93). Offsets
-# are therefore measured from the match-bounds centre, not the visible pin
-# glyph, and intentionally compensate for that padding.
-FARM_COORDINATE_X_FIELD_OFFSET_X_RATIO = -152 / 1280
-FARM_COORDINATE_Y_FIELD_OFFSET_X_RATIO = -68 / 1280
+# On the supplied live 1280x720 canvas the matched pin bounds are
+# (187, 76, 42, 34), while the centres of the complete three-digit editors
+# are X=(64, 93) and Y=(148, 93). Keep these distances relative to the live
+# pin so every profile uses the same canvas origin without iframe/desktop
+# offsets.
+FARM_COORDINATE_X_FIELD_OFFSET_X_RATIO = -144 / 1280
+FARM_COORDINATE_Y_FIELD_OFFSET_X_RATIO = -60 / 1280
 
 # Measured from the 1260×674 video supplied on 2026-08-28.  They are declared
 # as direct X/Y canvas percentages (rather than retained pixel references), so
@@ -266,6 +277,8 @@ class ProfileWorker:
         self._farm_expected_team_row: tuple[int, int, int, int] | None = None
         self._farm_dispatch_click_at = 0.0
         self._farm_dispatch_clicks = 0
+        self._farm_storage_limit_cancel_pending = False
+        self._farm_storage_limit_close_attempts = 0
         self._farm_area_selector = ResourceAreaPointSelector()
         self._farm_area_epoch = 0
         self._farm_run_id = ""
@@ -642,6 +655,8 @@ class ProfileWorker:
                     self._farm_expected_team_row = None
                     self._farm_dispatch_click_at = 0.0
                     self._farm_dispatch_clicks = 0
+                    self._farm_storage_limit_cancel_pending = False
+                    self._farm_storage_limit_close_attempts = 0
                     self._farm_area_selector = ResourceAreaPointSelector()
                     self._farm_area_epoch = 0
                     self._farm_run_id = f"{self.profile.id}-{time.monotonic_ns()}"
@@ -1020,6 +1035,12 @@ class ProfileWorker:
             target_resource_expiry_confirm = detected.evidence_for(
                 FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_CONFIRM
             )
+            storage_limit_dialog = detected.evidence_for(
+                FarmTemplateId.STORAGE_LIMIT_DIALOG_ANCHOR
+            )
+            storage_limit_cancel = detected.evidence_for(
+                FarmTemplateId.STORAGE_LIMIT_CANCEL_BUTTON
+            )
             team_panel = detected.evidence_for(FarmTemplateId.BROWSER_TEAM_SELECTION_PANEL)
             team_action = detected.evidence_for(FarmTemplateId.BROWSER_TEAM_ACTION_BUTTON)
             team_badges = {
@@ -1123,6 +1144,8 @@ class ProfileWorker:
                     "gather_button": self._evidence_payload(gather_button),
                     "target_resource_expiry_toast": self._evidence_payload(target_resource_expiry_toast),
                     "target_resource_expiry_confirm": self._evidence_payload(target_resource_expiry_confirm),
+                    "storage_limit_dialog": self._evidence_payload(storage_limit_dialog),
+                    "storage_limit_cancel": self._evidence_payload(storage_limit_cancel),
                     "team_panel": self._evidence_payload(team_panel),
                     "team_action": self._evidence_payload(team_action),
                     "team_badges": {
@@ -1168,6 +1191,103 @@ class ProfileWorker:
                 self._publish(
                     WorkerState.RUNNING,
                     "Auto Farm: đang thoát Continent Map bị gián đoạn để khôi phục lượt farm",
+                )
+                return
+            # A dispatch can be rejected after its selected team presses Thu
+            # thập. The storage warning overlays the still-open team panel.
+            # Require both the invariant warning text and the blue Hủy button
+            # on two fresh captures, then cancel it before any dispatch
+            # postcondition or retry logic can run.
+            if self._should_cancel_storage_limit(
+                storage_limit_dialog,
+                storage_limit_cancel,
+            ):
+                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
+                fresh_dialog = fresh.evidence_for(FarmTemplateId.STORAGE_LIMIT_DIALOG_ANCHOR)
+                fresh_cancel = fresh.evidence_for(FarmTemplateId.STORAGE_LIMIT_CANCEL_BUTTON)
+                if self._should_cancel_storage_limit(fresh_dialog, fresh_cancel):
+                    input_method = self._tap_farm_game_control(
+                        fresh_cancel.bounds,  # type: ignore[arg-type]
+                        fresh_size,
+                    )
+                    rejected_team = self._farm.team
+                    self._farm_dispatch_click_at = 0.0
+                    self._farm_dispatch_clicks = 0
+                    self._farm_storage_limit_cancel_pending = True
+                    self._farm_storage_limit_close_attempts = 0
+                    # Let the dialog close animation finish before clicking
+                    # the blank right side of the underlying screen.
+                    self._farm_next_at = time.monotonic() + 2.0
+                    self._log_farm(
+                        "cancel_storage_limit",
+                        {
+                            "team": rejected_team,
+                            "dialog_bounds": fresh_dialog.bounds,
+                            "cancel_bounds": fresh_cancel.bounds,
+                            "input": input_method,
+                        },
+                    )
+                    self._publish(
+                        WorkerState.RUNNING,
+                        "Auto Farm: kho lưu trữ đạt giới hạn; đã bấm Hủy",
+                    )
+                    return
+                self._farm_next_at = time.monotonic() + 0.4
+                self._publish(
+                    WorkerState.RUNNING,
+                    "Auto Farm: cảnh báo giới hạn kho thay đổi, đang nhận diện lại",
+                )
+                return
+            if self._farm_storage_limit_cancel_pending:
+                if state == FarmGameState.TEAM_SELECTION:
+                    if self._farm_storage_limit_close_attempts >= 2:
+                        screenshot = self._save_farm_debug_capture(
+                            "storage-limit-team-panel-unclosed"
+                        )
+                        self._retry_farm_or_stop(
+                            "storage_limit_team_panel_unclosed",
+                            "đã Hủy cảnh báo kho nhưng chưa đóng được panel chọn đội",
+                            screenshot,
+                        )
+                        return
+                    dismiss_bounds = self._storage_limit_dismiss_layout_bounds(
+                        image_size
+                    )
+                    input_method = self._tap_farm_game_control(
+                        dismiss_bounds,
+                        image_size,
+                    )
+                    self._farm_storage_limit_close_attempts += 1
+                    self._farm_next_at = time.monotonic() + 0.9
+                    self._log_farm(
+                        "close_team_panel_after_storage_limit",
+                        {
+                            "attempt": self._farm_storage_limit_close_attempts,
+                            "bounds": dismiss_bounds,
+                            "input": input_method,
+                        },
+                    )
+                    self._publish(
+                        WorkerState.RUNNING,
+                        "Auto Farm: đã chờ 2 giây và bấm vùng trống bên phải để về City",
+                    )
+                    return
+                if state in {FarmGameState.CITY, FarmGameState.WORLD_MAP}:
+                    self._log_farm(
+                        "storage_limit_recovery_verified",
+                        {"state": state.value},
+                    )
+                    self._reset_farm_cycle()
+                    self._farm_next_at = time.monotonic() + self._farm.policy.retry_delay_seconds
+                    self._publish(
+                        WorkerState.RUNNING,
+                        "Auto Farm: đã trở về màn hình chính sau cảnh báo giới hạn kho; chờ 15 giây rồi chạy lượt mới",
+                    )
+                    return
+                self._farm_next_at = time.monotonic() + 0.6
+                self._publish(
+                    WorkerState.RUNNING,
+                    "Auto Farm: đã bấm Hủy giới hạn kho, đang xác minh trở lại World Map",
                 )
                 return
             # Ported from ADB ResourceSearchExecutionService: probe the short
@@ -2115,7 +2235,13 @@ class ProfileWorker:
                             self._farm_target_checkbox_click_at = 0.0
                             self._farm_target_checkbox_clicks = 0
                             self._farm_target_checkbox_seen_unchecked = False
-                            self._log_farm("search_target_checkbox_already_checked", {})
+                            self._log_farm(
+                                "search_target_checkbox_already_checked",
+                                {
+                                    "checked_confidence": target_checkbox_checked.confidence,
+                                    "unchecked_confidence": target_checkbox_unchecked.confidence,
+                                },
+                            )
                             self._publish(
                                 WorkerState.RUNNING,
                                 "Auto Farm: checkbox lọc mục tiêu đã được tick, đang tiếp tục tìm tài nguyên",
@@ -2126,13 +2252,17 @@ class ProfileWorker:
                             checkbox_elapsed = time.monotonic() - self._farm_target_checkbox_click_at
                             if (
                                 self._farm_target_checkbox_seen_unchecked
-                                and target_checkbox_checked.found
+                                and checkbox_state == "checked"
                                 and find_resource.actionable
                             ):
                                 self._farm_target_checkbox_verified = True
                                 self._log_farm(
                                     "search_target_checkbox_verified",
-                                    {"elapsed_seconds": round(checkbox_elapsed, 2)},
+                                    {
+                                        "elapsed_seconds": round(checkbox_elapsed, 2),
+                                        "checked_confidence": target_checkbox_checked.confidence,
+                                        "unchecked_confidence": target_checkbox_unchecked.confidence,
+                                    },
                                 )
                                 self._publish(
                                     WorkerState.RUNNING,
@@ -2219,7 +2349,11 @@ class ProfileWorker:
                             self._farm_target_checkbox_seen_unchecked = False
                             self._log_farm(
                                 "search_target_checkbox_already_checked",
-                                {"source": "fresh_pre_click_frame"},
+                                {
+                                    "source": "fresh_pre_click_frame",
+                                    "checked_confidence": fresh_checked.confidence,
+                                    "unchecked_confidence": fresh_checkbox.confidence,
+                                },
                             )
                             self._publish(
                                 WorkerState.RUNNING,
@@ -2462,6 +2596,8 @@ class ProfileWorker:
         self._farm_expected_team_row = None
         self._farm_dispatch_click_at = 0.0
         self._farm_dispatch_clicks = 0
+        self._farm_storage_limit_cancel_pending = False
+        self._farm_storage_limit_close_attempts = 0
         # The coordinate bag belongs to the user-started AutoFarm session,
         # not to one dispatch/recovery cycle. START_FARM creates it and a
         # STOP/START creates the next one. Keeping it here prevents a failed
@@ -2834,6 +2970,18 @@ class ProfileWorker:
         )
 
     @staticmethod
+    def _storage_limit_dismiss_layout_bounds(
+        image_size: tuple[int, int]
+    ) -> tuple[int, int, int, int]:
+        """Return the blank right-side point used after storage cancellation."""
+        return ProfileWorker._canvas_ratio_bounds(
+            image_size,
+            center=FARM_STORAGE_LIMIT_DISMISS_CENTER,
+            size=FARM_STORAGE_LIMIT_DISMISS_SIZE,
+            minimum_size=(2, 2),
+        )
+
+    @staticmethod
     def _search_target_checkbox_state(checked: object, unchecked: object) -> str:
         """Classify checkbox evidence without ever toggling an unknown state.
 
@@ -2842,6 +2990,14 @@ class ProfileWorker:
         evidence; absence of either template is not treated as unchecked.
         """
         if bool(getattr(checked, "found", False)):
+            return "checked"
+        checked_score = float(getattr(checked, "confidence", 0.0) or 0.0)
+        unchecked_score = float(getattr(unchecked, "confidence", 0.0) or 0.0)
+        if (
+            checked_score >= FARM_CHECKBOX_CHECKED_SCORE_FLOOR
+            and checked_score
+            >= unchecked_score + FARM_CHECKBOX_STATE_SCORE_MARGIN
+        ):
             return "checked"
         if bool(getattr(unchecked, "actionable", False)):
             return "unchecked"
@@ -2881,6 +3037,17 @@ class ProfileWorker:
         return bool(
             getattr(message, "found", False)
             and getattr(confirm_button, "actionable", False)
+        )
+
+    @staticmethod
+    def _should_cancel_storage_limit(
+        message: object,
+        cancel_button: object,
+    ) -> bool:
+        """Require the storage-limit sentence and actionable blue Cancel."""
+        return bool(
+            getattr(message, "found", False)
+            and getattr(cancel_button, "actionable", False)
         )
 
     def _try_resource_area_relocation(self, resource: str, level: int) -> str:
@@ -3101,13 +3268,60 @@ class ProfileWorker:
             return "unavailable"
         if not self.session.replace_focused_farm_input(point[0]):
             return "unavailable"
-        if not self.session.read_focused_numeric_farm_input(y_field, continent_size) == original_y or not self.session.replace_focused_farm_input(point[1]):
+        self._log_farm(
+            "resource_area_coordinate_x_entered",
+            {"expected_x": point[0], "point": point, "attempt": selection.attempt},
+        )
+        if (
+            self.session.read_focused_numeric_farm_input(y_field, continent_size)
+            != original_y
+            or not self.session.replace_focused_farm_input(point[1])
+        ):
             rollback_coordinates(continent, continent_size, reason="y_input_unverified")
             return "unavailable"
+        self._log_farm(
+            "resource_area_coordinate_y_entered",
+            {"expected_y": point[1], "point": point, "attempt": selection.attempt},
+        )
+
+        # Capture a new frame only after the ordered X -> Y edits have
+        # finished.  The old implementation merely checked that the pin still
+        # existed, so a dropped or misdirected key event could go unnoticed
+        # and the automation would search at the previous coordinates.
         refreshed, _surface, refreshed_size = self.session.detect_farm_state()
         refreshed_pin = refreshed.evidence_for(FarmTemplateId.CONTINENT_MAP_PIN_BUTTON)
         if not refreshed_pin.actionable:
             rollback_coordinates(refreshed, refreshed_size, reason="pin_missing_after_coordinate_input")
+            return "unavailable"
+        refreshed_x, refreshed_y = self._coordinate_fields_from_pin(  # type: ignore[arg-type]
+            refreshed_pin.bounds,
+            refreshed_size,
+        )
+        observed_x = self.session.read_focused_numeric_farm_input(
+            refreshed_x,
+            refreshed_size,
+        )
+        observed_y = self.session.read_focused_numeric_farm_input(
+            refreshed_y,
+            refreshed_size,
+        )
+        coordinates_verified = (observed_x, observed_y) == point
+        self._log_farm(
+            "resource_area_coordinate_input_verified",
+            {
+                "expected": point,
+                "observed": (observed_x, observed_y),
+                "verified": coordinates_verified,
+                "screenshot_size": refreshed_size,
+                "attempt": selection.attempt,
+            },
+        )
+        if not coordinates_verified:
+            rollback_coordinates(
+                refreshed,
+                refreshed_size,
+                reason="coordinate_pair_mismatch_after_screenshot",
+            )
             return "unavailable"
         input_method = self._tap_farm_game_control(refreshed_pin.bounds, refreshed_size)  # type: ignore[arg-type]
         self._log_farm("tap_continent_map_pin", {"bounds": refreshed_pin.bounds, "point": point, "input": input_method})

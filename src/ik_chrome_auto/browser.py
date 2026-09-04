@@ -1548,6 +1548,20 @@ class ChromeProfileSession:
             cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
             return
 
+        # Some portal builds cache the last pointer-move position and use it
+        # when handling the following button event. Sending only press/release
+        # could therefore activate the user's current OS-cursor location even
+        # though the CDP events carried another point. Prime Chromium's
+        # profile-local pointer position first; this never moves the OS cursor.
+        cdp.send(
+            "Input.dispatchMouseEvent",
+            {
+                "type": "mouseMoved",
+                "x": viewport_x,
+                "y": viewport_y,
+                "button": "none",
+            },
+        )
         cdp.send(
             "Input.dispatchMouseEvent",
             {

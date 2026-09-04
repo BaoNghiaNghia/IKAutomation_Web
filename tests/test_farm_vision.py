@@ -82,6 +82,15 @@ def test_dialog_priority_matches_adb_detector() -> None:
     assert result.state == DetectedGameState.RESOURCE_EXPIRY_DIALOG
 
 
+def test_storage_limit_requires_warning_and_cancel_button() -> None:
+    assert detect(FarmTemplateId.STORAGE_LIMIT_DIALOG_ANCHOR).state == DetectedGameState.UNKNOWN
+    assert detect(FarmTemplateId.STORAGE_LIMIT_CANCEL_BUTTON).state == DetectedGameState.UNKNOWN
+    assert detect(
+        FarmTemplateId.STORAGE_LIMIT_DIALOG_ANCHOR,
+        FarmTemplateId.STORAGE_LIMIT_CANCEL_BUTTON,
+    ).state == DetectedGameState.STORAGE_LIMIT_DIALOG
+
+
 def test_popup_requires_multiple_signals() -> None:
     assert detect(FarmTemplateId.GATHER_BUTTON_ENABLED).state == DetectedGameState.UNKNOWN
     assert detect(FarmTemplateId.RESOURCE_POPUP_INFO_ANCHOR, FarmTemplateId.GATHER_BUTTON_ENABLED).state == DetectedGameState.RESOURCE_POPUP

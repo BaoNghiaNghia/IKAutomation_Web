@@ -245,6 +245,7 @@ def test_background_renderer_click_dispatches_cdp_mouse_without_native_window() 
     assert [method for method, _params in cdp.calls] == [
         "Input.dispatchMouseEvent",
         "Input.dispatchMouseEvent",
+        "Input.dispatchMouseEvent",
     ]
     assert cdp.calls[0][1]["x"] == 320.0
     assert cdp.calls[0][1]["y"] == 360.0
@@ -330,6 +331,10 @@ def test_mouse_overlay_focus_uses_fresh_canvas_transform_and_viewport_hit_testin
 
     assert canvas.click_calls == []
     assert context.sessions[0].calls == [
+        (
+            "Input.dispatchMouseEvent",
+            {"type": "mouseMoved", "x": 278.0, "y": 188.0, "button": "none"},
+        ),
         (
             "Input.dispatchMouseEvent",
             {"type": "mousePressed", "x": 278.0, "y": 188.0, "button": "left", "clickCount": 1},
@@ -980,6 +985,10 @@ def test_canvas_ratio_click_never_adds_compositor_game_gutter() -> None:
     assert context.sessions[0].calls == [
         (
             "Input.dispatchMouseEvent",
+            {"type": "mouseMoved", "x": 320.0, "y": 540.0, "button": "none"},
+        ),
+        (
+            "Input.dispatchMouseEvent",
             {"type": "mousePressed", "x": 320.0, "y": 540.0, "button": "left", "clickCount": 1},
         ),
         (
@@ -999,6 +1008,10 @@ def test_canvas_ratio_click_uses_compositor_when_canvas_is_detached() -> None:
     session.click_game_surface_ratio(0.25, 0.75)
 
     assert context.sessions[0].calls == [
+        (
+            "Input.dispatchMouseEvent",
+            {"type": "mouseMoved", "x": 320.0, "y": 540.0, "button": "none"},
+        ),
         (
             "Input.dispatchMouseEvent",
             {"type": "mousePressed", "x": 320.0, "y": 540.0, "button": "left", "clickCount": 1},
