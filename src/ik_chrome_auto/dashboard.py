@@ -620,6 +620,7 @@ class Dashboard(QWidget):
             self.sync.setText("Bật đồng bộ")
             self.sync_status.setText("Sync đang tắt")
             self._set_sync_status_indicator(False)
+            self._refresh_sync_control()
             return
         master = str(self.master.currentData() or "")
         opened_profiles = [
@@ -655,6 +656,7 @@ class Dashboard(QWidget):
         self.sync.setText("Tắt đồng bộ")
         self.sync_status.setText(f"MASTER: {self.master.currentText()} → {len(selected)} thiết bị")
         self._set_sync_status_indicator(True)
+        self._refresh_sync_control()
 
     def _stop_automation_for_sync(self) -> None:
         """Switch safely from autonomous actions to manual input mirroring."""
@@ -687,14 +689,23 @@ class Dashboard(QWidget):
         self._refresh_sync_control()
 
     def _refresh_sync_control(self) -> None:
-        """Keep manual sync selectable except while tabs are changing state."""
+        """Keep manual sync and autonomous controls mutually exclusive."""
         blocked = getattr(self, "_farm_launcher_phase", "launch") in {
             "opening",
             "quiescing",
             "stopping",
         }
+        sync_active = bool(getattr(getattr(self, "runner", None), "sync_enabled", False))
         if hasattr(self, "sync"):
             self.sync.setEnabled(not blocked)
+        if hasattr(self, "farm_all_button") and not getattr(
+            self, "_farm_all_running", False
+        ):
+            self.farm_all_button.setEnabled(
+                not blocked
+                and not sync_active
+                and self._opened_profile_count() > 1
+            )
 
     def _set_sync_status_indicator(self, enabled: bool) -> None:
         color = "#16a34a" if enabled else "#94a3b8"
@@ -1159,6 +1170,12 @@ class Dashboard(QWidget):
             self._refresh_sync_control()
             self._notify_telegram(f"⏹️ Đã dừng Farm: {self.config.profile(pid).name}")
         else:
+            if self.runner.sync_enabled:
+                self._warning(
+                    "Đồng bộ đang bật",
+                    "Hãy tắt đồng bộ chuột - bàn phím trước khi chạy Auto Farm.",
+                )
+                return
             self._disable_sync_for_automation("Farm")
             self.farm_profiles.add(pid)
             self.runner.restore_profile_windows({pid})
@@ -1272,6 +1289,12 @@ class Dashboard(QWidget):
         """Start or stop Farm without changing the selected Chrome sessions."""
         if self._farm_all_running:
             self._stop_all_farms()
+            return
+        if self.runner.sync_enabled:
+            self._warning(
+                "Đồng bộ đang bật",
+                "Hãy tắt đồng bộ chuột - bàn phím trước khi chạy Auto Farm.",
+            )
             return
         opened = self._opened_profile_ids()
         if len(opened) <= 1:
@@ -1823,6 +1846,7 @@ class Dashboard(QWidget):
         self.farm_all_button.setEnabled(
             True if self._farm_all_running else (
                 self._farm_launcher_phase not in {"opening", "quiescing", "stopping"}
+                and not self.runner.sync_enabled
                 and self._opened_profile_count() > 1
             )
         )

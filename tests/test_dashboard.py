@@ -543,12 +543,12 @@ def test_bulk_farm_button_starts_and_stops_without_closing_open_tabs() -> None:
     dashboard.farm_all_button = FakeActionButton()
     dashboard._log_lines = deque(maxlen=10)
     dashboard.log = FakeLogWidget()
-    dashboard.runner.sync_enabled = True
+    dashboard.runner.sync_enabled = False
 
     dashboard._farm_all_action()
 
     assert dashboard.runner.sync_enabled is False
-    assert dashboard.runner.disable_sync_calls == 1
+    assert dashboard.runner.disable_sync_calls == 0
     assert dashboard._farm_all_running is True
     assert dashboard.runner.restore_calls == [{"account-1", "account-2"}]
     assert dashboard.farm_all_button.text == "Dừng Farm"
@@ -569,6 +569,35 @@ def test_bulk_farm_button_starts_and_stops_without_closing_open_tabs() -> None:
         ("account-2", CommandKind.STOP_FARM),
     }
     assert dashboard.runner.opened == {"account-1", "account-2"}
+
+
+def test_bulk_farm_cannot_silently_disable_active_profile_sync() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.config = SimpleNamespace(
+        profiles=[SimpleNamespace(id="account-1"), SimpleNamespace(id="account-2")]
+    )
+    dashboard.runner = FakeFarmRunner({"account-1", "account-2"})
+    dashboard.runner.sync_enabled = True
+    dashboard.rows = {}
+    dashboard.farm_profiles = set()
+    dashboard._farm_all_running = False
+    dashboard._farm_launcher_phase = "ready"
+    dashboard.farm_all_button = FakeActionButton()
+    warnings = []
+    dashboard._warning = lambda title, message: warnings.append((title, message))
+
+    dashboard._farm_all_action()
+
+    assert dashboard.runner.sync_enabled is True
+    assert dashboard.runner.disable_sync_calls == 0
+    assert dashboard.runner.commands == []
+    assert dashboard.farm_profiles == set()
+    assert warnings == [
+        (
+            "Đồng bộ đang bật",
+            "Hãy tắt đồng bộ chuột - bàn phím trước khi chạy Auto Farm.",
+        )
+    ]
 
 
 def test_autofarms_does_not_stop_independent_monitoring() -> None:
