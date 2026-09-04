@@ -52,6 +52,44 @@ def test_sync_routes_master_event_only_to_open_followers() -> None:
     assert runner.workers["follower-closed"].commands == []
 
 
+def test_sync_dispatch_log_contains_source_ratio_for_remote_diagnostics() -> None:
+    runner = make_runner()
+    records: list[tuple[str, dict[str, object]]] = []
+    runner.event_log = SimpleNamespace(
+        write=lambda event, payload: records.append((event, payload))
+    )
+    event = {
+        "sequence": 17,
+        "type": "pointerdown",
+        "canvas": {
+            "ratio_x": 0.75,
+            "ratio_y": 0.5,
+            "css_width": 1920.0,
+            "css_height": 1080.0,
+        },
+    }
+
+    runner._on_input("master", event)
+
+    assert records == [
+        (
+            "sync_input_dispatched",
+            {
+                "master_profile_id": "master",
+                "type": "pointerdown",
+                "target_count": 1,
+                "sequence": 17,
+                "source": {
+                    "ratio_x": 0.75,
+                    "ratio_y": 0.5,
+                    "css_width": 1920.0,
+                    "css_height": 1080.0,
+                },
+            },
+        )
+    ]
+
+
 def test_sync_routes_keyboard_event_to_open_followers() -> None:
     runner = make_runner()
     event = {

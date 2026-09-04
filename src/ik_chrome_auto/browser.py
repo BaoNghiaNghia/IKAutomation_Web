@@ -1743,11 +1743,12 @@ class ChromeProfileSession:
                 events.append(row)
         return events
 
-    def apply_synced_input(self, event: dict[str, Any]) -> None:
+    def apply_synced_input(self, event: dict[str, Any]) -> dict[str, float] | None:
+        """Apply one mirrored event and return its resolved pointer transform."""
         event_type = str(event.get("type", ""))
         if event_type in {"keydown", "keyup"}:
             self._apply_synced_keyboard_input(event, event_type)
-            return
+            return None
         box = self._synced_pointer_target_box(event)
         x, y = calculate_target_point(event, box)
         button_number = int(event.get("pointer", {}).get("button", 0))
@@ -1773,6 +1774,14 @@ class ChromeProfileSession:
                 float(wheel.get("delta_x", 0.0)),
                 float(wheel.get("delta_y", 0.0)),
             )
+        return {
+            "x": round(float(x), 3),
+            "y": round(float(y), 3),
+            "surface_x": round(float(box.get("x", 0.0)), 3),
+            "surface_y": round(float(box.get("y", 0.0)), 3),
+            "surface_width": round(float(box["width"]), 3),
+            "surface_height": round(float(box["height"]), 3),
+        }
 
     def _synced_pointer_target_box(self, event: dict[str, Any]) -> dict[str, float]:
         """Resolve and retain one canvas-local transform for a complete gesture.

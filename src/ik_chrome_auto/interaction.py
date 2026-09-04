@@ -264,6 +264,13 @@ def validate_viewport(width: int, height: int) -> tuple[int, int]:
 
 
 def calculate_target_point(event: dict[str, Any], box: dict[str, float]) -> tuple[float, float]:
+    """Map a source gesture to one follower's canvas-local surface.
+
+    Source CSS/backing dimensions are intentionally ignored. The probe has
+    already reduced the master point to ratios, so maximizing the master (or
+    restoring it) cannot change the logical point sent to compact followers.
+    Only the follower's current width/height participate in this transform.
+    """
     canvas = event.get("canvas")
     if isinstance(canvas, dict):
         ratio_x = float(canvas.get("ratio_x", 0.0))

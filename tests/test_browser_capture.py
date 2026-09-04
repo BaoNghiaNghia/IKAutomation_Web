@@ -584,7 +584,7 @@ def test_synced_pointer_dispatches_through_profile_cdp_not_page_mouse() -> None:
         down=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must use CDP")),
     )
 
-    session.apply_synced_input(
+    resolved = session.apply_synced_input(
         {
             "type": "pointerdown",
             "canvas": {"ratio_x": 0.25, "ratio_y": 0.5, "index": 0},
@@ -606,6 +606,14 @@ def test_synced_pointer_dispatches_through_profile_cdp_not_page_mouse() -> None:
             },
         )
     ]
+    assert resolved == {
+        "x": 320.0,
+        "y": 360.0,
+        "surface_x": 0.0,
+        "surface_y": 0.0,
+        "surface_width": 1280.0,
+        "surface_height": 720.0,
+    }
 
 
 def test_escape_is_dispatched_without_focusing_real_window() -> None:

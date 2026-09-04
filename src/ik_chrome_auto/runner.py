@@ -770,7 +770,21 @@ class ProfileWorker:
                         sync_event = dict(command.payload["event"])
                     if self.session is not None:
                         try:
-                            self._apply_synced_input_with_retry(sync_event)
+                            resolved = self._apply_synced_input_with_retry(sync_event)
+                            if str(sync_event.get("type", "")) in {
+                                "pointerdown",
+                                "pointerup",
+                                "wheel",
+                            }:
+                                self.event_log.write(
+                                    "sync_input_applied",
+                                    {
+                                        "profile_id": self.profile.id,
+                                        "type": str(sync_event.get("type", "")),
+                                        "sequence": int(sync_event.get("sequence", 0) or 0),
+                                        "resolved": resolved,
+                                    },
+                                )
                         except Exception as error:
                             # One transient frame navigation must not mark the
                             # whole profile Error or disable subsequent input.
@@ -868,20 +882,21 @@ class ProfileWorker:
             self._sync_move_command_queued = False
         return event
 
-    def _apply_synced_input_with_retry(self, event: dict[str, Any]) -> None:
+    def _apply_synced_input_with_retry(
+        self, event: dict[str, Any]
+    ) -> dict[str, float] | None:
         """Retry once after repairing a follower's stale frame/CDP runtime."""
         if self.session is None:
             return
         try:
-            self.session.apply_synced_input(event)
-            return
+            return self.session.apply_synced_input(event)
         except Exception as first_error:
             repair = getattr(self.session, "repair_synced_input_runtime", None)
             if not callable(repair):
                 raise
             repair()
             try:
-                self.session.apply_synced_input(event)
+                resolved = self.session.apply_synced_input(event)
             except Exception:
                 raise first_error
             self.event_log.write(
@@ -891,6 +906,7 @@ class ProfileWorker:
                     "type": str(event.get("type", "")),
                 },
             )
+            return resolved
 
     def _poll_browser_events(self) -> None:
         if self.session is None:
@@ -4085,12 +4101,30 @@ class MultiProfileRunner:
                 worker.submit(WorkerCommand(CommandKind.SYNC_INPUT, {"event": event}))
             delivered += 1
         if event_type in {"pointerdown", "pointerup", "keydown", "keyup"}:
+            canvas = event.get("canvas")
+            viewport = event.get("viewport")
+            source_point = canvas if isinstance(canvas, dict) else viewport
             self.event_log.write(
                 "sync_input_dispatched",
                 {
                     "master_profile_id": source_profile_id,
                     "type": event_type,
                     "target_count": delivered,
+                    "sequence": int(event.get("sequence", 0) or 0),
+                    "source": {
+                        key: source_point.get(key)
+                        for key in (
+                            "ratio_x",
+                            "ratio_y",
+                            "css_x",
+                            "css_y",
+                            "css_width",
+                            "css_height",
+                            "backing_width",
+                            "backing_height",
+                        )
+                        if isinstance(source_point, dict) and key in source_point
+                    },
                 },
             )
 
