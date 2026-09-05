@@ -776,7 +776,7 @@ def test_sync_probe_is_rearmed_for_a_retained_browser_frame() -> None:
     assert id(frame) in session._configured_frames
 
 
-def test_sync_arms_only_the_game_canvas_frame() -> None:
+def test_sync_arms_every_frame_to_survive_nested_game_iframe_replacement() -> None:
     class Frame:
         def __init__(self, url: str) -> None:
             self.url = url
@@ -798,12 +798,10 @@ def test_sync_arms_only_the_game_canvas_frame() -> None:
     session._drag_item_visible = False
     session._scrollbars_visible = False
     session._configured_frames = {}
-    session._sync_capture_frame = lambda: game
-
     armed = session._repair_and_count_sync_frames()
 
-    assert armed == 1
-    assert portal.arguments == [[False, False]]
+    assert armed == 2
+    assert portal.arguments == [[True, False]]
     assert game.arguments == [[True, False]]
 
 

@@ -242,7 +242,7 @@ class Dashboard(QWidget):
         for index, (label, value) in enumerate((("Tổng profile",self.total),("Đang mở",self.opened),("RAM Chrome",self.ram),("CPU Chrome",self.cpu))):
             cell = QWidget(); cl = QVBoxLayout(cell); cl.setContentsMargins(0,0,0,0); cl.setSpacing(1); caption = self._muted(label); caption.setStyleSheet(f"color:#62758e;background:transparent;font-size:{self._responsive_caption_font_pt}pt;"); value.setStyleSheet(f"font-size:{self._responsive_value_font_pt}pt;font-weight:700;"); self._overview_typography.append((caption, value)); cl.addWidget(caption); cl.addWidget(value); ol.addWidget(cell, index // 2, index % 2)
         ll.addWidget(overview)
-        accounts = self._card(); al = QVBoxLayout(accounts); al.addWidget(StrongBodyLabel("Tài khoản Chrome")); al.addWidget(self._muted("Mỗi tài khoản có một phiên browser riêng, lưu cục bộ."))
+        accounts = self._card(); al = QVBoxLayout(accounts); al.addWidget(StrongBodyLabel("Tài khoản Chrome"))
         manage = PushButton(FIF.PEOPLE, "Quản lý"); self._manage_button = manage; self._configure_labeled_action_button(manage, FIF.PEOPLE, "#087f8c"); manage.setFixedHeight(self._responsive_control_height); self._set_labeled_action_style(manage, f"QPushButton {{ background:#ffffff; border:1px solid #8ad7d9; border-radius:{_ui_px(8)}px; color:#087f8c; }} QPushButton:hover {{ background:#effcfb; border-color:#0ea5a5; }}"); manage.clicked.connect(self._manage_accounts)
         self.farm_launcher = PrimaryPushButton(FIF.PLAY, "Khởi động"); self._configure_labeled_action_button(self.farm_launcher, FIF.PLAY, "#ffffff"); self.farm_launcher.setFixedHeight(self._responsive_control_height); self._set_labeled_action_style(self.farm_launcher, f"QPushButton {{ background:#2563eb; border:1px solid #2563eb; border-radius:{_ui_px(8)}px; color:#ffffff; font-weight:600; }} QPushButton:hover {{ background:#1d4ed8; border-color:#1d4ed8; }} QPushButton:disabled {{ background:#93c5fd; border-color:#93c5fd; color:#eff6ff; }}"); self.farm_launcher.clicked.connect(self._farm_launcher_action)
         self.farm_all_button = PushButton(FIF.LEAF, "AutoFarms"); self._configure_labeled_action_button(self.farm_all_button, FIF.LEAF, "#64748b"); self.farm_all_button.setFixedHeight(self._responsive_control_height); self.farm_all_button.setEnabled(False); self.farm_all_button.clicked.connect(self._farm_all_action)
@@ -271,7 +271,6 @@ class Dashboard(QWidget):
         sync_section_layout = QVBoxLayout(self.sync_section)
         sync_section_layout.setContentsMargins(0, 0, 0, 0)
         sync_section_layout.setSpacing(_ui_px(7))
-        sync_section_layout.addWidget(self._muted("Chọn profile master để đồng bộ chuột và bàn phím."))
         sync = QHBoxLayout()
         self.master = ComboBox()
         sync.addWidget(self.master, 1)
