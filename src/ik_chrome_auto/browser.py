@@ -44,6 +44,7 @@ from ik_chrome_auto.windows import (
     is_window_minimized,
     move_window_position,
     move_window_renderer,
+    raise_window_above_profile_peers,
     set_window_minimized,
     set_taskbar_group,
     set_topmost as set_native_topmost,
@@ -867,16 +868,19 @@ class ChromeProfileSession:
             renderer = get_renderer_rect(hwnd)
             resized = renderer.width < width or renderer.height < height
             layout = AutomationRendererLayout(outer=outer, renderer=renderer, resized=resized)
-            if not resized:
-                return layout
-            move_window_renderer(
-                hwnd,
-                outer.left,
-                outer.top,
-                width,
-                height,
-                topmost=self._topmost,
-            )
+            if resized:
+                move_window_renderer(
+                    hwnd,
+                    outer.left,
+                    outer.top,
+                    width,
+                    height,
+                    topmost=self._topmost,
+                )
+            # The active renderer must cover the compact profile grid while
+            # Farm/Monitoring owns it. This changes only sibling z-order, not
+            # the user's permanent “always on top” preference.
+            raise_window_above_profile_peers(hwnd)
             # Chromium needs a short settle period before its WebGL canvas reflects
             # the native renderer dimensions in a DevTools screenshot.
             self.pump(220)

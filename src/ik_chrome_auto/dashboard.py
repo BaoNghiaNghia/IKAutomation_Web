@@ -1146,32 +1146,43 @@ class Dashboard(QWidget):
             and not getattr(self, "_monitor_batch_profiles", set())
         ):
             # The first monitor pass only establishes a clean mailbox. Do
-            # not release this group yet: immediately run the usual Combat
-            # pass for these exact members before admitting the next five.
+            # not start Combat for an early five-member group: complete the
+            # one global baseline pass across every open profile first.
             if getattr(self, "_monitor_batch_phase", "") == "baseline":
-                members = getattr(self, "_monitor_batch_members", ())
-                follow_up = [
-                    member
-                    for member in members
-                    if member in self._monitor_initialized_profiles
-                    and self.runner.has_open_session(member)
-                ]
-                if follow_up:
-                    self._monitor_batch_phase = "combat"
-                    self._monitor_batch_pending = deque(follow_up)
-                    self._monitor_batch_profiles = set(follow_up)
-                    self._monitor_next_profile_at = (
-                        time.monotonic() + MONITOR_GROUP_PAUSE_SECONDS
-                    )
-                    self._append_log(
-                        f"Giám sát nhóm {self._monitor_cycle_number}: "
-                        f"đã xong lượt 1, chạy lượt 2 cho {len(follow_up)} profile"
-                    )
-                else:
+                remaining_baseline = any(
+                    profile.id not in self._monitor_initialized_profiles
+                    and self.runner.has_open_session(profile.id)
+                    for profile in self.config.profiles
+                )
+                if remaining_baseline:
+                    # Leave these completed members out of the next group and
+                    # continue the initial baseline queue. Lượt 2 begins only
+                    # after this condition becomes false for the whole fleet.
                     self._monitor_batch_members = ()
                     self._monitor_batch_phase = ""
                     self._monitor_next_batch_at = (
                         time.monotonic() + MONITOR_GROUP_PAUSE_SECONDS
+                    )
+                    self._append_log(
+                        f"Giám sát lượt 1: đã xong {profile_id}; tiếp tục baseline các profile còn lại"
+                    )
+                else:
+                    members = tuple(
+                        profile.id
+                        for profile in self.config.profiles
+                        if profile.id in self._monitor_initialized_profiles
+                        and self.runner.has_open_session(profile.id)
+                    )
+                    follow_up = list(members)
+                    self._monitor_batch_phase = "combat"
+                    self._monitor_batch_pending = deque(follow_up)
+                    self._monitor_batch_profiles = set(follow_up)
+                    self._monitor_batch_members = members
+                    self._monitor_next_profile_at = (
+                        time.monotonic() + MONITOR_GROUP_PAUSE_SECONDS
+                    )
+                    self._append_log(
+                        f"Giám sát lượt 1 hoàn tất; bắt đầu Lượt 2 cho {len(follow_up)} profile"
                     )
             else:
                 self._monitor_batch_members = ()

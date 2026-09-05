@@ -958,6 +958,28 @@ def move_window_position(hwnd: int, x: int, y: int, *, topmost: bool) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
+def raise_window_above_profile_peers(hwnd: int) -> None:
+    """Raise one normal window without making it permanently topmost.
+
+    Automation temporarily enlarges a profile over the compact grid.  HWND_TOP
+    keeps that renderer above sibling profile windows, while unlike HWND_TOPMOST
+    it does not pin the Chrome window above unrelated applications.
+    """
+    if not is_window(hwnd):
+        raise RuntimeError("Cửa sổ Chrome không còn tồn tại")
+    flags = 0x0001 | 0x0002 | 0x0010 | 0x0040  # no size/move/activate, show
+    if not _user32.SetWindowPos(
+        wintypes.HWND(hwnd),
+        wintypes.HWND(0),  # HWND_TOP
+        0,
+        0,
+        0,
+        0,
+        flags,
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 def move_window_outer(
     hwnd: int,
     x: int,

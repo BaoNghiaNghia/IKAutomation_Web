@@ -496,18 +496,37 @@ def test_monitor_completes_each_profile_flow_before_dispatching_the_next() -> No
     dashboard._handle_monitor_result(
         WorkerSnapshot("account-4", monitor_events=(MAIL_BASELINE,))
     )
+    # The first five profiles do not begin Lượt 2 yet: baseline must also
+    # finish for accounts 5 and 6 before the first combat scan is eligible.
+    assert dashboard._monitor_batch_phase == ""
+    dashboard._monitor_next_batch_at = 0.0
+    dashboard._advance_monitoring()
+    assert dashboard.runner.commands[-1] == (
+        "account-5", CommandKind.MONITOR_MAIL, {"initial_scan": True}
+    )
+    dashboard._handle_monitor_result(
+        WorkerSnapshot("account-5", monitor_events=(MAIL_BASELINE,))
+    )
+    dashboard._monitor_next_profile_at = 0.0
+    dashboard._advance_monitoring()
+    assert dashboard.runner.commands[-1] == (
+        "account-6", CommandKind.MONITOR_MAIL, {"initial_scan": True}
+    )
+    dashboard._handle_monitor_result(
+        WorkerSnapshot("account-6", monitor_events=(MAIL_BASELINE,))
+    )
     assert dashboard._monitor_batch_phase == "combat"
     assert list(dashboard._monitor_batch_pending) == [
-        "account-0", "account-1", "account-2", "account-3", "account-4"
+        "account-0", "account-1", "account-2", "account-3", "account-4", "account-5", "account-6"
     ]
-    # Lượt 2 is serial as well; it cannot begin until all five Lượt 1 flows
-    # have returned their baseline result.
+
+    # Only now may Lượt 2 repeat over the whole initialized fleet.
     dashboard._monitor_next_profile_at = 0.0
     dashboard._advance_monitoring()
     assert dashboard.runner.commands[-1] == (
         "account-0", CommandKind.MONITOR_MAIL, {"initial_scan": False}
     )
-    for profile_id in ("account-0", "account-1", "account-2", "account-3"):
+    for profile_id in ("account-0", "account-1", "account-2", "account-3", "account-4", "account-5"):
         dashboard._handle_monitor_result(
             WorkerSnapshot(profile_id, monitor_events=(NO_NEW_COMBAT_MAIL,))
         )
@@ -518,13 +537,13 @@ def test_monitor_completes_each_profile_flow_before_dispatching_the_next() -> No
             CommandKind.MONITOR_MAIL,
             {"initial_scan": False},
         )
-    dashboard._handle_monitor_result(
-        WorkerSnapshot("account-4", monitor_events=(NO_NEW_COMBAT_MAIL,))
-    )
+    dashboard._handle_monitor_result(WorkerSnapshot("account-6", monitor_events=(NO_NEW_COMBAT_MAIL,)))
     dashboard._monitor_next_batch_at = 0.0
+    dashboard._monitor_cycle_at = 0.0
     dashboard._advance_monitoring()
-    assert dashboard.runner.commands[-1][0] == "account-5"
-    assert list(dashboard._monitor_batch_pending) == ["account-6"]
+    assert dashboard.runner.commands[-1] == (
+        "account-0", CommandKind.MONITOR_MAIL, {"initial_scan": False}
+    )
 
 
 def test_monitor_retries_the_same_profile_after_a_baseline_error() -> None:
