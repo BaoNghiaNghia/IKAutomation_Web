@@ -1732,6 +1732,20 @@ class ChromeProfileSession:
         self._ensure_page_runtime(page)
         self._configure_interaction_frames(force=True)
 
+    def prepare_synced_input_runtime(self) -> None:
+        """Refresh a follower's live game frame before a Sync session starts.
+
+        A profile may have completed its initial navigation while the dashboard
+        was opening the remaining Chrome windows.  Its Playwright page is
+        usable, but the iframe/canvas locators can still describe the previous
+        document until we run the normal interaction setup again.  Do this
+        once when Sync starts, without detaching the page CDP session used for
+        keyboard input.
+        """
+        self._sync_pointer_target_box = None
+        self._sync_last_target_box = None
+        self._configure_interaction_frames(force=True)
+
     def _repair_and_count_sync_frames(self) -> int:
         """Re-arm input capture in retained/reconnected Chrome documents."""
         armed = 0
@@ -1904,7 +1918,14 @@ class ChromeProfileSession:
             self._apply_synced_keyboard_input(event, event_type)
             return None
         box = self._synced_pointer_target_box(event)
-        x, y = calculate_target_point(event, box)
+        # ``calculate_target_point`` is deliberately canvas-local.  The
+        # Playwright mouse, unlike the CDP game dispatcher, consumes main-page
+        # viewport coordinates, so retain the live canvas left/top at this one
+        # final boundary.  Dropping it made every compact grid window receive
+        # clicks near its page origin instead of inside its game canvas.
+        surface_x, surface_y = calculate_target_point(event, box)
+        x = float(box.get("x", 0.0)) + surface_x
+        y = float(box.get("y", 0.0)) + surface_y
         button_number = int(event.get("pointer", {}).get("button", 0))
         button = {0: "left", 1: "middle", 2: "right"}.get(button_number, "left")
         point = ViewportPoint(x, y)
@@ -1955,16 +1976,23 @@ class ChromeProfileSession:
             frame = self._frame_for_input(event)
             canvas = event.get("canvas")
             if isinstance(canvas, dict):
-                box = self._canvas_box(frame, int(canvas.get("index", 0)))
+                box = self._canvas_page_box(frame, int(canvas.get("index", 0)))
             else:
-                box = self._frame_box(frame)
+                box = self._frame_page_box(frame)
         except Exception:
             cached = getattr(self, "_sync_last_target_box", None)
             box = dict(cached) if cached is not None else self._viewport_surface_box()
-        # Enforce the shared game origin at the final sync boundary as well.
-        # This protects the dispatcher if a future locator/frame fallback
-        # starts returning page-relative x/y again.
-        box = _origin_surface_box(box)
+        # The source event is normalized to the game canvas ratio.  Keep the
+        # target canvas's page position, however: Playwright's ``page.mouse``
+        # is iframe-aware but its arguments are main-page coordinates.  This
+        # is the sole page-coordinate conversion for mirrored input; it is not
+        # an iframe offset applied to the logical game point.
+        box = {
+            "x": float(box.get("x", 0.0)),
+            "y": float(box.get("y", 0.0)),
+            "width": max(1.0, float(box["width"])),
+            "height": max(1.0, float(box["height"])),
+        }
         self._sync_last_target_box = dict(box)
         if event_type == "pointerdown":
             self._sync_pointer_target_box = dict(box)
@@ -2154,6 +2182,42 @@ class ChromeProfileSession:
             # gives every profile a different origin in a large window grid.
             return _origin_surface_box(largest)
         return self._frame_box(frame)
+
+    def _canvas_page_box(self, frame: Frame, index: int) -> dict[str, float]:
+        """Return the largest game canvas in main-page CSS coordinates.
+
+        Sync is dispatched through Playwright's page mouse, so this path must
+        preserve its measured page position.  CDP game controls continue to
+        use ``_canvas_box`` and the canonical origin separately.
+        """
+        canvases = frame.locator("canvas")
+        boxes: list[dict[str, float]] = []
+        for candidate_index in range(canvases.count()):
+            box = canvases.nth(candidate_index).bounding_box()
+            if box and box["width"] > 0 and box["height"] > 0:
+                boxes.append(box)
+        if boxes:
+            largest = max(boxes, key=lambda item: item["width"] * item["height"])
+            return {
+                "x": float(largest.get("x", 0.0)),
+                "y": float(largest.get("y", 0.0)),
+                "width": float(largest["width"]),
+                "height": float(largest["height"]),
+            }
+        return self._frame_page_box(frame)
+
+    def _frame_page_box(self, frame: Frame) -> dict[str, float]:
+        if frame == self.page.main_frame:
+            return self._frame_box(frame)
+        box = frame.frame_element().bounding_box()
+        if box:
+            return {
+                "x": float(box.get("x", 0.0)),
+                "y": float(box.get("y", 0.0)),
+                "width": float(box["width"]),
+                "height": float(box["height"]),
+            }
+        raise RuntimeError("Không xác định được vị trí frame đích để đồng bộ thao tác")
 
     def _frame_box(self, frame: Frame) -> dict[str, float]:
         if frame == self.page.main_frame:

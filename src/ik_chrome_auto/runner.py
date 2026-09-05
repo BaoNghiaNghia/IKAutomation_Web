@@ -798,6 +798,26 @@ class ProfileWorker:
                             },
                         )
                     continue
+                if command.kind == CommandKind.PREPARE_SYNC_TARGET:
+                    if self.session is not None:
+                        try:
+                            self.session.prepare_synced_input_runtime()
+                            self.event_log.write(
+                                "sync_target_prepared",
+                                {"profile_id": self.profile.id},
+                            )
+                        except Exception as error:
+                            # Keep the target in the session: the normal
+                            # per-event recovery can still repair a frame that
+                            # finishes navigating after this preparation.
+                            self.event_log.write(
+                                "sync_target_prepare_error",
+                                {
+                                    "profile_id": self.profile.id,
+                                    "message": f"{type(error).__name__}: {error}",
+                                },
+                            )
+                    continue
                 if command.kind == CommandKind.SET_INSPECTOR:
                     self._inspector_enabled = bool(command.payload.get("enabled", False))
                     if self.session is not None:
@@ -3868,6 +3888,24 @@ class MultiProfileRunner:
         self.event_log.write(
             "sync_enabled",
             {"master_profile_id": master_id, "target_profile_ids": sorted(targets)},
+        )
+        # Force each follower to resolve its current game iframe/canvas once
+        # before the first gesture.  This avoids treating a freshly opened or
+        # independently opened profile as ready merely because its Chrome
+        # page exists while its game document has just been replaced.
+        prepared = 0
+        for profile_id in sorted(targets):
+            worker = self.workers.get(profile_id)
+            if worker is None or worker.session is None:
+                continue
+            worker.submit(WorkerCommand(CommandKind.PREPARE_SYNC_TARGET, {}))
+            prepared += 1
+        self.event_log.write(
+            "sync_targets_preparing",
+            {
+                "master_profile_id": master_id,
+                "target_count": prepared,
+            },
         )
         # Every worker starts as a follower. Only the old and new master need
         # a mode command; broadcasting 45 no-op commands delayed large syncs.

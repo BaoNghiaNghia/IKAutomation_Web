@@ -27,6 +27,7 @@ class CommandKind(StrEnum):
     RESIZE = "resize"
     SYNC_INPUT = "sync_input"
     SET_SYNC_SOURCE = "set_sync_source"
+    PREPARE_SYNC_TARGET = "prepare_sync_target"
     SET_INSPECTOR = "set_inspector"
     SET_DRAG_ITEM = "set_drag_item"
     SET_SCROLLBARS = "set_scrollbars"
