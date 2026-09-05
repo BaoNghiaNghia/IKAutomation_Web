@@ -39,6 +39,7 @@ class SyncInputEngine:
         self.enabled = False
         self.master_id: str | None = None
         self.target_ids: set[str] = set()
+        self._pending_pointer_down: dict[str, object] | None = None
 
     def enable(self, master_id: str, target_ids: set[str] | None = None) -> None:
         if master_id not in self._workers:
@@ -59,6 +60,7 @@ class SyncInputEngine:
             self.enabled = True
             self.master_id = master_id
             self.target_ids = targets
+            self._pending_pointer_down = None
         self._event_log.write(
             "sync_enabled",
             {"master_profile_id": master_id, "target_profile_ids": sorted(targets)},
@@ -95,6 +97,7 @@ class SyncInputEngine:
             self.enabled = False
             self.master_id = None
             self.target_ids.clear()
+            self._pending_pointer_down = None
         if was_enabled:
             self._event_log.write("sync_disabled", {"master_profile_id": previous_master})
         worker = self._workers.get(previous_master or "")
@@ -125,17 +128,35 @@ class SyncInputEngine:
                 return 0
             target_ids = set(self.target_ids)
         event_type = str(event.get("type", ""))
-        delivered = 0
-        for profile_id in target_ids:
-            worker = self._workers.get(profile_id)
-            if worker is None or worker.session is None:
-                continue
-            submit_synced_input = getattr(worker, "submit_synced_input", None)
-            if callable(submit_synced_input):
-                submit_synced_input(event)
-            else:
-                worker.submit(WorkerCommand(CommandKind.SYNC_INPUT, {"event": event}))
-            delivered += 1
+        # A normal click generates pointerdown and pointerup only a few
+        # milliseconds apart, while a 45-profile fan-out needs far longer.
+        # Enqueueing them separately makes a follower's release arrive after
+        # the game has discarded its stale press. Keep the pair together as a
+        # single worker command. A move turns the pending press into a drag
+        # and retains the ordinary pointer stream.
+        pending = self._pending_pointer_down
+        if event_type == "pointerdown":
+            if pending is not None:
+                self._dispatch_input(target_ids, pending)
+            self._pending_pointer_down = dict(event)
+            return 0
+        if event_type == "pointerup" and pending is not None:
+            self._pending_pointer_down = None
+            delivered = self._dispatch_click(target_ids, pending, event)
+            self._event_log.write(
+                "sync_click_dispatched",
+                {
+                    "master_profile_id": source_profile_id,
+                    "target_count": delivered,
+                    "down_sequence": int(pending.get("sequence", 0) or 0),
+                    "up_sequence": int(event.get("sequence", 0) or 0),
+                },
+            )
+            return delivered
+        if pending is not None:
+            self._pending_pointer_down = None
+            self._dispatch_input(target_ids, pending)
+        delivered = self._dispatch_input(target_ids, event)
         if event_type in {"pointerdown", "pointerup", "keydown", "keyup"}:
             canvas = event.get("canvas")
             viewport = event.get("viewport")
@@ -154,4 +175,36 @@ class SyncInputEngine:
                     },
                 },
             )
+        return delivered
+
+    def _dispatch_input(self, target_ids: set[str], event: dict[str, object]) -> int:
+        """Queue one non-atomic Sync event to every available follower."""
+        delivered = 0
+        for profile_id in target_ids:
+            worker = self._workers.get(profile_id)
+            if worker is None or worker.session is None:
+                continue
+            submit_synced_input = getattr(worker, "submit_synced_input", None)
+            if callable(submit_synced_input):
+                submit_synced_input(event)
+            else:
+                worker.submit(WorkerCommand(CommandKind.SYNC_INPUT, {"event": event}))
+            delivered += 1
+        return delivered
+
+    def _dispatch_click(
+        self,
+        target_ids: set[str],
+        down: dict[str, object],
+        up: dict[str, object],
+    ) -> int:
+        delivered = 0
+        for profile_id in target_ids:
+            worker = self._workers.get(profile_id)
+            if worker is None or worker.session is None:
+                continue
+            worker.submit(
+                WorkerCommand(CommandKind.SYNC_CLICK, {"down": down, "up": dict(up)})
+            )
+            delivered += 1
         return delivered

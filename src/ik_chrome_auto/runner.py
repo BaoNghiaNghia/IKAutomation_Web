@@ -904,6 +904,33 @@ class ProfileWorker:
                                 },
                             )
                     continue
+                if command.kind == CommandKind.SYNC_CLICK:
+                    if self.session is not None:
+                        down = dict(command.payload["down"])
+                        up = dict(command.payload["up"])
+                        try:
+                            # Both events execute in this one worker turn, so
+                            # a busy 45-profile fan-out cannot split a click.
+                            self._apply_synced_input_with_retry(down)
+                            resolved = self._apply_synced_input_with_retry(up)
+                            self.event_log.write(
+                                "sync_click_applied",
+                                {
+                                    "profile_id": self.profile.id,
+                                    "down_sequence": int(down.get("sequence", 0) or 0),
+                                    "up_sequence": int(up.get("sequence", 0) or 0),
+                                    "resolved": resolved,
+                                },
+                            )
+                        except Exception as error:
+                            self.event_log.write(
+                                "sync_click_error",
+                                {
+                                    "profile_id": self.profile.id,
+                                    "message": f"{type(error).__name__}: {error}",
+                                },
+                            )
+                    continue
                 if command.kind == CommandKind.RESIZE:
                     width = int(command.payload["width"])
                     height = int(command.payload["height"])

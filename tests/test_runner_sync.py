@@ -41,14 +41,16 @@ def make_runner() -> MultiProfileRunner:
 
 def test_sync_routes_master_event_only_to_open_followers() -> None:
     runner = make_runner()
-    event = {"type": "pointerdown", "canvas": {"ratio_x": 0.5, "ratio_y": 0.5}}
+    down = {"type": "pointerdown", "sequence": 1, "canvas": {"ratio_x": 0.5, "ratio_y": 0.5}}
+    up = {"type": "pointerup", "sequence": 2, "canvas": {"ratio_x": 0.5, "ratio_y": 0.5}}
 
-    runner._on_input("master", event)
+    runner._on_input("master", down)
+    runner._on_input("master", up)
 
     follower = runner.workers["follower-open"]
     assert len(follower.commands) == 1
-    assert follower.commands[0].kind == CommandKind.SYNC_INPUT
-    assert follower.commands[0].payload["event"] == event
+    assert follower.commands[0].kind == CommandKind.SYNC_CLICK
+    assert follower.commands[0].payload == {"down": down, "up": up}
     assert runner.workers["master"].commands == []
     assert runner.workers["follower-closed"].commands == []
 
@@ -60,7 +62,7 @@ def test_sync_dispatch_log_contains_source_ratio_for_remote_diagnostics() -> Non
         write=lambda event, payload: records.append((event, payload))
     )
     runner._sync_engine._event_log = runner.event_log
-    event = {
+    down = {
         "sequence": 17,
         "type": "pointerdown",
         "canvas": {
@@ -70,23 +72,19 @@ def test_sync_dispatch_log_contains_source_ratio_for_remote_diagnostics() -> Non
             "css_height": 1080.0,
         },
     }
+    up = {"sequence": 18, "type": "pointerup", "canvas": down["canvas"]}
 
-    runner._on_input("master", event)
+    runner._on_input("master", down)
+    runner._on_input("master", up)
 
     assert records == [
         (
-            "sync_input_dispatched",
+            "sync_click_dispatched",
             {
                 "master_profile_id": "master",
-                "type": "pointerdown",
                 "target_count": 1,
-                "sequence": 17,
-                "source": {
-                    "ratio_x": 0.75,
-                    "ratio_y": 0.5,
-                    "css_width": 1920.0,
-                    "css_height": 1080.0,
-                },
+                "down_sequence": 17,
+                "up_sequence": 18,
             },
         )
     ]
@@ -111,9 +109,11 @@ def test_sync_routes_input_only_to_selected_open_followers() -> None:
     runner.workers["follower-other"] = FakeWorker(object())
     runner.sync_target_ids = {"follower-open"}
 
-    runner._on_input("master", {"type": "pointerdown"})
+    runner._on_input("master", {"type": "pointerdown", "sequence": 1})
+    runner._on_input("master", {"type": "pointerup", "sequence": 2})
 
     assert len(runner.workers["follower-open"].commands) == 1
+    assert runner.workers["follower-open"].commands[0].kind == CommandKind.SYNC_CLICK
     assert runner.workers["follower-other"].commands == []
 
 

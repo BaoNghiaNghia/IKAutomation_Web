@@ -26,6 +26,7 @@ class CommandKind(StrEnum):
     SCREENSHOT = "screenshot"
     RESIZE = "resize"
     SYNC_INPUT = "sync_input"
+    SYNC_CLICK = "sync_click"
     SET_SYNC_SOURCE = "set_sync_source"
     PREPARE_SYNC_TARGET = "prepare_sync_target"
     SET_INSPECTOR = "set_inspector"
