@@ -32,6 +32,7 @@ from ik_chrome_auto.models import (
 from ik_chrome_auto.reader import redact
 from ik_chrome_auto.resource_area_points import ResourceAreaPointSelector
 from ik_chrome_auto.storage import upscale_png_for_diagnostics, write_retained_png
+from ik_chrome_auto.sync_engine import SyncInputEngine
 from ik_chrome_auto.mail_monitor import (
     COMBAT_MAIL_OTHER,
     MAIL_BASELINE,
@@ -3770,10 +3771,7 @@ class MultiProfileRunner:
         self.on_coordinate = on_coordinate or (lambda _profile_id, _event: None)
         self.event_log = JsonLineLog(config.data_dir / "logs" / "events.jsonl")
         self.workers: dict[str, ProfileWorker] = {}
-        self.sync_enabled = False
-        self.sync_master_id: str | None = None
-        self.sync_target_ids: set[str] = set()
-        self._sync_last_pointer_move_at = 0.0
+        self._sync_engine = SyncInputEngine(self.workers, self.event_log)
         self.drag_items_visible = False
         self.scrollbars_visible = False
         self.windows_topmost = False
@@ -3784,12 +3782,37 @@ class MultiProfileRunner:
         self._grid_slots: dict[str, tuple[int, int, int, int]] = {}
         self._grid_slot_order: tuple[str, ...] = ()
         self._resource_cpu_samples: dict[str, tuple[float, float]] = {}
-        self._sync_lock = threading.Lock()
         # A compact 5-column grid must never create five concurrent 720p
         # WebGL surfaces. Workers lease this lock only while real pixels are
         # required for Farm or mail recognition.
         self._automation_renderer_lock = threading.Lock()
         self.sync_profiles()
+
+    # Compatibility façade for the dashboard.  The state itself is owned by
+    # SyncInputEngine, not by Farm or Monitor code in this runner.
+    @property
+    def sync_enabled(self) -> bool:
+        return self._sync_engine.enabled
+
+    @sync_enabled.setter
+    def sync_enabled(self, value: bool) -> None:
+        self._sync_engine.enabled = bool(value)
+
+    @property
+    def sync_master_id(self) -> str | None:
+        return self._sync_engine.master_id
+
+    @sync_master_id.setter
+    def sync_master_id(self, value: str | None) -> None:
+        self._sync_engine.master_id = value
+
+    @property
+    def sync_target_ids(self) -> set[str]:
+        return self._sync_engine.target_ids
+
+    @sync_target_ids.setter
+    def sync_target_ids(self, value: set[str]) -> None:
+        self._sync_engine.target_ids = set(value)
 
     def sync_profiles(self) -> None:
         configured = {profile.id: profile for profile in self.config.profiles}
@@ -3818,9 +3841,7 @@ class MultiProfileRunner:
         # stale button signal, scheduler callback, or future API caller cannot
         # silently start an autonomous input producer behind Sync's back.
         if kind in {CommandKind.START_FARM, CommandKind.MONITOR_MAIL}:
-            with self._sync_lock:
-                sync_enabled = self.sync_enabled
-            if sync_enabled:
+            if self.sync_enabled:
                 self.event_log.write(
                     "input_owner_conflict_blocked",
                     {
@@ -3835,11 +3856,10 @@ class MultiProfileRunner:
         self.workers[profile_id].submit(WorkerCommand(kind, dict(payload)))
 
     def enable_mail_monitor(self, profile_ids: set[str]) -> None:
-        with self._sync_lock:
-            if self.sync_enabled:
-                raise RuntimeError(
-                    "Hãy tắt đồng bộ chuột - bàn phím trước khi bật Giám sát"
-                )
+        if self.sync_enabled:
+            raise RuntimeError(
+                "Hãy tắt đồng bộ chuột - bàn phím trước khi bật Giám sát"
+            )
         for profile_id in profile_ids:
             worker = self.workers.get(profile_id)
             if worker is not None:
@@ -3870,59 +3890,7 @@ class MultiProfileRunner:
                 self.submit(profile.id, CommandKind.RESIZE, width=width, height=height)
 
     def enable_sync(self, master_id: str, target_ids: set[str] | None = None) -> None:
-        if master_id not in self.workers:
-            raise KeyError(f"Không tìm thấy profile master: {master_id}")
-        targets = (
-            {profile_id for profile_id in self.workers if profile_id != master_id}
-            if target_ids is None
-            else {profile_id for profile_id in target_ids if profile_id in self.workers and profile_id != master_id}
-        )
-        if not targets:
-            raise ValueError("Hãy chọn ít nhất một profile nhận đồng bộ")
-        with self._sync_lock:
-            previous_master = self.sync_master_id if self.sync_enabled else None
-            self.sync_enabled = True
-            self.sync_master_id = master_id
-            self.sync_target_ids = targets
-            self._sync_last_pointer_move_at = 0.0
-        self.event_log.write(
-            "sync_enabled",
-            {"master_profile_id": master_id, "target_profile_ids": sorted(targets)},
-        )
-        # Coordinate inspection intentionally consumes pointer events so a
-        # user can measure controls without activating the game.  Leaving it
-        # armed on the selected master makes Sync look enabled while no mouse
-        # or keyboard event can ever reach ``__IK_SYNC_EVENTS``.  Sync owns
-        # the source, therefore always clear that mutually-exclusive mode
-        # before installing the source listener.
-        self.submit(master_id, CommandKind.SET_INSPECTOR, enabled=False)
-        self.event_log.write(
-            "sync_source_inspector_disabled",
-            {"profile_id": master_id},
-        )
-        # Force each follower to resolve its current game iframe/canvas once
-        # before the first gesture.  This avoids treating a freshly opened or
-        # independently opened profile as ready merely because its Chrome
-        # page exists while its game document has just been replaced.
-        prepared = 0
-        for profile_id in sorted(targets):
-            worker = self.workers.get(profile_id)
-            if worker is None or worker.session is None:
-                continue
-            worker.submit(WorkerCommand(CommandKind.PREPARE_SYNC_TARGET, {}))
-            prepared += 1
-        self.event_log.write(
-            "sync_targets_preparing",
-            {
-                "master_profile_id": master_id,
-                "target_count": prepared,
-            },
-        )
-        # Every worker starts as a follower. Only the old and new master need
-        # a mode command; broadcasting 45 no-op commands delayed large syncs.
-        if previous_master is not None and previous_master != master_id:
-            self.submit(previous_master, CommandKind.SET_SYNC_SOURCE, enabled=False)
-        self.submit(master_id, CommandKind.SET_SYNC_SOURCE, enabled=True)
+        self._sync_engine.enable(master_id, target_ids)
 
     def add_sync_target(self, profile_id: str) -> bool:
         """Add one ready follower without disturbing the active master.
@@ -3932,42 +3900,10 @@ class MultiProfileRunner:
         that one membership change re-armed the master and could drop the
         next gesture while its game iframe was being configured again.
         """
-        with self._sync_lock:
-            if (
-                not self.sync_enabled
-                or profile_id == self.sync_master_id
-                or profile_id not in self.workers
-                or profile_id in self.sync_target_ids
-            ):
-                return False
-            self.sync_target_ids.add(profile_id)
-            master_id = self.sync_master_id
-            targets = sorted(self.sync_target_ids)
-        self.event_log.write(
-            "sync_target_added",
-            {
-                "master_profile_id": master_id,
-                "profile_id": profile_id,
-                "target_profile_ids": targets,
-            },
-        )
-        return True
+        return self._sync_engine.add_target(profile_id)
 
     def disable_sync(self) -> None:
-        with self._sync_lock:
-            was_enabled = self.sync_enabled
-            previous_master = self.sync_master_id
-            self.sync_enabled = False
-            self.sync_master_id = None
-            self.sync_target_ids.clear()
-            self._sync_last_pointer_move_at = 0.0
-        if was_enabled:
-            self.event_log.write(
-                "sync_disabled",
-                {"master_profile_id": previous_master},
-            )
-        if previous_master is not None and previous_master in self.workers:
-            self.submit(previous_master, CommandKind.SET_SYNC_SOURCE, enabled=False)
+        self._sync_engine.disable()
 
     def set_inspector(self, profile_id: str, enabled: bool) -> None:
         self.submit(profile_id, CommandKind.SET_INSPECTOR, enabled=enabled)
@@ -4312,53 +4248,7 @@ class MultiProfileRunner:
         return trimmed
 
     def _on_input(self, source_profile_id: str, event: dict[str, object]) -> None:
-        with self._sync_lock:
-            enabled = self.sync_enabled
-            master_id = self.sync_master_id
-            target_ids = set(self.sync_target_ids)
-        if not enabled or source_profile_id != master_id:
-            return
-        event_type = str(event.get("type", ""))
-        # Do not throttle here. Each follower retains at most one pending
-        # pointermove, so the fan-out queue stays bounded without discarding
-        # the source trajectory globally for all 44 devices.
-        delivered = 0
-        for profile_id, worker in self.workers.items():
-            if profile_id not in target_ids or worker.session is None:
-                continue
-            submit_synced_input = getattr(worker, "submit_synced_input", None)
-            if callable(submit_synced_input):
-                submit_synced_input(event)
-            else:
-                worker.submit(WorkerCommand(CommandKind.SYNC_INPUT, {"event": event}))
-            delivered += 1
-        if event_type in {"pointerdown", "pointerup", "keydown", "keyup"}:
-            canvas = event.get("canvas")
-            viewport = event.get("viewport")
-            source_point = canvas if isinstance(canvas, dict) else viewport
-            self.event_log.write(
-                "sync_input_dispatched",
-                {
-                    "master_profile_id": source_profile_id,
-                    "type": event_type,
-                    "target_count": delivered,
-                    "sequence": int(event.get("sequence", 0) or 0),
-                    "source": {
-                        key: source_point.get(key)
-                        for key in (
-                            "ratio_x",
-                            "ratio_y",
-                            "css_x",
-                            "css_y",
-                            "css_width",
-                            "css_height",
-                            "backing_width",
-                            "backing_height",
-                        )
-                        if isinstance(source_point, dict) and key in source_point
-                    },
-                },
-            )
+        self._sync_engine.dispatch(source_profile_id, event)
 
     def stop_all(self) -> None:
         for worker in self.workers.values():

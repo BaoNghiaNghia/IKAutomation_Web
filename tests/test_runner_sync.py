@@ -10,6 +10,7 @@ import pytest
 import ik_chrome_auto.runner as runner_module
 from ik_chrome_auto.models import CommandKind, WorkerCommand
 from ik_chrome_auto.runner import MultiProfileRunner, ProfileWorker
+from ik_chrome_auto.sync_engine import SyncInputEngine
 from ik_chrome_auto.windows import ProcessResourceUsage
 from ik_chrome_auto.windows import WindowRect
 
@@ -25,16 +26,16 @@ class FakeWorker:
 
 def make_runner() -> MultiProfileRunner:
     runner = MultiProfileRunner.__new__(MultiProfileRunner)
-    runner.sync_enabled = True
-    runner.sync_master_id = "master"
-    runner.sync_target_ids = {"follower-open", "follower-closed"}
-    runner._sync_lock = threading.Lock()
     runner.event_log = SimpleNamespace(write=lambda _event, _payload: None)
     runner.workers = {
         "master": FakeWorker(object()),
         "follower-open": FakeWorker(object()),
         "follower-closed": FakeWorker(None),
     }
+    runner._sync_engine = SyncInputEngine(runner.workers, runner.event_log)
+    runner._sync_engine.enabled = True
+    runner._sync_engine.master_id = "master"
+    runner._sync_engine.target_ids = {"follower-open", "follower-closed"}
     return runner
 
 
@@ -58,6 +59,7 @@ def test_sync_dispatch_log_contains_source_ratio_for_remote_diagnostics() -> Non
     runner.event_log = SimpleNamespace(
         write=lambda event, payload: records.append((event, payload))
     )
+    runner._sync_engine._event_log = runner.event_log
     event = {
         "sequence": 17,
         "type": "pointerdown",
@@ -117,9 +119,9 @@ def test_sync_routes_input_only_to_selected_open_followers() -> None:
 
 def test_enable_sync_keeps_only_selected_targets_and_marks_master_as_source() -> None:
     runner = make_runner()
-    runner.sync_enabled = False
-    runner.sync_master_id = None
-    runner.sync_target_ids.clear()
+    runner._sync_engine.enabled = False
+    runner._sync_engine.master_id = None
+    runner._sync_engine.target_ids.clear()
 
     runner.enable_sync("master", {"follower-open", "missing", "master"})
 
@@ -138,6 +140,7 @@ def test_add_sync_target_does_not_rearm_or_reset_the_active_master() -> None:
     runner.event_log = SimpleNamespace(
         write=lambda event, payload: records.append((event, payload))
     )
+    runner._sync_engine._event_log = runner.event_log
     runner.workers["follower-new"] = FakeWorker(object())
 
     assert runner.add_sync_target("follower-new") is True
@@ -200,6 +203,7 @@ def test_large_sync_fans_out_every_move_and_never_drops_pointer_up() -> None:
         "master": FakeWorker(object()),
         **{profile_id: FakeWorker(object()) for profile_id in followers},
     }
+    runner._sync_engine._workers = runner.workers
     runner.sync_target_ids = followers
     runner._on_input("master", {"type": "pointermove", "sequence": 1})
     runner._on_input("master", {"type": "pointermove", "sequence": 2})
