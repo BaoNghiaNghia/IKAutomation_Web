@@ -16,6 +16,7 @@ from urllib.request import urlopen
 
 from ik_chrome_auto.interaction import (
     INTERACTION_PROBE,
+    INTERACTION_PROBE_VERSION,
     calculate_target_point,
     validate_viewport,
 )
@@ -1760,8 +1761,9 @@ class ChromeProfileSession:
         for frame in self.page.frames:
             try:
                 probe_installed = frame.evaluate(
-                    """() => Boolean(
+                    f"""() => Boolean(
                         window.__IK_INTERACTION_PROBE_INSTALLED &&
+                        window.__IK_INTERACTION_PROBE_VERSION === {INTERACTION_PROBE_VERSION} &&
                         typeof window.__IK_SET_INTERACTION_MODES === 'function'
                     )"""
                 )
@@ -1786,11 +1788,12 @@ class ChromeProfileSession:
                         window.__IK_SET_INTERACTION_MODES(syncSource, inspectEnabled);
                         return Boolean(
                             window.__IK_INTERACTION_PROBE_INSTALLED &&
+                            window.__IK_INTERACTION_PROBE_VERSION === __IK_PROBE_VERSION__ &&
                             Array.isArray(window.__IK_SYNC_EVENTS) &&
                             typeof window.__IK_SET_INTERACTION_MODES === 'function' &&
                             window.__IK_SYNC_SOURCE === Boolean(syncSource)
                         );
-                    }""",
+                    }""".replace("__IK_PROBE_VERSION__", str(INTERACTION_PROBE_VERSION)),
                     [self._sync_source, self._inspector_enabled],
                 )
                 if ready:
@@ -1813,8 +1816,9 @@ class ChromeProfileSession:
         for frame in self.page.frames:
             try:
                 if frame.evaluate(
-                    """() => Boolean(
+                    f"""() => Boolean(
                         window.__IK_INTERACTION_PROBE_INSTALLED &&
+                        window.__IK_INTERACTION_PROBE_VERSION === {INTERACTION_PROBE_VERSION} &&
                         Array.isArray(window.__IK_SYNC_EVENTS) &&
                         typeof window.__IK_SET_INTERACTION_MODES === 'function' &&
                         window.__IK_SYNC_SOURCE === true

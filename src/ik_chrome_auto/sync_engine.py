@@ -7,6 +7,7 @@ fan-out, so changes to autonomous workflows cannot alter Sync behaviour.
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import MutableMapping
 from typing import Any, Protocol
 
@@ -40,6 +41,8 @@ class SyncInputEngine:
         self.master_id: str | None = None
         self.target_ids: set[str] = set()
         self._pending_pointer_down: dict[str, object] | None = None
+        self._last_source_fingerprint: tuple[object, ...] | None = None
+        self._last_source_at = 0.0
 
     def enable(self, master_id: str, target_ids: set[str] | None = None) -> None:
         if master_id not in self._workers:
@@ -61,6 +64,8 @@ class SyncInputEngine:
             self.master_id = master_id
             self.target_ids = targets
             self._pending_pointer_down = None
+            self._last_source_fingerprint = None
+            self._last_source_at = 0.0
         self._event_log.write(
             "sync_enabled",
             {"master_profile_id": master_id, "target_profile_ids": sorted(targets)},
@@ -98,6 +103,8 @@ class SyncInputEngine:
             self.master_id = None
             self.target_ids.clear()
             self._pending_pointer_down = None
+            self._last_source_fingerprint = None
+            self._last_source_at = 0.0
         if was_enabled:
             self._event_log.write("sync_disabled", {"master_profile_id": previous_master})
         worker = self._workers.get(previous_master or "")
@@ -126,6 +133,19 @@ class SyncInputEngine:
         with self._lock:
             if not self.enabled or source_profile_id != self.master_id:
                 return 0
+            fingerprint = self._source_fingerprint(event)
+            now = time.monotonic()
+            # An open tab can briefly run its old and upgraded probes together.
+            # Ignore only the immediate duplicate of the same native event.
+            if (
+                event.get("captured_at")
+                and
+                fingerprint == self._last_source_fingerprint
+                and now - self._last_source_at < 0.08
+            ):
+                return 0
+            self._last_source_fingerprint = fingerprint
+            self._last_source_at = now
             target_ids = set(self.target_ids)
         event_type = str(event.get("type", ""))
         # A normal click generates pointerdown and pointerup only a few
@@ -176,6 +196,25 @@ class SyncInputEngine:
                 },
             )
         return delivered
+
+    @staticmethod
+    def _source_fingerprint(event: dict[str, object]) -> tuple[object, ...]:
+        """Identify duplicate observations of one physical source event."""
+        event_type = str(event.get("type", ""))
+        canvas = event.get("canvas")
+        viewport = event.get("viewport")
+        point = canvas if isinstance(canvas, dict) else viewport if isinstance(viewport, dict) else {}
+        keyboard = event.get("keyboard")
+        key_data = keyboard if isinstance(keyboard, dict) else {}
+        return (
+            event_type,
+            point.get("ratio_x"),
+            point.get("ratio_y"),
+            point.get("css_x"),
+            point.get("css_y"),
+            key_data.get("code"),
+            key_data.get("key"),
+        )
 
     def _dispatch_input(self, target_ids: set[str], event: dict[str, object]) -> int:
         """Queue one non-atomic Sync event to every available follower."""

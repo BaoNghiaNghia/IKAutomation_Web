@@ -3,9 +3,16 @@ from __future__ import annotations
 from typing import Any
 
 
+# Chrome profiles persist across app upgrades.  This version lets a live tab
+# replace an obsolete in-page probe instead of trusting its old installed flag.
+INTERACTION_PROBE_VERSION = 2
+
+
 INTERACTION_PROBE = r"""
 (() => {
-  if (window.__IK_INTERACTION_PROBE_INSTALLED) return;
+  const probeVersion = 2;
+  if (window.__IK_INTERACTION_PROBE_VERSION === probeVersion) return;
+  window.__IK_INTERACTION_PROBE_VERSION = probeVersion;
   window.__IK_INTERACTION_PROBE_INSTALLED = true;
   window.__IK_SYNC_SOURCE = false;
   window.__IK_INSPECT_ENABLED = false;
@@ -14,6 +21,7 @@ INTERACTION_PROBE = r"""
   window.__IK_COORDINATE_EVENTS = [];
   let pointerActive = false;
   let lastMoveAt = 0;
+  let lastPointerSample = null;
   let sequence = 0;
   const activeKeys = new Map();
 
@@ -130,6 +138,26 @@ INTERACTION_PROBE = r"""
     if (window.__IK_SYNC_EVENTS.length > 500) window.__IK_SYNC_EVENTS.splice(0, 100);
   };
 
+  // PointerEvent is preferred, but certain retained game iframes expose only
+  // MouseEvent to a listener installed after navigation. Mouse listeners are
+  // therefore a fallback; suppress their normal PointerEvent counterpart.
+  const rememberPointer = (event, type) => {
+    lastPointerSample = {
+      type,
+      x: Number(event.clientX || 0),
+      y: Number(event.clientY || 0),
+      button: Number(event.button ?? 0),
+      at: performance.now()
+    };
+  };
+  const isMouseDuplicateOfPointer = (event, type) => {
+    if (!lastPointerSample || lastPointerSample.type !== type) return false;
+    return performance.now() - lastPointerSample.at < 80 &&
+      lastPointerSample.x === Number(event.clientX || 0) &&
+      lastPointerSample.y === Number(event.clientY || 0) &&
+      lastPointerSample.button === Number(event.button ?? 0);
+  };
+
   const describeKeyboard = (event, type) => ({
     sequence: ++sequence,
     type,
@@ -174,6 +202,7 @@ INTERACTION_PROBE = r"""
   window.addEventListener('pointerdown', (event) => {
     if (blockInspector(event, true)) return;
     pointerActive = true;
+    rememberPointer(event, 'pointerdown');
     pushSync(event, 'pointerdown');
   }, true);
   window.addEventListener('pointermove', (event) => {
@@ -182,15 +211,36 @@ INTERACTION_PROBE = r"""
     const now = performance.now();
     if (now - lastMoveAt < 24) return;
     lastMoveAt = now;
+    rememberPointer(event, 'pointermove');
     pushSync(event, 'pointermove');
   }, true);
   window.addEventListener('pointerup', (event) => {
     if (blockInspector(event, false)) return;
+    rememberPointer(event, 'pointerup');
     pushSync(event, 'pointerup');
     pointerActive = false;
   }, true);
   window.addEventListener('pointercancel', (event) => {
     if (blockInspector(event, false)) return;
+    rememberPointer(event, 'pointerup');
+    pushSync(event, 'pointerup');
+    pointerActive = false;
+  }, true);
+  window.addEventListener('mousedown', (event) => {
+    if (blockInspector(event, true) || isMouseDuplicateOfPointer(event, 'pointerdown')) return;
+    pointerActive = true;
+    pushSync(event, 'pointerdown');
+  }, true);
+  window.addEventListener('mousemove', (event) => {
+    if (window.__IK_INSPECT_ENABLED || !pointerActive || !window.__IK_SYNC_SOURCE) return;
+    if (isMouseDuplicateOfPointer(event, 'pointermove')) return;
+    const now = performance.now();
+    if (now - lastMoveAt < 24) return;
+    lastMoveAt = now;
+    pushSync(event, 'pointermove');
+  }, true);
+  window.addEventListener('mouseup', (event) => {
+    if (blockInspector(event, false) || isMouseDuplicateOfPointer(event, 'pointerup')) return;
     pushSync(event, 'pointerup');
     pointerActive = false;
   }, true);
