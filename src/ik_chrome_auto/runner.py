@@ -3889,6 +3889,17 @@ class MultiProfileRunner:
             "sync_enabled",
             {"master_profile_id": master_id, "target_profile_ids": sorted(targets)},
         )
+        # Coordinate inspection intentionally consumes pointer events so a
+        # user can measure controls without activating the game.  Leaving it
+        # armed on the selected master makes Sync look enabled while no mouse
+        # or keyboard event can ever reach ``__IK_SYNC_EVENTS``.  Sync owns
+        # the source, therefore always clear that mutually-exclusive mode
+        # before installing the source listener.
+        self.submit(master_id, CommandKind.SET_INSPECTOR, enabled=False)
+        self.event_log.write(
+            "sync_source_inspector_disabled",
+            {"profile_id": master_id},
+        )
         # Force each follower to resolve its current game iframe/canvas once
         # before the first gesture.  This avoids treating a freshly opened or
         # independently opened profile as ready merely because its Chrome
