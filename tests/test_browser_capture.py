@@ -655,7 +655,7 @@ def test_synced_pointer_dispatches_through_canvas_local_cdp() -> None:
         )
     ]
     assert resolved == {
-        "dispatch_route": "cdp_game_surface",
+        "dispatch_route": "cdp_page_canvas",
         "x": 320.0,
         "y": 360.0,
         "surface_x": 0.0,
@@ -665,10 +665,10 @@ def test_synced_pointer_dispatches_through_canvas_local_cdp() -> None:
     }
 
 
-def test_synced_pointer_discards_target_canvas_page_position() -> None:
+def test_synced_pointer_preserves_target_canvas_page_position() -> None:
     session, _canvas, context, _page = make_session()
     session._frame_for_input = lambda _event: object()
-    session._canvas_box = lambda _frame, _index: {
+    session._canvas_page_box = lambda _frame, _index: {
         "x": 18.0,
         "y": 24.0,
         "width": 640.0,
@@ -680,10 +680,10 @@ def test_synced_pointer_discards_target_canvas_page_position() -> None:
     )
 
     _method, params = context.sessions[0].calls[0]
-    assert params["x"] == 320.0
-    assert params["y"] == 180.0
-    assert resolved["surface_x"] == 0.0
-    assert resolved["surface_y"] == 0.0
+    assert params["x"] == 338.0
+    assert params["y"] == 204.0
+    assert resolved["surface_x"] == 18.0
+    assert resolved["surface_y"] == 24.0
 
 
 def test_escape_is_dispatched_without_focusing_real_window() -> None:
@@ -930,7 +930,7 @@ def test_synced_pointer_reuses_one_transform_until_pointer_up() -> None:
             {"x": 30.0, "y": 40.0, "width": 800.0, "height": 450.0},
         )
     )
-    session._canvas_box = lambda _frame, _index: next(boxes)
+    session._canvas_page_box = lambda _frame, _index: next(boxes)
     down = {"type": "pointerdown", "canvas": {"index": 0}}
     move = {"type": "pointermove", "canvas": {"index": 0}}
     up = {"type": "pointerup", "canvas": {"index": 0}}
@@ -941,8 +941,8 @@ def test_synced_pointer_reuses_one_transform_until_pointer_up() -> None:
     session._sync_pointer_target_box = None
 
     assert session._synced_pointer_target_box(down) == {
-        "x": 0.0,
-        "y": 0.0,
+        "x": 30.0,
+        "y": 40.0,
         "width": 800.0,
         "height": 450.0,
     }

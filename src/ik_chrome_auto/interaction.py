@@ -264,12 +264,14 @@ def validate_viewport(width: int, height: int) -> tuple[int, int]:
 
 
 def calculate_target_point(event: dict[str, Any], box: dict[str, float]) -> tuple[float, float]:
-    """Map a source gesture to one follower's canvas-local surface.
+    """Map a source gesture to a follower's live page canvas rectangle.
 
     Source CSS/backing dimensions are intentionally ignored. The probe has
     already reduced the master point to ratios, so maximizing the master (or
     restoring it) cannot change the logical point sent to compact followers.
-    Only the follower's current width/height participate in this transform.
+    Only the follower's current rectangle participates in this transform. CDP
+    mouse events are page-viewport coordinates, not iframe-local coordinates,
+    so the canvas' measured x/y must be included exactly once.
     """
     canvas = event.get("canvas")
     if isinstance(canvas, dict):
@@ -282,8 +284,8 @@ def calculate_target_point(event: dict[str, Any], box: dict[str, float]) -> tupl
     ratio_x = min(1.0, max(0.0, ratio_x))
     ratio_y = min(1.0, max(0.0, ratio_y))
     return (
-        float(box["width"]) * ratio_x,
-        float(box["height"]) * ratio_y,
+        float(box.get("x", 0.0)) + float(box["width"]) * ratio_x,
+        float(box.get("y", 0.0)) + float(box["height"]) * ratio_y,
     )
 
 

@@ -1933,14 +1933,16 @@ class ChromeProfileSession:
         return events
 
     def apply_synced_input(self, event: dict[str, Any]) -> dict[str, Any] | None:
-        """Apply one mirrored event through the target's canvas-local CDP.
+        """Apply one mirrored event through the target's measured page canvas.
 
         Sync targets frequently remain background Chrome windows.  Sending
         their event through ``page.mouse`` only proves that Playwright sent a
         page-level event; Chromium may leave it in the outer portal instead of
         forwarding it into the background WebGL renderer.  The former CDP
         route is profile-local, does not touch the native cursor, and uses the
-        same canvas origin as the source ratio.
+        exact page rectangle of the target canvas. Each Chrome window can have
+        a different iframe origin; treating every canvas as (0, 0) shifts
+        clicks for only part of a large profile grid.
         """
         event_type = str(event.get("type", ""))
         if event_type in {"keydown", "keyup"}:
@@ -1972,7 +1974,7 @@ class ChromeProfileSession:
                 float(wheel.get("delta_y", 0.0)),
             )
         return {
-            "dispatch_route": "cdp_game_surface",
+            "dispatch_route": "cdp_page_canvas",
             "x": round(float(x), 3),
             "y": round(float(y), 3),
             "surface_x": round(float(box.get("x", 0.0)), 3),
@@ -1982,7 +1984,7 @@ class ChromeProfileSession:
         }
 
     def _synced_pointer_target_box(self, event: dict[str, Any]) -> dict[str, float]:
-        """Resolve and retain one canvas-local transform for a complete gesture.
+        """Resolve and retain one page-canvas transform for a complete gesture.
 
         During iframe navigation Chrome can visibly retain the game frame
         while Playwright temporarily cannot enumerate its canvas. Reuse the
@@ -1997,15 +1999,21 @@ class ChromeProfileSession:
             frame = self._frame_for_input(event)
             canvas = event.get("canvas")
             if isinstance(canvas, dict):
-                box = self._canvas_box(frame, int(canvas.get("index", 0)))
+                box = self._canvas_page_box(frame, int(canvas.get("index", 0)))
             else:
-                box = self._frame_box(frame)
+                box = self._frame_page_box(frame)
         except Exception:
             cached = getattr(self, "_sync_last_target_box", None)
             box = dict(cached) if cached is not None else self._viewport_surface_box()
-        # Raw CDP game input consumes the canvas-local surface.  Normalize a
-        # measured page box here so iframe offsets never enter Sync mapping.
-        box = _origin_surface_box(box)
+        # ``Input.dispatchMouseEvent`` is attached to the top-level page CDP
+        # session. Keep the browser-measured canvas origin: it is the one
+        # coordinate system Chromium uses to route an event into an iframe.
+        box = {
+            "x": float(box.get("x", 0.0)),
+            "y": float(box.get("y", 0.0)),
+            "width": max(1.0, float(box["width"])),
+            "height": max(1.0, float(box["height"])),
+        }
         self._sync_last_target_box = dict(box)
         if event_type == "pointerdown":
             self._sync_pointer_target_box = dict(box)
@@ -2201,9 +2209,9 @@ class ChromeProfileSession:
     def _canvas_page_box(self, frame: Frame, index: int) -> dict[str, float]:
         """Return the largest game canvas in main-page CSS coordinates.
 
-        Sync is dispatched through Playwright's page mouse, so this path must
-        preserve its measured page position.  CDP game controls continue to
-        use ``_canvas_box`` and the canonical origin separately.
+        Sync dispatches through the page's CDP session, which consumes the
+        same main-page CSS coordinates as Playwright's page mouse. Preserve
+        the measured page position rather than assuming a zero-origin iframe.
         """
         canvases = frame.locator("canvas")
         boxes: list[dict[str, float]] = []
