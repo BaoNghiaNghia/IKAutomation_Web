@@ -258,7 +258,7 @@ class Dashboard(QWidget):
         sync_header.addWidget(StrongBodyLabel("Đồng bộ chuột - bàn phím"))
         sync_header.addStretch()
         self.sync_status_icon = QLabel("●")
-        self.sync_status_icon.setFixedWidth(_ui_px(22))
+        self.sync_status_icon.setFixedWidth(_ui_px(32))
         self.sync_status_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._set_sync_status_indicator(False)
         sync_header.addWidget(self.sync_status_icon)
@@ -831,7 +831,7 @@ class Dashboard(QWidget):
         color = "#16a34a" if enabled else "#94a3b8"
         state = "bật" if enabled else "tắt"
         self.sync_status_icon.setStyleSheet(
-            f"color:{color}; background:transparent; font-size:{_ui_px(22)}px; font-weight:700;"
+            f"color:{color}; background:transparent; font-size:{_ui_px(32)}px; font-weight:700;"
         )
         self.sync_status_icon.setToolTip(f"Đồng bộ chuột - bàn phím đang {state}")
     def _toggle_sync_section(self) -> None:

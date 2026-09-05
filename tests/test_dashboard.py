@@ -611,7 +611,7 @@ def test_mouse_sync_status_indicator_changes_colour_and_tooltip() -> None:
 
     dashboard._set_sync_status_indicator(False)
     assert "#94a3b8" in dashboard.sync_status_icon.style
-    assert "font-size:18px" in dashboard.sync_status_icon.style
+    assert "font-size:26px" in dashboard.sync_status_icon.style
     assert dashboard.sync_status_icon.tooltip == "Đồng bộ chuột - bàn phím đang tắt"
 
     dashboard._set_sync_status_indicator(True)
