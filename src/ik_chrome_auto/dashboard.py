@@ -2314,12 +2314,9 @@ class FarmProfileDialog(QDialog):
         title.setStyleSheet(f"font-size:{_ui_px(20)}px;font-weight:700;")
         header.addWidget(title)
         header.addStretch()
-        check_all = PushButton("Chọn tất cả")
-        clear_all = PushButton("Bỏ chọn")
-        check_all.clicked.connect(self._check_all)
-        clear_all.clicked.connect(self._clear_all)
-        header.addWidget(check_all)
-        header.addWidget(clear_all)
+        self.selection_toggle = PushButton("Chọn tất cả")
+        self.selection_toggle.clicked.connect(self._toggle_all_profiles)
+        header.addWidget(self.selection_toggle)
         layout.addLayout(header)
         subtitle = QLabel(description)
         subtitle.setWordWrap(True)
@@ -2335,8 +2332,10 @@ class FarmProfileDialog(QDialog):
             check.setChecked(profile.id in selected)
             check.setToolTip(profile.id)
             check.setStyleSheet(f"CheckBox {{ background:#f7faff; border:1px solid #dce6f3; border-radius:{_ui_px(9)}px; padding:{_ui_px(10)}px {_ui_px(12)}px; font-weight:600; }} CheckBox:hover {{ background:#eef6ff; border-color:#9ec5fe; }}")
+            check.stateChanged.connect(self._refresh_selection_toggle)
             self._checks[profile.id] = check
             rows.addWidget(check, index // column_count, index % column_count)
+        self._refresh_selection_toggle()
         for column in range(column_count):
             rows.setColumnStretch(column, 1)
         rows.setRowStretch((len(profiles) + column_count - 1) // column_count, 1)
@@ -2359,13 +2358,19 @@ class FarmProfileDialog(QDialog):
     def _column_count(profile_count: int) -> int:
         return 2 if profile_count > 10 else 1
 
-    def _check_all(self) -> None:
+    def _toggle_all_profiles(self) -> None:
+        select_all = not self._checks or not all(
+            check.isChecked() for check in self._checks.values()
+        )
         for check in self._checks.values():
-            check.setChecked(True)
+            check.setChecked(select_all)
+        self._refresh_selection_toggle()
 
-    def _clear_all(self) -> None:
-        for check in self._checks.values():
-            check.setChecked(False)
+    def _refresh_selection_toggle(self, *_args: object) -> None:
+        all_selected = bool(self._checks) and all(
+            check.isChecked() for check in self._checks.values()
+        )
+        self.selection_toggle.setText("Bỏ chọn" if all_selected else "Chọn tất cả")
 
     def selected_profile_ids(self) -> set[str]:
         return {profile_id for profile_id, check in self._checks.items() if check.isChecked()}

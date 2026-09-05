@@ -689,6 +689,33 @@ def test_farm_profile_picker_uses_two_columns_only_above_ten_profiles() -> None:
     assert FarmProfileDialog._column_count(50) == 2
 
 
+def test_farm_profile_picker_uses_one_button_to_toggle_all_profiles() -> None:
+    class FakeCheck:
+        def __init__(self, checked: bool) -> None:
+            self.checked = checked
+
+        def isChecked(self) -> bool:
+            return self.checked
+
+        def setChecked(self, checked: bool) -> None:
+            self.checked = checked
+
+    dialog = FarmProfileDialog.__new__(FarmProfileDialog)
+    dialog._checks = {"one": FakeCheck(False), "two": FakeCheck(True)}
+    dialog.selection_toggle = FakeActionButton()
+
+    dialog._refresh_selection_toggle()
+    assert dialog.selection_toggle.text == "Chọn tất cả"
+
+    dialog._toggle_all_profiles()
+    assert all(check.isChecked() for check in dialog._checks.values())
+    assert dialog.selection_toggle.text == "Bỏ chọn"
+
+    dialog._toggle_all_profiles()
+    assert not any(check.isChecked() for check in dialog._checks.values())
+    assert dialog.selection_toggle.text == "Chọn tất cả"
+
+
 def test_bulk_farm_button_starts_and_stops_without_closing_open_tabs() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     dashboard.config = SimpleNamespace(
