@@ -375,6 +375,10 @@ class ProfileWorker:
             )
         )
 
+    def _log_monitor(self, event: str, **payload: object) -> None:
+        """Write privacy-safe, step-level diagnostics for remote support."""
+        self.event_log.write(event, {"profile_id": self.profile.id, **payload})
+
     def _monitor_pause(self, seconds: float) -> None:
         """Wait briefly without starving Playwright's browser connection."""
         deadline = time.monotonic() + max(0.0, seconds)
@@ -542,10 +546,16 @@ class ProfileWorker:
             return SCAN_CANCELLED
         if self.session is None:
             return SCAN_ERROR
+        self._log_monitor("mail_monitor_started", pass_number=1 if initial_scan else 2)
         if not self._acquire_automation_renderer(
             wait_seconds=AUTOMATION_RENDERER_WAIT_SECONDS
         ):
             raise RuntimeError("Hết thời gian chờ renderer 1280×720 cho Giám sát")
+        self._log_monitor(
+            "mail_monitor_renderer_acquired",
+            pass_number=1 if initial_scan else 2,
+            canvas_size=AUTOMATION_RENDERER_SIZE,
+        )
         if self._mail_monitor is None:
             self._mail_monitor = BrowserMailMonitor()
         monitor = self._mail_monitor
@@ -563,6 +573,7 @@ class ProfileWorker:
                 baseline_size = AUTOMATION_RENDERER_SIZE
                 mail_open = True
                 baseline_direct_close = True
+                self._log_monitor("mail_monitor_step", pass_number=1, action="open_mail")
                 self._tap_monitor_viewport_point(MAIL_BUTTON_POINT, baseline_size)
                 self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
                 if self._mail_monitor_is_cancelled():
@@ -578,18 +589,24 @@ class ProfileWorker:
                 completed_tabs: list[str] = []
                 for tab_name, tab_point in baseline_tabs:
                     if tab_point is not None:
+                        self._log_monitor(
+                            "mail_monitor_step", pass_number=1, action="select_tab", tab=tab_name
+                        )
                         self._tap_monitor_viewport_point(tab_point, baseline_size)
                         self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
                         if self._mail_monitor_is_cancelled():
                             return SCAN_CANCELLED
+                    self._log_monitor(
+                        "mail_monitor_step", pass_number=1, action="read_all", tab=tab_name
+                    )
                     self._tap_monitor_viewport_point(READ_ALL_MAIL_POINT, baseline_size)
                     self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
                     if self._mail_monitor_is_cancelled():
                         return SCAN_CANCELLED
                     completed_tabs.append(tab_name)
-                self.event_log.write(
+                self._log_monitor(
                     "mail_monitor_baseline",
-                    {"profile_id": self.profile.id, "tabs": completed_tabs, "verified": False},
+                    tabs=completed_tabs, verified=False,
                 )
                 return MAIL_BASELINE
 
@@ -601,6 +618,7 @@ class ProfileWorker:
             latest_size = AUTOMATION_RENDERER_SIZE
             mail_open = True
             baseline_direct_close = True
+            self._log_monitor("mail_monitor_step", pass_number=2, action="open_mail")
             self._tap_monitor_viewport_point(MAIL_BUTTON_POINT, latest_size)
             self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
             if self._mail_monitor_is_cancelled():
@@ -608,22 +626,32 @@ class ProfileWorker:
 
             # Pass 2+: Combat is the second category on the left. Use its
             # fixed canvas-relative X/Y rather than another visual search.
+            self._log_monitor("mail_monitor_step", pass_number=2, action="select_tab", tab="Chiến đấu")
             self._tap_monitor_viewport_point(COMBAT_TAB_POINT, latest_size)
             self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
             if self._mail_monitor_is_cancelled():
                 return SCAN_CANCELLED
             latest_png, latest_size = self._capture_mail_canvas()
-            if not monitor.has_new_combat_mail(latest_png):
+            has_badge = monitor.has_new_combat_mail(latest_png)
+            self._log_monitor(
+                "mail_monitor_combat_badge",
+                found=has_badge,
+                capture_size=latest_size,
+            )
+            if not has_badge:
                 return NO_NEW_COMBAT_MAIL
 
             # Read exactly the first row so the game's unread state becomes
             # authoritative; no historical row below it is inspected.
+            self._log_monitor("mail_monitor_step", pass_number=2, action="open_first_combat_mail")
             self._tap_monitor_viewport_point(FIRST_MAIL_ROW_POINT, latest_size)
             self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
             if self._mail_monitor_is_cancelled():
                 return SCAN_CANCELLED
             latest_png, latest_size = self._capture_mail_canvas()
-            if monitor.is_territory_attacked(latest_png):
+            attacked = monitor.is_territory_attacked(latest_png)
+            self._log_monitor("mail_monitor_alert_classified", territory_attacked=attacked)
+            if attacked:
                 return TERRITORY_ATTACKED
             return COMBAT_MAIL_OTHER
         finally:
@@ -631,6 +659,7 @@ class ProfileWorker:
                 if mail_open:
                     try:
                         if baseline_direct_close:
+                            self._log_monitor("mail_monitor_step", pass_number=1 if initial_scan else 2, action="close_mail")
                             self._tap_monitor_viewport_point(
                                 CLOSE_MAIL_POINT, AUTOMATION_RENDERER_SIZE
                             )
@@ -651,6 +680,7 @@ class ProfileWorker:
                         )
             finally:
                 self._release_automation_renderer()
+                self._log_monitor("mail_monitor_renderer_released", pass_number=1 if initial_scan else 2)
 
     def _loop(self) -> None:
         while True:
