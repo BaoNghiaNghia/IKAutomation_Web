@@ -67,6 +67,15 @@ _COMBAT_UNREAD_ONE = _TemplateSpec(
     # tight Combat-only ROI remains the primary false-positive boundary.
     0.38,
 )
+_READ_ALL_MAIL = _TemplateSpec(
+    "read_all_mail.png",
+    (1280, 720),
+    # The action stays in the lower-left strip of the open mailbox. Restrict
+    # matching to that strip so a message body cannot resemble its lettering.
+    (0.08, 0.82, 0.39, 0.995),
+    0.62,
+    edge=False,
+)
 
 
 class BrowserMailMonitor:
@@ -83,6 +92,10 @@ class BrowserMailMonitor:
 
     def is_mail_open(self, screenshot_png: bytes) -> bool:
         return self.find_close_button(screenshot_png) is not None
+
+    def find_read_all_button(self, screenshot_png: bytes) -> MailMatch | None:
+        """Find the actual “Đọc & Nhận tất cả” control in this fresh frame."""
+        return self._find(screenshot_png, _READ_ALL_MAIL)
 
     def has_new_combat_mail(self, screenshot_png: bytes) -> bool:
         """Accept only a red badge whose displayed unread count is exactly 1."""

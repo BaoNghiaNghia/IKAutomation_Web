@@ -170,8 +170,18 @@ FARM_COORDINATE_Y_FIELD_OFFSET_X_RATIO = -60 / 1280
 # The intended 16:9 canvas is the default. Width and height are mapped
 # independently so a compact or slightly cropped browser canvas remains safe.
 MAIL_BUTTON_POINT = (0.1151, 0.8086)
-COMBAT_TAB_POINT = (0.0635, 0.3650)
-READ_ALL_MAIL_POINT = (0.2008, 0.9110)
+# Centres of the four left mailbox category tabs, calibrated from the 1280x720
+# game canvas.  They deliberately use the horizontal centre of each tab rather
+# than its right edge, so all screen sizes retain a safe hit target.
+COMBAT_TAB_POINT = (0.040625, 0.3611111111)  # (52, 260)
+ALLIANCE_TAB_POINT = (0.040625, 0.5055555556)  # (52, 364)
+ARCHIVE_TAB_POINT = (0.040625, 0.6513888889)  # (52, 469), “Lưu”
+SURVEY_TAB_POINT = (0.040625, 0.7972222222)  # (52, 574), “Khảo sát”
+# The control has a wide two-line label.  Its icon-side centre can resolve on
+# a non-interactive canvas decoration in some portal builds, so use the safe
+# text-area centre at (265, 670) rather than the visual icon centre.  This is
+# still canvas-local; no window or iframe offset is applied.
+READ_ALL_MAIL_POINT = (0.20703125, 0.9305555556)
 CLOSE_MAIL_POINT = (0.9437, 0.1142)
 # The top card only: never search down the Combat list for a historical match.
 FIRST_MAIL_ROW_POINT = (0.2516, 0.1736)
@@ -451,6 +461,21 @@ class ProfileWorker:
     ) -> None:
         if self.session is None:
             raise RuntimeError("Profile chưa mở")
+        # Mail tabs and the Read/Receive action live in an OOPIF on affected
+        # portal builds. Prefer Playwright's profile-local mouse so Chromium
+        # performs the iframe hit-test; this is not a native OS mouse click.
+        iframe_mouse = getattr(self.session, "dispatch_game_surface_profile_mouse_point", None)
+        if callable(iframe_mouse):
+            resolved = iframe_mouse(
+                normalized_x * GAME_REFERENCE_WIDTH,
+                normalized_y * GAME_REFERENCE_HEIGHT,
+            )
+            if isinstance(resolved, dict):
+                self.event_log.write(
+                    "mail_control_dispatched",
+                    {"profile_id": self.profile.id, "resolved": resolved},
+                )
+            return
         dispatch_point = getattr(self.session, "dispatch_game_surface_point", None)
         if callable(dispatch_point):
             dispatch_point(
@@ -498,13 +523,20 @@ class ProfileWorker:
             raise ValueError("Tọa độ giám sát phải là tỉ lệ X/Y trong khoảng 0..1")
         self._tap_monitor_point(normalized_x, normalized_y, image_size)
 
+    def _tap_monitor_capture_bounds(
+        self, bounds: tuple[int, int, int, int], image_size: tuple[int, int]
+    ) -> None:
+        """Tap the centre of a control matched in this exact canvas capture."""
+        normalized_x, normalized_y = control_center_ratio(bounds, image_size)
+        self._tap_monitor_point(normalized_x, normalized_y, image_size)
+
     def _check_combat_mail(self, *, initial_scan: bool) -> str:
         """Run the two-pass mailbox workflow for one profile.
 
         Pass 1 opens Mail and uses ``Đọc & Nhận Tất Cả`` across all mail
-        categories to establish a clean baseline. Pass 2+ opens Combat and
-        reads only the top item when that category carries an unread badge.
-        Every transition is verified from a fresh renderer capture.
+        categories to establish a clean baseline. Pass 2+ directly opens Mail
+        and Combat, then captures only the badge/message evidence needed for
+        an alert; neither pass verifies that the mailbox chrome is open.
         """
         if self._mail_monitor_is_cancelled():
             return SCAN_CANCELLED
@@ -518,39 +550,61 @@ class ProfileWorker:
             self._mail_monitor = BrowserMailMonitor()
         monitor = self._mail_monitor
         mail_open = False
+        baseline_direct_close = False
         latest_png: bytes | None = None
         latest_size: tuple[int, int] | None = None
         try:
-            latest_png, latest_size = self._capture_mail_canvas()
-            close = monitor.find_close_button(latest_png)
-            if close is None:
-                self._tap_monitor_viewport_point(MAIL_BUTTON_POINT, latest_size)
-                self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
-                if self._mail_monitor_is_cancelled():
-                    return SCAN_CANCELLED
-                latest_png, latest_size = self._capture_mail_canvas()
-                close = monitor.find_close_button(latest_png)
-                if close is None:
-                    raise RuntimeError("Hộp thư chưa mở sau khi bấm nút thư")
-            mail_open = True
-
             if initial_scan:
-                # Pass 1 intentionally stays on the initially opened mailbox
-                # category. The game's Read All action applies to all
-                # notifications, so entering Combat first would leave other
-                # categories outside the requested baseline flow.
-                self._tap_monitor_viewport_point(READ_ALL_MAIL_POINT, latest_size)
+                # Lượt 1 is deliberately a blind, deterministic cleanup pass.
+                # It has no alerting decision, so recapturing/matching after
+                # each input only made one transient template miss abort the
+                # profile and hand the renderer to another profile. All points
+                # below are authored on the leased 1280×720 game canvas.
+                baseline_size = AUTOMATION_RENDERER_SIZE
+                mail_open = True
+                baseline_direct_close = True
+                self._tap_monitor_viewport_point(MAIL_BUTTON_POINT, baseline_size)
                 self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
                 if self._mail_monitor_is_cancelled():
                     return SCAN_CANCELLED
-                latest_png, latest_size = self._capture_mail_canvas()
-                if monitor.find_close_button(latest_png) is None:
-                    raise RuntimeError("Hộp thư bị đóng sau khi bấm Đọc & Nhận Tất Cả")
+
+                baseline_tabs: tuple[tuple[str, tuple[float, float] | None], ...] = (
+                    ("Hộp thư", None),
+                    ("Chiến đấu", COMBAT_TAB_POINT),
+                    ("Liên Minh", ALLIANCE_TAB_POINT),
+                    ("Lưu", ARCHIVE_TAB_POINT),
+                    ("Khảo sát", SURVEY_TAB_POINT),
+                )
+                completed_tabs: list[str] = []
+                for tab_name, tab_point in baseline_tabs:
+                    if tab_point is not None:
+                        self._tap_monitor_viewport_point(tab_point, baseline_size)
+                        self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
+                        if self._mail_monitor_is_cancelled():
+                            return SCAN_CANCELLED
+                    self._tap_monitor_viewport_point(READ_ALL_MAIL_POINT, baseline_size)
+                    self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
+                    if self._mail_monitor_is_cancelled():
+                        return SCAN_CANCELLED
+                    completed_tabs.append(tab_name)
                 self.event_log.write(
                     "mail_monitor_baseline",
-                    {"profile_id": self.profile.id},
+                    {"profile_id": self.profile.id, "tabs": completed_tabs, "verified": False},
                 )
                 return MAIL_BASELINE
+
+            # Lượt 2 does not need to prove that the mailbox chrome opened.
+            # The only meaningful evidence is the Combat unread badge and,
+            # if present, the subject of its first message.  Avoiding an
+            # extra close-button match also prevents a harmless visual miss
+            # from releasing this profile before its alert scan.
+            latest_size = AUTOMATION_RENDERER_SIZE
+            mail_open = True
+            baseline_direct_close = True
+            self._tap_monitor_viewport_point(MAIL_BUTTON_POINT, latest_size)
+            self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
+            if self._mail_monitor_is_cancelled():
+                return SCAN_CANCELLED
 
             # Pass 2+: Combat is the second category on the left. Use its
             # fixed canvas-relative X/Y rather than another visual search.
@@ -559,8 +613,6 @@ class ProfileWorker:
             if self._mail_monitor_is_cancelled():
                 return SCAN_CANCELLED
             latest_png, latest_size = self._capture_mail_canvas()
-            if monitor.find_close_button(latest_png) is None:
-                raise RuntimeError("Hộp thư bị đóng trước khi đọc tab Chiến đấu")
             if not monitor.has_new_combat_mail(latest_png):
                 return NO_NEW_COMBAT_MAIL
 
@@ -571,8 +623,6 @@ class ProfileWorker:
             if self._mail_monitor_is_cancelled():
                 return SCAN_CANCELLED
             latest_png, latest_size = self._capture_mail_canvas()
-            if monitor.find_close_button(latest_png) is None:
-                raise RuntimeError("Không xác minh được thư đầu tiên sau khi mở")
             if monitor.is_territory_attacked(latest_png):
                 return TERRITORY_ATTACKED
             return COMBAT_MAIL_OTHER
@@ -580,11 +630,17 @@ class ProfileWorker:
             try:
                 if mail_open:
                     try:
-                        latest_png, latest_size = self._capture_mail_canvas()
-                        close = monitor.find_close_button(latest_png)
-                        if close is not None:
-                            self._tap_monitor_viewport_point(CLOSE_MAIL_POINT, latest_size)
+                        if baseline_direct_close:
+                            self._tap_monitor_viewport_point(
+                                CLOSE_MAIL_POINT, AUTOMATION_RENDERER_SIZE
+                            )
                             self._monitor_pause(0.35)
+                        else:
+                            latest_png, latest_size = self._capture_mail_canvas()
+                            close = monitor.find_close_button(latest_png)
+                            if close is not None:
+                                self._tap_monitor_viewport_point(CLOSE_MAIL_POINT, latest_size)
+                                self._monitor_pause(0.35)
                     except Exception as close_error:
                         self.event_log.write(
                             "mail_monitor_close_error",

@@ -1570,11 +1570,108 @@ class ChromeProfileSession:
             kind=input_kind,
         )
 
+    def dispatch_game_surface_profile_mouse_point(
+        self, reference_x: float, reference_y: float
+    ) -> dict[str, float | str]:
+        """Click one canvas point through Playwright's iframe-aware mouse.
+
+        Mail controls can be hosted by a game iframe in a separate renderer.
+        Raw page-target CDP mouse events acknowledge successfully but may not
+        be hit-tested into that frame.  This remains synthetic, profile-local
+        input: it never moves the Windows cursor or activates the window.
+        """
+        point = CanvasReferencePoint(float(reference_x), float(reference_y))
+        # Playwright's page.mouse uses main-page viewport coordinates.  Its
+        # transform must retain the shared iframe/canvas position in that
+        # viewport; this is distinct from CDP game input, whose canonical
+        # canvas origin deliberately has no iframe offset.
+        _canvas, transform = self._game_surface_page_mouse_transform_snapshot()
+        viewport_x, viewport_y = transform.to_viewport(point)
+        viewport_point = ViewportPoint(viewport_x, viewport_y)
+        ProfileInputEngine.mirrored_pointer(
+            self.page, viewport_point, event_type="pointerdown"
+        )
+        ProfileInputEngine.mirrored_pointer(
+            self.page, viewport_point, event_type="pointerup"
+        )
+        return {
+            "dispatch_route": "playwright_page_mouse",
+            "reference_x": round(point.x, 3),
+            "reference_y": round(point.y, 3),
+            "viewport_x": round(viewport_x, 3),
+            "viewport_y": round(viewport_y, 3),
+            "surface_x": round(transform.viewport_left, 3),
+            "surface_y": round(transform.viewport_top, 3),
+            "surface_width": round(transform.css_width, 3),
+            "surface_height": round(transform.css_height, 3),
+        }
+
+    def _game_surface_page_mouse_transform_snapshot(
+        self,
+    ) -> tuple[Any | None, CanvasTransformSnapshot]:
+        """Map canonical game points to the main-page mouse viewport.
+
+        ``page.mouse`` is iframe-aware, but it still accepts coordinates from
+        the main page.  Preserve the game surface's main-page left/top here.
+        This is not a canvas-to-iframe adjustment: the two surfaces share one
+        origin; it is the required final conversion from that shared origin to
+        the page viewport.
+        """
+        canvas, surface = self._canvas_or_viewport()
+        box: dict[str, float] | None = None
+        if canvas is not None:
+            bounding_box = getattr(canvas, "bounding_box", None)
+            if callable(bounding_box):
+                try:
+                    measured = bounding_box()
+                    if (
+                        isinstance(measured, dict)
+                        and float(measured.get("width", 0)) > 0
+                        and float(measured.get("height", 0)) > 0
+                    ):
+                        box = {
+                            "x": float(measured.get("x", 0.0)),
+                            "y": float(measured.get("y", 0.0)),
+                            "width": float(measured["width"]),
+                            "height": float(measured["height"]),
+                        }
+                except Exception:
+                    box = None
+        if box is None:
+            frame = self.find_frame()
+            if frame != self.page.main_frame:
+                try:
+                    measured = frame.frame_element().bounding_box()
+                    if measured is not None:
+                        box = {
+                            "x": float(measured.get("x", 0.0)),
+                            "y": float(measured.get("y", 0.0)),
+                            "width": float(measured["width"]),
+                            "height": float(measured["height"]),
+                        }
+                except Exception:
+                    box = None
+        # The renderer screenshot is always the logical 1280×720 image, but
+        # the page can display that image in a smaller CSS canvas (for example
+        # ~720×405 in the supplied recording). page.mouse consumes CSS-page
+        # coordinates, so it must map the logical point through this measured
+        # box exactly once. Treating logical pixels as CSS pixels sent the
+        # click down/right of every mailbox control.
+        if box is not None:
+            return canvas, CanvasTransformSnapshot.from_box(box)
+        return canvas, CanvasTransformSnapshot.from_box(surface)
+
     def _game_surface_transform_snapshot(
         self,
     ) -> tuple[Any | None, CanvasTransformSnapshot]:
         """Measure once and return the sole mapping from 1280x720 to live canvas."""
         canvas, surface = self._canvas_or_viewport()
+        # A renderer lease has already resized the game frame to the canonical
+        # coordinate system.  Do not read the canvas CSS box here: Chromium
+        # can report a compositor-scaled box while the lease is active, which
+        # would scale a 1280x720 point a second time and shift it left/up.
+        if getattr(self, "_automation_game_frame_fixed", False):
+            return canvas, CanvasTransformSnapshot.from_box(_fixed_game_surface_box())
         canvas_box: dict[str, float] | None = None
         if canvas is not None:
             bounding_box = getattr(canvas, "bounding_box", None)

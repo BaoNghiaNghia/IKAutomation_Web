@@ -225,6 +225,36 @@ def test_farm_click_helper_uses_exact_fresh_capture_center_for_touch() -> None:
     assert taps == [(453.5, 580.5, "touch")]
 
 
+def test_mail_mouse_dispatch_uses_iframe_aware_profile_mouse() -> None:
+    canvas = FakeCanvas(
+        bounding_box={"x": 118.0, "y": 8.0, "width": 640.0, "height": 360.0}
+    )
+    session, _canvas, context, page = make_session(canvas=canvas)
+
+    session.dispatch_game_surface_profile_mouse_point(640.0, 360.0)
+
+    assert context.sessions[0].calls == []
+    assert page.mouse_calls == [
+        ("move", (438.0, 188.0), {}),
+        ("down", (), {"button": "left"}),
+        ("move", (438.0, 188.0), {}),
+        ("up", (), {"button": "left"}),
+    ]
+
+
+def test_mail_mouse_maps_logical_1280_by_720_to_live_css_canvas() -> None:
+    canvas = FakeCanvas(
+        bounding_box={"x": 18.0, "y": 31.0, "width": 1260.0, "height": 674.0}
+    )
+    session, _canvas, _context, _page = make_session(canvas=canvas)
+
+    _canvas, transform = session._game_surface_page_mouse_transform_snapshot()
+
+    assert transform.to_viewport(CanvasReferencePoint(265.0, 670.0)) == pytest.approx(
+        (278.859375, 658.1944444444)
+    )
+
+
 def test_farm_click_helper_rejects_bounds_outside_latest_capture() -> None:
     session = ChromeProfileSession.__new__(ChromeProfileSession)
     session.dispatch_game_surface_input_ratio = (
@@ -279,6 +309,7 @@ def test_touch_uses_fresh_canvas_transform_inside_iframe() -> None:
         bounding_box={"x": 118.0, "y": 8.0, "width": 640.0, "height": 360.0}
     )
     session, _canvas, context, _page = make_session(canvas=canvas)
+    session._automation_game_frame_fixed = False
 
     session.dispatch_game_surface_input_ratio(0.25, 0.5, input_kind="touch")
 
@@ -308,6 +339,7 @@ def test_mouse_uses_cdp_and_fresh_canvas_size_for_webgl_control() -> None:
         bounding_box={"x": 118.0, "y": 8.0, "width": 640.0, "height": 360.0}
     )
     session, _canvas, context, _page = make_session(canvas=canvas)
+    session._automation_game_frame_fixed = False
 
     session.dispatch_game_surface_input_ratio(0.25, 0.5, input_kind="mouse")
 
@@ -324,6 +356,7 @@ def test_mouse_overlay_focus_uses_fresh_canvas_transform_and_viewport_hit_testin
         bounding_box={"x": 118.0, "y": 8.0, "width": 640.0, "height": 360.0}
     )
     session, _canvas, context, _page = make_session(canvas=canvas)
+    session._automation_game_frame_fixed = False
 
     session.dispatch_game_surface_input_ratio(
         0.25,
@@ -580,8 +613,19 @@ def test_scroll_game_surface_uses_the_same_zero_origin_as_clicks() -> None:
 
     method, params = context.sessions[0].calls[0]
     assert method == "Input.dispatchMouseEvent"
-    assert params["x"] == 320.0
-    assert params["y"] == 180.0
+    assert params["x"] == 640.0
+    assert params["y"] == 360.0
+
+
+def test_fixed_automation_renderer_never_rescales_reference_clicks_to_css_canvas() -> None:
+    canvas = FakeCanvas(
+        bounding_box={"x": 0.0, "y": 0.0, "width": 640.0, "height": 360.0}
+    )
+    session, _canvas, _context, _page = make_session(canvas=canvas)
+
+    _canvas, transform = session._game_surface_transform_snapshot()
+
+    assert transform.to_viewport(CanvasReferencePoint(265.0, 670.0)) == (265.0, 670.0)
 
 
 def test_synced_pointer_dispatches_through_oopif_aware_profile_mouse() -> None:

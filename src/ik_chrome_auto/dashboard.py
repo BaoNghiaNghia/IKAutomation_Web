@@ -56,6 +56,7 @@ TAB_CLOSE_BATCH_PAUSE_SECONDS = 8.0
 MONITOR_GROUP_SIZE = 5
 MONITOR_PROFILE_STAGGER_SECONDS = 0.25
 MONITOR_GROUP_PAUSE_SECONDS = 0.15
+MONITOR_PROFILE_RETRY_SECONDS = 2.0
 MONITOR_CYCLE_SECONDS = 1.0
 PROFILE_UPDATE_BATCH_SIZE = 120
 
@@ -1113,11 +1114,31 @@ class Dashboard(QWidget):
         if profile_id not in self._monitor_in_flight:
             return
         events = set(snapshot.monitor_events or ())
+        self._monitor_in_flight.pop(profile_id, None)
+        if SCAN_ERROR in events:
+            # A failed open/verification is not a completed mailbox flow.
+            # Keeping the old behavior here released the shared 720p renderer
+            # and immediately enlarged the next profile, which appeared as a
+            # profile-by-profile rerender after only “Mở Hộp thư”. Requeue this
+            # exact profile at the front and keep its group reservation until
+            # its baseline actually finishes.
+            pending = getattr(self, "_monitor_batch_pending", None)
+            if pending is None:
+                pending = deque()
+                self._monitor_batch_pending = pending
+            pending.appendleft(profile_id)
+            getattr(self, "_monitor_batch_profiles", set()).add(profile_id)
+            self._monitor_next_profile_at = (
+                time.monotonic() + MONITOR_PROFILE_RETRY_SECONDS
+            )
+            self._append_log(
+                f"[{profile_id}] Giám sát chưa hoàn tất; giữ profile này và thử lại"
+            )
+            return
         # Record a successful baseline before evaluating the batch barrier so
         # the final profile in a five-member group is included in pass 2.
         if MAIL_BASELINE in events:
             self._monitor_initialized_profiles.add(profile_id)
-        self._monitor_in_flight.pop(profile_id, None)
         getattr(self, "_monitor_batch_profiles", set()).discard(profile_id)
         if (
             not self._monitor_in_flight
@@ -1158,9 +1179,6 @@ class Dashboard(QWidget):
                 self._monitor_next_batch_at = (
                     time.monotonic() + MONITOR_GROUP_PAUSE_SECONDS
                 )
-        if SCAN_ERROR in events:
-            self._append_log(f"[{profile_id}] Giám sát thư: không hoàn tất được luồng xác minh")
-            return
         if MAIL_BASELINE in events:
             self._append_log(f"[{profile_id}] Đã tạo baseline thư Chiến đấu; không báo thư cũ")
             return
@@ -1266,10 +1284,15 @@ class Dashboard(QWidget):
                 f"{len(group)} profile chạy đủ lượt 1 và lượt 2"
             )
 
-        # Dispatch at most one profile per dashboard tick. The stagger keeps
-        # workers asynchronous instead of making all five execute identical
-        # waits and UI steps in lockstep.
-        if not self._monitor_batch_pending or now < self._monitor_next_profile_at:
+        # A mailbox baseline is a full, atomic profile transaction.  Do not
+        # merely stagger five commands: that still lets their renderer leases
+        # visually alternate after a failure or a delayed frame.  Submit the
+        # next profile only after the current worker has published its result.
+        if (
+            not self._monitor_batch_pending
+            or self._monitor_in_flight
+            or now < self._monitor_next_profile_at
+        ):
             return
         profile_id = self._monitor_batch_pending.popleft()
         if not self.runner.has_open_session(profile_id):
