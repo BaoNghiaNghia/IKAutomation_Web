@@ -3873,6 +3873,10 @@ class MultiProfileRunner:
         # a mode command; broadcasting 45 no-op commands delayed large syncs.
         if previous_master is not None and previous_master != master_id:
             self.submit(previous_master, CommandKind.SET_SYNC_SOURCE, enabled=False)
+        # Coordinate inspection intentionally consumes the same page events.
+        # Always disable it before arming the master so a stale inspector state
+        # cannot silently prevent mouse/keyboard capture.
+        self.submit(master_id, CommandKind.SET_INSPECTOR, enabled=False)
         self.submit(master_id, CommandKind.SET_SYNC_SOURCE, enabled=True)
 
     def add_sync_target(self, profile_id: str) -> bool:

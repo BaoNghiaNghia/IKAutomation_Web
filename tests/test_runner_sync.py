@@ -126,6 +126,8 @@ def test_enable_sync_keeps_only_selected_targets_and_marks_master_as_source() ->
     assert runner.sync_enabled is True
     assert runner.sync_master_id == "master"
     assert runner.sync_target_ids == {"follower-open"}
+    assert runner.workers["master"].commands[-2].kind == CommandKind.SET_INSPECTOR
+    assert runner.workers["master"].commands[-2].payload == {"enabled": False}
     assert runner.workers["master"].commands[-1].payload == {"enabled": True}
     assert runner.workers["follower-open"].commands == []
 

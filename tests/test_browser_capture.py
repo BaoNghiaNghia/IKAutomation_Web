@@ -746,6 +746,54 @@ def test_sync_probe_is_rearmed_for_a_retained_browser_frame() -> None:
     assert id(frame) in session._configured_frames
 
 
+def test_sync_capture_arms_and_polls_every_live_page_in_context() -> None:
+    class ContextFrame:
+        def __init__(self, url: str, rows: list[dict[str, object]]) -> None:
+            self.url = url
+            self.rows = rows
+            self.sync_source = False
+
+        def evaluate(self, script: str, argument: object = None) -> object:
+            if "splice(0)" in script:
+                rows, self.rows = self.rows, []
+                return rows
+            if argument is not None:
+                self.sync_source = bool(argument[0])
+                return True
+            return True
+
+    selected_frame = ContextFrame("https://portal.example/", [])
+    visible_frame = ContextFrame(
+        "https://game.example/",
+        [{"type": "pointerdown", "x": 100, "y": 200}],
+    )
+    selected_page = SimpleNamespace(
+        frames=[selected_frame], is_closed=lambda: False
+    )
+    visible_page = SimpleNamespace(frames=[visible_frame], is_closed=lambda: False)
+
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session._page = selected_page
+    session._context = SimpleNamespace(pages=[selected_page, visible_page])
+    session._sync_source = True
+    session._inspector_enabled = False
+    session._drag_item_visible = False
+    session._scrollbars_visible = False
+    session._configured_frames = {}
+    session._configure_interaction_frames = lambda **_kwargs: None
+
+    assert session._repair_and_count_sync_frames() == 2
+    assert selected_frame.sync_source is True
+    assert visible_frame.sync_source is True
+    assert session.poll_sync_events() == [{
+        "type": "pointerdown",
+        "x": 100,
+        "y": 200,
+        "frame_url": "https://game.example/",
+        "frame_url_safe": "https://game.example/",
+    }]
+
+
 def test_sync_repair_installs_listeners_into_replaced_iframe_document() -> None:
     class ReplacedFrame:
         url = "https://ik.playfun.vn/play-game"
