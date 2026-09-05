@@ -1719,43 +1719,7 @@ class ChromeProfileSession:
             return self._repair_and_count_sync_frames() if enabled else 0
         self._sync_source = enabled
         self._configure_interaction_frames(force=True)
-        # A Chrome profile can retain more than one Playwright Page.  The page
-        # selected during startup is not necessarily the page that is visible
-        # after the game portal opens/replaces its tab.  Apply the capture mode
-        # to every live page so the user's actual master tab is always armed.
-        # Run this when disabling too, otherwise a previously visible alternate
-        # page could keep collecting stale events.
-        armed = self._repair_and_count_sync_frames()
-        return armed if self._sync_source else 0
-
-    def _sync_capture_pages(self) -> list[Page]:
-        """Return every live page that can currently receive master input."""
-        pages: list[Page] = []
-        seen: set[int] = set()
-
-        current = getattr(self, "_page", None)
-        candidates: list[Page] = []
-        if current is not None:
-            candidates.append(current)
-        context = getattr(self, "_context", None)
-        if context is not None:
-            try:
-                candidates.extend(context.pages)
-            except Exception:
-                pass
-
-        for page in candidates:
-            key = id(page)
-            if key in seen:
-                continue
-            try:
-                if page.is_closed():
-                    continue
-            except Exception:
-                continue
-            seen.add(key)
-            pages.append(page)
-        return pages
+        return self._repair_and_count_sync_frames() if self._sync_source else 0
 
     def repair_synced_input_runtime(self) -> None:
         """Reconnect input dispatch after a follower frame/page navigation."""
@@ -1771,22 +1735,21 @@ class ChromeProfileSession:
     def _repair_and_count_sync_frames(self) -> int:
         """Re-arm input capture in retained/reconnected Chrome documents."""
         armed = 0
-        for page in self._sync_capture_pages():
-            for frame in page.frames:
-                try:
-                    probe_installed = frame.evaluate(
+        for frame in self.page.frames:
+            try:
+                probe_installed = frame.evaluate(
                     """() => Boolean(
                         window.__IK_INTERACTION_PROBE_INSTALLED &&
                         typeof window.__IK_SET_INTERACTION_MODES === 'function'
                     )"""
                 )
-                    if not probe_installed:
-                        # A same-URL iframe navigation may retain Playwright's
-                        # Frame object and configuration signature while replacing
-                        # its JavaScript world. Install the actual listeners, not
-                        # merely the mode variables.
-                        frame.evaluate(INTERACTION_PROBE)
-                    ready = frame.evaluate(
+                if not probe_installed:
+                    # A same-URL iframe navigation may retain Playwright's
+                    # Frame object and configuration signature while replacing
+                    # its JavaScript world. Install the actual listeners, not
+                    # merely the mode variables.
+                    frame.evaluate(INTERACTION_PROBE)
+                ready = frame.evaluate(
                     """([syncSource, inspectEnabled]) => {
                         if (!Array.isArray(window.__IK_SYNC_EVENTS)) window.__IK_SYNC_EVENTS = [];
                         if (!Array.isArray(window.__IK_COORDINATE_EVENTS)) window.__IK_COORDINATE_EVENTS = [];
@@ -1808,17 +1771,16 @@ class ChromeProfileSession:
                     }""",
                     [self._sync_source, self._inspector_enabled],
                 )
-                    if ready:
-                        if self._sync_source:
-                            armed += 1
-                        # A repaired frame must remain in the normal configuration
-                        # cache; otherwise every 40 ms poll would rewrite its state.
-                        self._configured_frames[id(frame)] = (
-                            f"{frame.url}|{self._sync_source}|{self._inspector_enabled}|"
-                            f"{self._drag_item_visible}|{self._scrollbars_visible}"
-                        )
-                except Exception:
-                    self._configured_frames.pop(id(frame), None)
+                if ready:
+                    armed += 1
+                    # A repaired frame must remain in the normal configuration
+                    # cache; otherwise every 40 ms poll would rewrite its state.
+                    self._configured_frames[id(frame)] = (
+                        f"{frame.url}|{self._sync_source}|{self._inspector_enabled}|"
+                        f"{self._drag_item_visible}|{self._scrollbars_visible}"
+                    )
+            except Exception:
+                self._configured_frames.pop(id(frame), None)
         return armed
 
     def sync_capture_frame_count(self) -> int:
@@ -1826,20 +1788,19 @@ class ChromeProfileSession:
         if not self._sync_source:
             return 0
         armed = 0
-        for page in self._sync_capture_pages():
-            for frame in page.frames:
-                try:
-                    if frame.evaluate(
+        for frame in self.page.frames:
+            try:
+                if frame.evaluate(
                     """() => Boolean(
                         window.__IK_INTERACTION_PROBE_INSTALLED &&
                         Array.isArray(window.__IK_SYNC_EVENTS) &&
                         typeof window.__IK_SET_INTERACTION_MODES === 'function' &&
                         window.__IK_SYNC_SOURCE === true
                     )"""
-                    ):
-                        armed += 1
-                except Exception:
-                    continue
+                ):
+                    armed += 1
+            except Exception:
+                continue
         return armed
 
     def set_inspector(self, enabled: bool) -> None:
@@ -1909,16 +1870,15 @@ class ChromeProfileSession:
         events: list[dict[str, Any]] = []
         if not self._sync_source:
             return events
-        for page in self._sync_capture_pages():
-            for frame in page.frames:
-                try:
-                    rows = frame.evaluate("() => window.__IK_SYNC_EVENTS?.splice(0) || []")
-                except Exception:
-                    continue
-                for row in rows:
-                    row["frame_url"] = frame.url
-                    row["frame_url_safe"] = redact_url(frame.url)
-                    events.append(row)
+        for frame in self.page.frames:
+            try:
+                rows = frame.evaluate("() => window.__IK_SYNC_EVENTS?.splice(0) || []")
+            except Exception:
+                continue
+            for row in rows:
+                row["frame_url"] = frame.url
+                row["frame_url_safe"] = redact_url(frame.url)
+                events.append(row)
         return events
 
     def poll_coordinate_events(self) -> list[dict[str, Any]]:
