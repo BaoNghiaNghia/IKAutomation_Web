@@ -1747,8 +1747,17 @@ class ChromeProfileSession:
         self._configure_interaction_frames(force=True)
 
     def _repair_and_count_sync_frames(self) -> int:
-        """Re-arm input capture in retained/reconnected Chrome documents."""
+        """Arm capture only in the one frame that owns the game canvas.
+
+        The portal and the game can both be Playwright frames.  Arming every
+        frame means a toolbar, loading overlay, or a focused portal document
+        can become a second Sync source.  That produces a valid-looking event
+        with a different coordinate space, which is indistinguishable from a
+        bad target mapping after it has been fanned out.  Sync has exactly one
+        source surface: the largest visible game canvas.
+        """
         armed = 0
+        capture_frame = self._sync_capture_frame()
         for frame in self.page.frames:
             try:
                 probe_installed = frame.evaluate(
@@ -1783,19 +1792,29 @@ class ChromeProfileSession:
                             window.__IK_SYNC_SOURCE === Boolean(syncSource)
                         );
                     }""",
-                    [self._sync_source, self._inspector_enabled],
+                    [self._sync_source and frame is capture_frame, self._inspector_enabled],
                 )
-                if ready:
+                if ready and frame is capture_frame:
                     armed += 1
                     # A repaired frame must remain in the normal configuration
                     # cache; otherwise every 40 ms poll would rewrite its state.
                     self._configured_frames[id(frame)] = (
-                        f"{frame.url}|{self._sync_source}|{self._inspector_enabled}|"
+                        f"{frame.url}|{self._sync_source and frame is capture_frame}|{self._inspector_enabled}|"
                         f"{self._drag_item_visible}|{self._scrollbars_visible}"
                     )
             except Exception:
                 self._configured_frames.pop(id(frame), None)
         return armed
+
+    def _sync_capture_frame(self) -> Frame | None:
+        """Return the sole frame allowed to emit mirrored input events."""
+        try:
+            return self.find_frame()
+        except Exception:
+            # Keep Sync available while a game iframe is being replaced.  The
+            # next poll repairs the chosen frame once its canvas is visible.
+            frames = list(self.page.frames)
+            return frames[-1] if frames else None
 
     def sync_capture_frame_count(self) -> int:
         """Return the number of frames whose input probe is actively armed."""
@@ -1884,15 +1903,17 @@ class ChromeProfileSession:
         events: list[dict[str, Any]] = []
         if not self._sync_source:
             return events
-        for frame in self.page.frames:
-            try:
-                rows = frame.evaluate("() => window.__IK_SYNC_EVENTS?.splice(0) || []")
-            except Exception:
-                continue
-            for row in rows:
-                row["frame_url"] = frame.url
-                row["frame_url_safe"] = redact_url(frame.url)
-                events.append(row)
+        frame = self._sync_capture_frame()
+        if frame is None:
+            return events
+        try:
+            rows = frame.evaluate("() => window.__IK_SYNC_EVENTS?.splice(0) || []")
+        except Exception:
+            return events
+        for row in rows:
+            row["frame_url"] = frame.url
+            row["frame_url_safe"] = redact_url(frame.url)
+            events.append(row)
         return events
 
     def poll_coordinate_events(self) -> list[dict[str, Any]]:
@@ -2027,11 +2048,13 @@ class ChromeProfileSession:
         if self._page is None or self._page.is_closed():
             return
         active_keys: set[int] = set()
+        capture_frame = self._sync_capture_frame() if self._sync_source else None
         for frame in self.page.frames:
             key = id(frame)
             active_keys.add(key)
+            frame_sync_source = self._sync_source and frame is capture_frame
             signature = (
-                f"{frame.url}|{self._sync_source}|{self._inspector_enabled}|"
+                f"{frame.url}|{frame_sync_source}|{self._inspector_enabled}|"
                 f"{self._drag_item_visible}|{self._scrollbars_visible}"
             )
             if not force and self._configured_frames.get(key) == signature:
@@ -2047,7 +2070,7 @@ class ChromeProfileSession:
                 frame.evaluate(
                     "([syncSource, inspectEnabled]) => "
                     "window.__IK_SET_INTERACTION_MODES?.(syncSource, inspectEnabled)",
-                    [self._sync_source, self._inspector_enabled],
+                    [frame_sync_source, self._inspector_enabled],
                 )
                 frame.evaluate(
                     "visible => window.__IK_SET_DRAG_ITEM_VISIBLE?.(visible)",

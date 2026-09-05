@@ -776,6 +776,37 @@ def test_sync_probe_is_rearmed_for_a_retained_browser_frame() -> None:
     assert id(frame) in session._configured_frames
 
 
+def test_sync_arms_only_the_game_canvas_frame() -> None:
+    class Frame:
+        def __init__(self, url: str) -> None:
+            self.url = url
+            self.arguments: list[list[bool]] = []
+
+        def evaluate(
+            self, _script: str, argument: list[bool] | None = None
+        ) -> bool:
+            if argument is not None:
+                self.arguments.append(argument)
+            return True
+
+    portal = Frame("https://portal.example/")
+    game = Frame("https://game.example/frame")
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session._page = SimpleNamespace(frames=[portal, game], is_closed=lambda: False)
+    session._sync_source = True
+    session._inspector_enabled = False
+    session._drag_item_visible = False
+    session._scrollbars_visible = False
+    session._configured_frames = {}
+    session._sync_capture_frame = lambda: game
+
+    armed = session._repair_and_count_sync_frames()
+
+    assert armed == 1
+    assert portal.arguments == [[False, False]]
+    assert game.arguments == [[True, False]]
+
+
 def test_sync_repair_installs_listeners_into_replaced_iframe_document() -> None:
     class ReplacedFrame:
         url = "https://ik.playfun.vn/play-game"
