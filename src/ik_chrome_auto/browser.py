@@ -1912,46 +1912,46 @@ class ChromeProfileSession:
         return events
 
     def apply_synced_input(self, event: dict[str, Any]) -> dict[str, Any] | None:
-        """Apply one mirrored event and return its resolved pointer transform."""
+        """Apply one mirrored event through the target's canvas-local CDP.
+
+        Sync targets frequently remain background Chrome windows.  Sending
+        their event through ``page.mouse`` only proves that Playwright sent a
+        page-level event; Chromium may leave it in the outer portal instead of
+        forwarding it into the background WebGL renderer.  The former CDP
+        route is profile-local, does not touch the native cursor, and uses the
+        same canvas origin as the source ratio.
+        """
         event_type = str(event.get("type", ""))
         if event_type in {"keydown", "keyup"}:
             self._apply_synced_keyboard_input(event, event_type)
             return None
         box = self._synced_pointer_target_box(event)
-        # ``calculate_target_point`` is deliberately canvas-local.  The
-        # Playwright mouse, unlike the CDP game dispatcher, consumes main-page
-        # viewport coordinates, so retain the live canvas left/top at this one
-        # final boundary.  Dropping it made every compact grid window receive
-        # clicks near its page origin instead of inside its game canvas.
-        surface_x, surface_y = calculate_target_point(event, box)
-        x = float(box.get("x", 0.0)) + surface_x
-        y = float(box.get("y", 0.0)) + surface_y
+        x, y = calculate_target_point(event, box)
         button_number = int(event.get("pointer", {}).get("button", 0))
         button = {0: "left", 1: "middle", 2: "right"}.get(button_number, "left")
+        buttons = int(event.get("pointer", {}).get("buttons", 0) or 0)
+        cdp = self._get_page_cdp_session(self.page)
         point = ViewportPoint(x, y)
         if event_type in {"pointerdown", "pointermove", "pointerup"}:
-            ProfileInputEngine.mirrored_pointer(
-                self.page,
+            ProfileInputEngine.pointer(
+                cdp,
                 point,
                 event_type=event_type,
                 button=button,
+                buttons=buttons,
             )
             if event_type == "pointerup":
                 self._sync_pointer_target_box = None
         elif event_type == "wheel":
             wheel = event.get("wheel", {})
-            ProfileInputEngine.mirrored_wheel(
-                self.page,
+            ProfileInputEngine.wheel(
+                cdp,
                 point,
                 float(wheel.get("delta_x", 0.0)),
                 float(wheel.get("delta_y", 0.0)),
             )
         return {
-            # Keep this in the worker event log.  A successful raw CDP call is
-            # not sufficient evidence that an OOPIF game surface received a
-            # pointer event; mirrored input must go through Playwright's page
-            # mouse so Chromium performs the frame-aware hit test.
-            "dispatch_route": "playwright_page_mouse",
+            "dispatch_route": "cdp_game_surface",
             "x": round(float(x), 3),
             "y": round(float(y), 3),
             "surface_x": round(float(box.get("x", 0.0)), 3),
@@ -1976,23 +1976,15 @@ class ChromeProfileSession:
             frame = self._frame_for_input(event)
             canvas = event.get("canvas")
             if isinstance(canvas, dict):
-                box = self._canvas_page_box(frame, int(canvas.get("index", 0)))
+                box = self._canvas_box(frame, int(canvas.get("index", 0)))
             else:
-                box = self._frame_page_box(frame)
+                box = self._frame_box(frame)
         except Exception:
             cached = getattr(self, "_sync_last_target_box", None)
             box = dict(cached) if cached is not None else self._viewport_surface_box()
-        # The source event is normalized to the game canvas ratio.  Keep the
-        # target canvas's page position, however: Playwright's ``page.mouse``
-        # is iframe-aware but its arguments are main-page coordinates.  This
-        # is the sole page-coordinate conversion for mirrored input; it is not
-        # an iframe offset applied to the logical game point.
-        box = {
-            "x": float(box.get("x", 0.0)),
-            "y": float(box.get("y", 0.0)),
-            "width": max(1.0, float(box["width"])),
-            "height": max(1.0, float(box["height"])),
-        }
+        # Raw CDP game input consumes the canvas-local surface.  Normalize a
+        # measured page box here so iframe offsets never enter Sync mapping.
+        box = _origin_surface_box(box)
         self._sync_last_target_box = dict(box)
         if event_type == "pointerdown":
             self._sync_pointer_target_box = dict(box)
