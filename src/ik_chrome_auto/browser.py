@@ -16,7 +16,6 @@ from urllib.request import urlopen
 
 from ik_chrome_auto.interaction import (
     INTERACTION_PROBE,
-    INTERACTION_PROBE_VERSION,
     calculate_target_point,
     validate_viewport,
 )
@@ -1733,37 +1732,14 @@ class ChromeProfileSession:
         self._ensure_page_runtime(page)
         self._configure_interaction_frames(force=True)
 
-    def prepare_synced_input_runtime(self) -> None:
-        """Refresh a follower's live game frame before a Sync session starts.
-
-        A profile may have completed its initial navigation while the dashboard
-        was opening the remaining Chrome windows.  Its Playwright page is
-        usable, but the iframe/canvas locators can still describe the previous
-        document until we run the normal interaction setup again.  Do this
-        once when Sync starts, without detaching the page CDP session used for
-        keyboard input.
-        """
-        self._sync_pointer_target_box = None
-        self._sync_last_target_box = None
-        self._configure_interaction_frames(force=True)
-
     def _repair_and_count_sync_frames(self) -> int:
-        """Re-arm input capture in every retained/reconnected game frame.
-
-        A portal may replace or nest its game iframe after Chrome starts. The
-        visible canvas is not stable enough to nominate one source frame in
-        advance: that made a correctly armed but non-interactive wrapper the
-        sole source on some profiles.  Each emitted event retains its frame
-        URL and canvas ratio, so the follower can resolve the matching frame
-        safely at dispatch time.
-        """
+        """Re-arm input capture in retained/reconnected Chrome documents."""
         armed = 0
         for frame in self.page.frames:
             try:
                 probe_installed = frame.evaluate(
-                    f"""() => Boolean(
+                    """() => Boolean(
                         window.__IK_INTERACTION_PROBE_INSTALLED &&
-                        window.__IK_INTERACTION_PROBE_VERSION === {INTERACTION_PROBE_VERSION} &&
                         typeof window.__IK_SET_INTERACTION_MODES === 'function'
                     )"""
                 )
@@ -1788,12 +1764,11 @@ class ChromeProfileSession:
                         window.__IK_SET_INTERACTION_MODES(syncSource, inspectEnabled);
                         return Boolean(
                             window.__IK_INTERACTION_PROBE_INSTALLED &&
-                            window.__IK_INTERACTION_PROBE_VERSION === __IK_PROBE_VERSION__ &&
                             Array.isArray(window.__IK_SYNC_EVENTS) &&
                             typeof window.__IK_SET_INTERACTION_MODES === 'function' &&
                             window.__IK_SYNC_SOURCE === Boolean(syncSource)
                         );
-                    }""".replace("__IK_PROBE_VERSION__", str(INTERACTION_PROBE_VERSION)),
+                    }""",
                     [self._sync_source, self._inspector_enabled],
                 )
                 if ready:
@@ -1816,9 +1791,8 @@ class ChromeProfileSession:
         for frame in self.page.frames:
             try:
                 if frame.evaluate(
-                    f"""() => Boolean(
+                    """() => Boolean(
                         window.__IK_INTERACTION_PROBE_INSTALLED &&
-                        window.__IK_INTERACTION_PROBE_VERSION === {INTERACTION_PROBE_VERSION} &&
                         Array.isArray(window.__IK_SYNC_EVENTS) &&
                         typeof window.__IK_SET_INTERACTION_MODES === 'function' &&
                         window.__IK_SYNC_SOURCE === true
@@ -1924,17 +1898,7 @@ class ChromeProfileSession:
         return events
 
     def apply_synced_input(self, event: dict[str, Any]) -> dict[str, Any] | None:
-        """Apply one mirrored event through the target's measured page canvas.
-
-        Sync targets frequently remain background Chrome windows.  Sending
-        their event through ``page.mouse`` only proves that Playwright sent a
-        page-level event; Chromium may leave it in the outer portal instead of
-        forwarding it into the background WebGL renderer.  The former CDP
-        route is profile-local, does not touch the native cursor, and uses the
-        exact page rectangle of the target canvas. Each Chrome window can have
-        a different iframe origin; treating every canvas as (0, 0) shifts
-        clicks for only part of a large profile grid.
-        """
+        """Apply one mirrored event and return its resolved pointer transform."""
         event_type = str(event.get("type", ""))
         if event_type in {"keydown", "keyup"}:
             self._apply_synced_keyboard_input(event, event_type)
@@ -1943,29 +1907,30 @@ class ChromeProfileSession:
         x, y = calculate_target_point(event, box)
         button_number = int(event.get("pointer", {}).get("button", 0))
         button = {0: "left", 1: "middle", 2: "right"}.get(button_number, "left")
-        buttons = int(event.get("pointer", {}).get("buttons", 0) or 0)
-        cdp = self._get_page_cdp_session(self.page)
         point = ViewportPoint(x, y)
         if event_type in {"pointerdown", "pointermove", "pointerup"}:
-            ProfileInputEngine.pointer(
-                cdp,
+            ProfileInputEngine.mirrored_pointer(
+                self.page,
                 point,
                 event_type=event_type,
                 button=button,
-                buttons=buttons,
             )
             if event_type == "pointerup":
                 self._sync_pointer_target_box = None
         elif event_type == "wheel":
             wheel = event.get("wheel", {})
-            ProfileInputEngine.wheel(
-                cdp,
+            ProfileInputEngine.mirrored_wheel(
+                self.page,
                 point,
                 float(wheel.get("delta_x", 0.0)),
                 float(wheel.get("delta_y", 0.0)),
             )
         return {
-            "dispatch_route": "cdp_page_canvas",
+            # Keep this in the worker event log.  A successful raw CDP call is
+            # not sufficient evidence that an OOPIF game surface received a
+            # pointer event; mirrored input must go through Playwright's page
+            # mouse so Chromium performs the frame-aware hit test.
+            "dispatch_route": "playwright_page_mouse",
             "x": round(float(x), 3),
             "y": round(float(y), 3),
             "surface_x": round(float(box.get("x", 0.0)), 3),
@@ -1975,7 +1940,7 @@ class ChromeProfileSession:
         }
 
     def _synced_pointer_target_box(self, event: dict[str, Any]) -> dict[str, float]:
-        """Resolve and retain one page-canvas transform for a complete gesture.
+        """Resolve and retain one canvas-local transform for a complete gesture.
 
         During iframe navigation Chrome can visibly retain the game frame
         while Playwright temporarily cannot enumerate its canvas. Reuse the
@@ -1990,21 +1955,16 @@ class ChromeProfileSession:
             frame = self._frame_for_input(event)
             canvas = event.get("canvas")
             if isinstance(canvas, dict):
-                box = self._canvas_page_box(frame, int(canvas.get("index", 0)))
+                box = self._canvas_box(frame, int(canvas.get("index", 0)))
             else:
-                box = self._frame_page_box(frame)
+                box = self._frame_box(frame)
         except Exception:
             cached = getattr(self, "_sync_last_target_box", None)
             box = dict(cached) if cached is not None else self._viewport_surface_box()
-        # ``Input.dispatchMouseEvent`` is attached to the top-level page CDP
-        # session. Keep the browser-measured canvas origin: it is the one
-        # coordinate system Chromium uses to route an event into an iframe.
-        box = {
-            "x": float(box.get("x", 0.0)),
-            "y": float(box.get("y", 0.0)),
-            "width": max(1.0, float(box["width"])),
-            "height": max(1.0, float(box["height"])),
-        }
+        # Enforce the shared game origin at the final sync boundary as well.
+        # This protects the dispatcher if a future locator/frame fallback
+        # starts returning page-relative x/y again.
+        box = _origin_surface_box(box)
         self._sync_last_target_box = dict(box)
         if event_type == "pointerdown":
             self._sync_pointer_target_box = dict(box)
@@ -2194,42 +2154,6 @@ class ChromeProfileSession:
             # gives every profile a different origin in a large window grid.
             return _origin_surface_box(largest)
         return self._frame_box(frame)
-
-    def _canvas_page_box(self, frame: Frame, index: int) -> dict[str, float]:
-        """Return the largest game canvas in main-page CSS coordinates.
-
-        Sync dispatches through the page's CDP session, which consumes the
-        same main-page CSS coordinates as Playwright's page mouse. Preserve
-        the measured page position rather than assuming a zero-origin iframe.
-        """
-        canvases = frame.locator("canvas")
-        boxes: list[dict[str, float]] = []
-        for candidate_index in range(canvases.count()):
-            box = canvases.nth(candidate_index).bounding_box()
-            if box and box["width"] > 0 and box["height"] > 0:
-                boxes.append(box)
-        if boxes:
-            largest = max(boxes, key=lambda item: item["width"] * item["height"])
-            return {
-                "x": float(largest.get("x", 0.0)),
-                "y": float(largest.get("y", 0.0)),
-                "width": float(largest["width"]),
-                "height": float(largest["height"]),
-            }
-        return self._frame_page_box(frame)
-
-    def _frame_page_box(self, frame: Frame) -> dict[str, float]:
-        if frame == self.page.main_frame:
-            return self._frame_box(frame)
-        box = frame.frame_element().bounding_box()
-        if box:
-            return {
-                "x": float(box.get("x", 0.0)),
-                "y": float(box.get("y", 0.0)),
-                "width": float(box["width"]),
-                "height": float(box["height"]),
-            }
-        raise RuntimeError("Không xác định được vị trí frame đích để đồng bộ thao tác")
 
     def _frame_box(self, frame: Frame) -> dict[str, float]:
         if frame == self.page.main_frame:

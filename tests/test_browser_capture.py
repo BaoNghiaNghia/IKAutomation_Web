@@ -628,7 +628,7 @@ def test_fixed_automation_renderer_never_rescales_reference_clicks_to_css_canvas
     assert transform.to_viewport(CanvasReferencePoint(265.0, 670.0)) == (265.0, 670.0)
 
 
-def test_synced_pointer_dispatches_through_canvas_local_cdp() -> None:
+def test_synced_pointer_dispatches_through_oopif_aware_profile_mouse() -> None:
     session, _canvas, context, page = make_session()
 
     resolved = session.apply_synced_input(
@@ -640,22 +640,13 @@ def test_synced_pointer_dispatches_through_canvas_local_cdp() -> None:
         }
     )
 
-    assert page.mouse_calls == []
-    assert context.sessions[0].calls == [
-        (
-            "Input.dispatchMouseEvent",
-            {
-                "type": "mousePressed",
-                "x": 320.0,
-                "y": 360.0,
-                "button": "left",
-                "buttons": 0,
-                "clickCount": 1,
-            },
-        )
+    assert context.sessions[0].calls == []
+    assert page.mouse_calls == [
+        ("move", (320.0, 360.0), {}),
+        ("down", (), {"button": "left"}),
     ]
     assert resolved == {
-        "dispatch_route": "cdp_page_canvas",
+        "dispatch_route": "playwright_page_mouse",
         "x": 320.0,
         "y": 360.0,
         "surface_x": 0.0,
@@ -663,27 +654,6 @@ def test_synced_pointer_dispatches_through_canvas_local_cdp() -> None:
         "surface_width": 1280.0,
         "surface_height": 720.0,
     }
-
-
-def test_synced_pointer_preserves_target_canvas_page_position() -> None:
-    session, _canvas, context, _page = make_session()
-    session._frame_for_input = lambda _event: object()
-    session._canvas_page_box = lambda _frame, _index: {
-        "x": 18.0,
-        "y": 24.0,
-        "width": 640.0,
-        "height": 360.0,
-    }
-
-    resolved = session.apply_synced_input(
-        {"type": "pointerdown", "canvas": {"ratio_x": 0.5, "ratio_y": 0.5}}
-    )
-
-    _method, params = context.sessions[0].calls[0]
-    assert params["x"] == 338.0
-    assert params["y"] == 204.0
-    assert resolved["surface_x"] == 18.0
-    assert resolved["surface_y"] == 24.0
 
 
 def test_escape_is_dispatched_without_focusing_real_window() -> None:
@@ -774,35 +744,6 @@ def test_sync_probe_is_rearmed_for_a_retained_browser_frame() -> None:
     assert armed == 1
     assert frame.arguments == [[True, False]]
     assert id(frame) in session._configured_frames
-
-
-def test_sync_arms_every_frame_to_survive_nested_game_iframe_replacement() -> None:
-    class Frame:
-        def __init__(self, url: str) -> None:
-            self.url = url
-            self.arguments: list[list[bool]] = []
-
-        def evaluate(
-            self, _script: str, argument: list[bool] | None = None
-        ) -> bool:
-            if argument is not None:
-                self.arguments.append(argument)
-            return True
-
-    portal = Frame("https://portal.example/")
-    game = Frame("https://game.example/frame")
-    session = ChromeProfileSession.__new__(ChromeProfileSession)
-    session._page = SimpleNamespace(frames=[portal, game], is_closed=lambda: False)
-    session._sync_source = True
-    session._inspector_enabled = False
-    session._drag_item_visible = False
-    session._scrollbars_visible = False
-    session._configured_frames = {}
-    armed = session._repair_and_count_sync_frames()
-
-    assert armed == 2
-    assert portal.arguments == [[True, False]]
-    assert game.arguments == [[True, False]]
 
 
 def test_sync_repair_installs_listeners_into_replaced_iframe_document() -> None:
@@ -928,7 +869,7 @@ def test_synced_pointer_reuses_one_transform_until_pointer_up() -> None:
             {"x": 30.0, "y": 40.0, "width": 800.0, "height": 450.0},
         )
     )
-    session._canvas_page_box = lambda _frame, _index: next(boxes)
+    session._canvas_box = lambda _frame, _index: next(boxes)
     down = {"type": "pointerdown", "canvas": {"index": 0}}
     move = {"type": "pointermove", "canvas": {"index": 0}}
     up = {"type": "pointerup", "canvas": {"index": 0}}
@@ -939,8 +880,8 @@ def test_synced_pointer_reuses_one_transform_until_pointer_up() -> None:
     session._sync_pointer_target_box = None
 
     assert session._synced_pointer_target_box(down) == {
-        "x": 30.0,
-        "y": 40.0,
+        "x": 0.0,
+        "y": 0.0,
         "width": 800.0,
         "height": 450.0,
     }

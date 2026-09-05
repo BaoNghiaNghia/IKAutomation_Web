@@ -3,16 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 
-# Chrome profiles persist across app upgrades.  This version lets a live tab
-# replace an obsolete in-page probe instead of trusting its old installed flag.
-INTERACTION_PROBE_VERSION = 2
-
-
 INTERACTION_PROBE = r"""
 (() => {
-  const probeVersion = 2;
-  if (window.__IK_INTERACTION_PROBE_VERSION === probeVersion) return;
-  window.__IK_INTERACTION_PROBE_VERSION = probeVersion;
+  if (window.__IK_INTERACTION_PROBE_INSTALLED) return;
   window.__IK_INTERACTION_PROBE_INSTALLED = true;
   window.__IK_SYNC_SOURCE = false;
   window.__IK_INSPECT_ENABLED = false;
@@ -21,7 +14,6 @@ INTERACTION_PROBE = r"""
   window.__IK_COORDINATE_EVENTS = [];
   let pointerActive = false;
   let lastMoveAt = 0;
-  let lastPointerSample = null;
   let sequence = 0;
   const activeKeys = new Map();
 
@@ -138,26 +130,6 @@ INTERACTION_PROBE = r"""
     if (window.__IK_SYNC_EVENTS.length > 500) window.__IK_SYNC_EVENTS.splice(0, 100);
   };
 
-  // PointerEvent is preferred, but certain retained game iframes expose only
-  // MouseEvent to a listener installed after navigation. Mouse listeners are
-  // therefore a fallback; suppress their normal PointerEvent counterpart.
-  const rememberPointer = (event, type) => {
-    lastPointerSample = {
-      type,
-      x: Number(event.clientX || 0),
-      y: Number(event.clientY || 0),
-      button: Number(event.button ?? 0),
-      at: performance.now()
-    };
-  };
-  const isMouseDuplicateOfPointer = (event, type) => {
-    if (!lastPointerSample || lastPointerSample.type !== type) return false;
-    return performance.now() - lastPointerSample.at < 80 &&
-      lastPointerSample.x === Number(event.clientX || 0) &&
-      lastPointerSample.y === Number(event.clientY || 0) &&
-      lastPointerSample.button === Number(event.button ?? 0);
-  };
-
   const describeKeyboard = (event, type) => ({
     sequence: ++sequence,
     type,
@@ -202,7 +174,6 @@ INTERACTION_PROBE = r"""
   window.addEventListener('pointerdown', (event) => {
     if (blockInspector(event, true)) return;
     pointerActive = true;
-    rememberPointer(event, 'pointerdown');
     pushSync(event, 'pointerdown');
   }, true);
   window.addEventListener('pointermove', (event) => {
@@ -211,36 +182,15 @@ INTERACTION_PROBE = r"""
     const now = performance.now();
     if (now - lastMoveAt < 24) return;
     lastMoveAt = now;
-    rememberPointer(event, 'pointermove');
     pushSync(event, 'pointermove');
   }, true);
   window.addEventListener('pointerup', (event) => {
     if (blockInspector(event, false)) return;
-    rememberPointer(event, 'pointerup');
     pushSync(event, 'pointerup');
     pointerActive = false;
   }, true);
   window.addEventListener('pointercancel', (event) => {
     if (blockInspector(event, false)) return;
-    rememberPointer(event, 'pointerup');
-    pushSync(event, 'pointerup');
-    pointerActive = false;
-  }, true);
-  window.addEventListener('mousedown', (event) => {
-    if (blockInspector(event, true) || isMouseDuplicateOfPointer(event, 'pointerdown')) return;
-    pointerActive = true;
-    pushSync(event, 'pointerdown');
-  }, true);
-  window.addEventListener('mousemove', (event) => {
-    if (window.__IK_INSPECT_ENABLED || !pointerActive || !window.__IK_SYNC_SOURCE) return;
-    if (isMouseDuplicateOfPointer(event, 'pointermove')) return;
-    const now = performance.now();
-    if (now - lastMoveAt < 24) return;
-    lastMoveAt = now;
-    pushSync(event, 'pointermove');
-  }, true);
-  window.addEventListener('mouseup', (event) => {
-    if (blockInspector(event, false) || isMouseDuplicateOfPointer(event, 'pointerup')) return;
     pushSync(event, 'pointerup');
     pointerActive = false;
   }, true);
@@ -314,14 +264,12 @@ def validate_viewport(width: int, height: int) -> tuple[int, int]:
 
 
 def calculate_target_point(event: dict[str, Any], box: dict[str, float]) -> tuple[float, float]:
-    """Map a source gesture to a follower's live page canvas rectangle.
+    """Map a source gesture to one follower's canvas-local surface.
 
     Source CSS/backing dimensions are intentionally ignored. The probe has
     already reduced the master point to ratios, so maximizing the master (or
     restoring it) cannot change the logical point sent to compact followers.
-    Only the follower's current rectangle participates in this transform. CDP
-    mouse events are page-viewport coordinates, not iframe-local coordinates,
-    so the canvas' measured x/y must be included exactly once.
+    Only the follower's current width/height participate in this transform.
     """
     canvas = event.get("canvas")
     if isinstance(canvas, dict):
@@ -334,8 +282,8 @@ def calculate_target_point(event: dict[str, Any], box: dict[str, float]) -> tupl
     ratio_x = min(1.0, max(0.0, ratio_x))
     ratio_y = min(1.0, max(0.0, ratio_y))
     return (
-        float(box.get("x", 0.0)) + float(box["width"]) * ratio_x,
-        float(box.get("y", 0.0)) + float(box["height"]) * ratio_y,
+        float(box["width"]) * ratio_x,
+        float(box["height"]) * ratio_y,
     )
 
 

@@ -10,7 +10,6 @@ import pytest
 import ik_chrome_auto.runner as runner_module
 from ik_chrome_auto.models import CommandKind, WorkerCommand
 from ik_chrome_auto.runner import MultiProfileRunner, ProfileWorker
-from ik_chrome_auto.sync_engine import SyncInputEngine
 from ik_chrome_auto.windows import ProcessResourceUsage
 from ik_chrome_auto.windows import WindowRect
 
@@ -26,31 +25,29 @@ class FakeWorker:
 
 def make_runner() -> MultiProfileRunner:
     runner = MultiProfileRunner.__new__(MultiProfileRunner)
+    runner.sync_enabled = True
+    runner.sync_master_id = "master"
+    runner.sync_target_ids = {"follower-open", "follower-closed"}
+    runner._sync_lock = threading.Lock()
     runner.event_log = SimpleNamespace(write=lambda _event, _payload: None)
     runner.workers = {
         "master": FakeWorker(object()),
         "follower-open": FakeWorker(object()),
         "follower-closed": FakeWorker(None),
     }
-    runner._sync_engine = SyncInputEngine(runner.workers, runner.event_log)
-    runner._sync_engine.enabled = True
-    runner._sync_engine.master_id = "master"
-    runner._sync_engine.target_ids = {"follower-open", "follower-closed"}
     return runner
 
 
 def test_sync_routes_master_event_only_to_open_followers() -> None:
     runner = make_runner()
-    down = {"type": "pointerdown", "sequence": 1, "canvas": {"ratio_x": 0.5, "ratio_y": 0.5}}
-    up = {"type": "pointerup", "sequence": 2, "canvas": {"ratio_x": 0.5, "ratio_y": 0.5}}
+    event = {"type": "pointerdown", "canvas": {"ratio_x": 0.5, "ratio_y": 0.5}}
 
-    runner._on_input("master", down)
-    runner._on_input("master", up)
+    runner._on_input("master", event)
 
     follower = runner.workers["follower-open"]
     assert len(follower.commands) == 1
-    assert follower.commands[0].kind == CommandKind.SYNC_CLICK
-    assert follower.commands[0].payload == {"down": down, "up": up}
+    assert follower.commands[0].kind == CommandKind.SYNC_INPUT
+    assert follower.commands[0].payload["event"] == event
     assert runner.workers["master"].commands == []
     assert runner.workers["follower-closed"].commands == []
 
@@ -61,8 +58,7 @@ def test_sync_dispatch_log_contains_source_ratio_for_remote_diagnostics() -> Non
     runner.event_log = SimpleNamespace(
         write=lambda event, payload: records.append((event, payload))
     )
-    runner._sync_engine._event_log = runner.event_log
-    down = {
+    event = {
         "sequence": 17,
         "type": "pointerdown",
         "canvas": {
@@ -72,19 +68,23 @@ def test_sync_dispatch_log_contains_source_ratio_for_remote_diagnostics() -> Non
             "css_height": 1080.0,
         },
     }
-    up = {"sequence": 18, "type": "pointerup", "canvas": down["canvas"]}
 
-    runner._on_input("master", down)
-    runner._on_input("master", up)
+    runner._on_input("master", event)
 
     assert records == [
         (
-            "sync_click_dispatched",
+            "sync_input_dispatched",
             {
                 "master_profile_id": "master",
+                "type": "pointerdown",
                 "target_count": 1,
-                "down_sequence": 17,
-                "up_sequence": 18,
+                "sequence": 17,
+                "source": {
+                    "ratio_x": 0.75,
+                    "ratio_y": 0.5,
+                    "css_width": 1920.0,
+                    "css_height": 1080.0,
+                },
             },
         )
     ]
@@ -109,19 +109,17 @@ def test_sync_routes_input_only_to_selected_open_followers() -> None:
     runner.workers["follower-other"] = FakeWorker(object())
     runner.sync_target_ids = {"follower-open"}
 
-    runner._on_input("master", {"type": "pointerdown", "sequence": 1})
-    runner._on_input("master", {"type": "pointerup", "sequence": 2})
+    runner._on_input("master", {"type": "pointerdown"})
 
     assert len(runner.workers["follower-open"].commands) == 1
-    assert runner.workers["follower-open"].commands[0].kind == CommandKind.SYNC_CLICK
     assert runner.workers["follower-other"].commands == []
 
 
 def test_enable_sync_keeps_only_selected_targets_and_marks_master_as_source() -> None:
     runner = make_runner()
-    runner._sync_engine.enabled = False
-    runner._sync_engine.master_id = None
-    runner._sync_engine.target_ids.clear()
+    runner.sync_enabled = False
+    runner.sync_master_id = None
+    runner.sync_target_ids.clear()
 
     runner.enable_sync("master", {"follower-open", "missing", "master"})
 
@@ -129,9 +127,7 @@ def test_enable_sync_keeps_only_selected_targets_and_marks_master_as_source() ->
     assert runner.sync_master_id == "master"
     assert runner.sync_target_ids == {"follower-open"}
     assert runner.workers["master"].commands[-1].payload == {"enabled": True}
-    assert runner.workers["follower-open"].commands == [
-        WorkerCommand(CommandKind.PREPARE_SYNC_TARGET, {})
-    ]
+    assert runner.workers["follower-open"].commands == []
 
 
 def test_add_sync_target_does_not_rearm_or_reset_the_active_master() -> None:
@@ -140,7 +136,6 @@ def test_add_sync_target_does_not_rearm_or_reset_the_active_master() -> None:
     runner.event_log = SimpleNamespace(
         write=lambda event, payload: records.append((event, payload))
     )
-    runner._sync_engine._event_log = runner.event_log
     runner.workers["follower-new"] = FakeWorker(object())
 
     assert runner.add_sync_target("follower-new") is True
@@ -203,7 +198,6 @@ def test_large_sync_fans_out_every_move_and_never_drops_pointer_up() -> None:
         "master": FakeWorker(object()),
         **{profile_id: FakeWorker(object()) for profile_id in followers},
     }
-    runner._sync_engine._workers = runner.workers
     runner.sync_target_ids = followers
     runner._on_input("master", {"type": "pointermove", "sequence": 1})
     runner._on_input("master", {"type": "pointermove", "sequence": 2})
