@@ -994,6 +994,19 @@ class ProfileWorker:
                     self._publish(WorkerState.STARTING, "Đang mở Chrome profile")
                     self._ensure_session(navigate=True)
                     self._publish(WorkerState.READY, "Chrome và trang game đã mở")
+                elif command.kind == CommandKind.AUTO_LOGIN:
+                    if self.session is None:
+                        raise RuntimeError("Profile chưa mở để tự đăng nhập")
+                    self._publish(WorkerState.RUNNING, "Đang kiểm tra tự đăng nhập")
+                    attempted = self.session.begin_auto_login()
+                    self.event_log.write(
+                        "auto_login_batch_checked",
+                        {"profile_id": self.profile.id, "form_submitted": attempted},
+                    )
+                    self._publish(
+                        WorkerState.READY,
+                        "Đã gửi đăng nhập tự động" if attempted else "Không thấy form đăng nhập",
+                    )
                 elif command.kind == CommandKind.READ:
                     self._publish(WorkerState.RUNNING, "Đang đọc dữ liệu")
                     functions = self._functions()

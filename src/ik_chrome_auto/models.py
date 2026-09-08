@@ -22,6 +22,7 @@ class WorkerState(StrEnum):
 
 class CommandKind(StrEnum):
     OPEN = "open"
+    AUTO_LOGIN = "auto_login"
     READ = "read"
     SCREENSHOT = "screenshot"
     RESIZE = "resize"

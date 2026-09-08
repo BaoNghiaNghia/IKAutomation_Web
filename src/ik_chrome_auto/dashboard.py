@@ -155,6 +155,8 @@ class Dashboard(QWidget):
         self._farm_open_queue: deque[str] = deque()
         self._farm_next_open_at = 0.0
         self._farm_open_deadline = 0.0
+        self._farm_login_queue: deque[str] = deque()
+        self._farm_login_in_flight: str | None = None
         self._farm_launch_policy = FarmLaunchPolicy.for_total_memory(32 * 1_073_741_824)
         self._farm_batch_profiles: set[str] = set()
         self._farm_batch_submitted = 0
@@ -1611,15 +1613,39 @@ class Dashboard(QWidget):
         except Exception as error:
             self._abort_farm_opening("Không sắp xếp được tab", str(error), critical=True)
             return
+        self._farm_launcher_phase = "logging_in"
+        self._farm_login_queue = deque(
+            profile.id for profile in self.config.profiles if profile.id in ready
+        )
+        self._farm_login_in_flight = None
+        self.farm_launcher.setEnabled(False)
+        self.farm_launcher.setText("Đang đăng nhập…")
+        self._set_labeled_action_icon(self.farm_launcher, FIF.PLAY)
+        self.farm_all_button.setEnabled(False)
+        self._append_log(
+            f"Đã mở và xếp {count} tab theo {columns} cột (trái → phải, trên → dưới)"
+        )
+        self._append_log(f"Đã mở xong toàn bộ tab; bắt đầu kiểm tra đăng nhập cho {len(ready)} profile")
+        self._advance_farm_login()
+
+    def _advance_farm_login(self) -> None:
+        """Submit login checks one profile at a time after bulk startup."""
+        if self._farm_launcher_phase != "logging_in" or self._farm_login_in_flight:
+            return
+        if self._farm_login_queue:
+            profile_id = self._farm_login_queue.popleft()
+            if self.runner.has_open_session(profile_id):
+                self._farm_login_in_flight = profile_id
+                self.runner.submit(profile_id, CommandKind.AUTO_LOGIN)
+                self._append_log(f"[{profile_id}] Đang kiểm tra form đăng nhập ({len(self._farm_login_queue)} còn lại)")
+            return
         self._farm_launcher_phase = "ready"
         self.farm_launcher.setEnabled(True)
         self.farm_launcher.setText("Đóng tabs")
         self._set_labeled_action_icon(self.farm_launcher, FIF.CLOSE)
         self.farm_all_button.setEnabled(self._opened_profile_count() > 1)
-        self._append_log(
-            f"Đã mở và xếp {count} tab theo {columns} cột (trái → phải, trên → dưới)"
-        )
-        self._notify_telegram(f"✅ Tổng profile đang mở: {len(ready)}.")
+        self._append_log("Đã hoàn tất lượt kiểm tra tự đăng nhập")
+        self._notify_telegram(f"✅ Tổng profile đang mở: {self._opened_profile_count()}.")
 
     def _advance_farm_opening(self) -> None:
         """Open profiles in resource-guarded batches instead of one startup burst."""
@@ -1947,6 +1973,12 @@ class Dashboard(QWidget):
             if self._farm_launcher_phase == "opening" and snap.profile_id in self._farm_launch_profiles:
                 self._farm_open_states[snap.profile_id] = snap.state
             if (
+                self._farm_launcher_phase == "logging_in"
+                and snap.profile_id == self._farm_login_in_flight
+                and snap.state in {WorkerState.READY, WorkerState.COMPLETED, WorkerState.ERROR}
+            ):
+                self._farm_login_in_flight = None
+            if (
                 self._farm_launcher_phase == "stopping"
                 and snap.profile_id == self._farm_close_in_flight
                 and snap.state == WorkerState.STOPPED
@@ -2007,6 +2039,7 @@ class Dashboard(QWidget):
         self._finish_auto_arrange_if_ready()
         self._advance_farm_opening()
         self._finish_farm_opening_if_ready()
+        self._advance_farm_login()
         self._advance_farm_quiescing()
         self._advance_farm_stopping()
         self._advance_monitoring()

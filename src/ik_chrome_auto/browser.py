@@ -361,6 +361,7 @@ class ChromeProfileSession:
         # profiles start together. Keep a bounded background retry window
         # instead of relying on the first DOMContentLoaded snapshot.
         self._auto_login_completed = False
+        self._auto_login_deferred = True
         self._auto_login_next_at = 0.0
         self._auto_login_deadline = time.monotonic() + _AUTO_LOGIN_WINDOW_SECONDS
         # Normal profile windows retain their responsive iframe dimensions.
@@ -435,8 +436,6 @@ class ChromeProfileSession:
             )
         if navigate and not self._is_target(self.page.url):
             self.goto()
-        elif navigate:
-            self.auto_login_if_needed()
         self._bind_native_window()
         return self.page
 
@@ -673,13 +672,19 @@ class ChromeProfileSession:
         )
         self._configure_interaction_frames(force=True)
         self._apply_profile_title()
-        self.auto_login_if_needed()
 
     def _reset_auto_login_window(self) -> None:
         """Give every newly opened/navigated profile a fresh login window."""
         self._auto_login_completed = False
         self._auto_login_next_at = 0.0
         self._auto_login_deadline = time.monotonic() + _AUTO_LOGIN_WINDOW_SECONDS
+        self._auto_login_deferred = True
+
+    def begin_auto_login(self) -> bool:
+        """Start login only after the bulk Chrome startup phase is complete."""
+        self._reset_auto_login_window()
+        self._auto_login_deferred = False
+        return self.auto_login_if_needed()
 
     @staticmethod
     def _first_visible_input(frame: Frame, selectors: tuple[str, ...]) -> Any | None:
@@ -799,7 +804,7 @@ class ChromeProfileSession:
 
     def _retry_auto_login_if_due(self) -> bool:
         """Retry delayed login forms without blocking bulk profile startup."""
-        if getattr(self, "_auto_login_completed", False):
+        if getattr(self, "_auto_login_deferred", False) or getattr(self, "_auto_login_completed", False):
             return False
         now = time.monotonic()
         deadline = float(getattr(self, "_auto_login_deadline", 0.0) or 0.0)
