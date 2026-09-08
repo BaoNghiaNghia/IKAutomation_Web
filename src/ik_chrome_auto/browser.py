@@ -712,7 +712,10 @@ class ChromeProfileSession:
             if frame_identity in seen_frames:
                 continue
             seen_frames.add(frame_identity)
-            if not is_allowed_url(frame.url, self.config.capture.allowed_hosts):
+            frame_url = self._automation_root_url(frame)
+            if not frame_url or not is_allowed_url(
+                frame_url, self.config.capture.allowed_hosts
+            ):
                 continue
             username = self._first_visible_input(frame, LOGIN_USERNAME_SELECTORS)
             password = self._first_visible_input(frame, LOGIN_PASSWORD_SELECTORS)
@@ -747,6 +750,25 @@ class ChromeProfileSession:
                 # must not prevent the valid frame below it from being tried.
                 continue
         return False
+
+    @staticmethod
+    def _automation_root_url(root: Any) -> str | None:
+        """Read a frame URL for both ``Frame`` and nested ``FrameLocator``.
+
+        Playwright ``FrameLocator`` deliberately has no ``url`` property.  It
+        is still a valid root for the form selectors, so read its document URL
+        inside that iframe before applying the credential host allow-list.
+        """
+        direct_url = getattr(root, "url", None)
+        if isinstance(direct_url, str) and direct_url:
+            return direct_url
+        try:
+            located_url = root.locator("html").evaluate(
+                "() => window.location.href"
+            )
+        except Exception:
+            return None
+        return located_url if isinstance(located_url, str) and located_url else None
 
     def _login_form_is_visible(self, frame: Frame) -> bool:
         """Return whether the visible credential pair remains after submit."""

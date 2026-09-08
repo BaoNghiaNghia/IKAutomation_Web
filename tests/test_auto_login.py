@@ -63,6 +63,25 @@ class _Page:
         return False
 
 
+class _NestedFrameLocator:
+    """Small stand-in for Playwright FrameLocator, which has no ``url``."""
+
+    class _Html:
+        @staticmethod
+        def evaluate(_script: str) -> str:
+            return "https://ik.playfun.vn/login"
+
+    def __init__(self, button: _Button) -> None:
+        self.button = button
+
+    def locator(self, selector: str) -> "_NestedFrameLocator._Html":
+        assert selector == "html"
+        return self._Html()
+
+    def get_by_role(self, _role: str, *, name: object) -> _Button:
+        return self.button
+
+
 def test_auto_login_fills_form_and_clicks_login(tmp_path: Path, monkeypatch) -> None:
     config = AppConfig(
         root=tmp_path, source=tmp_path / "config.json", target_url="https://ik.playfun.vn/play-game",
@@ -180,3 +199,38 @@ def test_login_is_retried_when_the_form_stays_visible(tmp_path: Path, monkeypatc
     assert button.clicked is True
     assert session._auto_login_completed is False
     assert session._auto_login_next_at == 25.0 + browser._AUTO_LOGIN_RETRY_SECONDS
+
+
+def test_auto_login_reads_the_url_from_a_nested_frame_locator(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = AppConfig(
+        root=tmp_path,
+        source=tmp_path / "config.json",
+        target_url="https://ik.playfun.vn/play-game",
+        data_dir=tmp_path / "data",
+        browser=BrowserSettings(headless=True),
+        capture=CaptureSettings(),
+    )
+    session = browser.ChromeProfileSession(config, ProfileConfig(id="account-1", name="Account"))
+    button, username, password = _Button(), _Input(), _Input()
+    nested = _NestedFrameLocator(button)
+    session._page = _Page(_Frame(button))  # type: ignore[assignment]
+    monkeypatch.setattr(session, "_frame_roots", lambda: [nested])
+    values = iter([username, password])
+    monkeypatch.setattr(session, "_first_visible_input", lambda *_args: next(values))
+    monkeypatch.setattr(session, "_login_form_is_visible", lambda *_args: False)
+    monkeypatch.setattr(browser.time, "sleep", lambda _seconds: None)
+
+    class Store:
+        def load(self, _profile_id: str) -> object:
+            return types.SimpleNamespace(username="user@example.com", password="secret")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "ik_chrome_auto.credential_store",
+        types.SimpleNamespace(WindowsCredentialStore=Store),
+    )
+
+    assert session.auto_login_if_needed() is True
+    assert button.clicked is True
