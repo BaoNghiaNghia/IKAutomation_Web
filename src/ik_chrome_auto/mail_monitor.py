@@ -67,6 +67,14 @@ _COMBAT_UNREAD_ONE = _TemplateSpec(
     # tight Combat-only ROI remains the primary false-positive boundary.
     0.38,
 )
+_MAIL_UNREAD_ONE = _TemplateSpec(
+    "mail_unread_one.png",
+    (1280, 720),
+    # The mail icon is the lower-left HUD control. Only its own badge can
+    # start Lượt 2; badges on chat, quests, or another HUD action are ignored.
+    (0.07, 0.70, 0.22, 0.91),
+    0.40,
+)
 _READ_ALL_MAIL = _TemplateSpec(
     "read_all_mail.png",
     (1280, 720),
@@ -100,6 +108,10 @@ class BrowserMailMonitor:
     def has_new_combat_mail(self, screenshot_png: bytes) -> bool:
         """Accept only a red badge whose displayed unread count is exactly 1."""
         return self._find(screenshot_png, _COMBAT_UNREAD_ONE) is not None
+
+    def has_new_mail(self, screenshot_png: bytes) -> bool:
+        """Accept only the red ``1`` badge attached to the closed Mail icon."""
+        return self._find(screenshot_png, _MAIL_UNREAD_ONE) is not None
 
     def is_territory_attacked(self, screenshot_png: bytes) -> bool:
         return self._find(screenshot_png, _TERRITORY_ATTACKED) is not None

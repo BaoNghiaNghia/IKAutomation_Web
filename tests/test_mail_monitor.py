@@ -116,8 +116,24 @@ class _NoCombatMonitor:
     def find_close_button(self, _png: bytes) -> object:
         raise AssertionError("Lượt 2 must not verify mailbox chrome")
 
+    def has_new_mail(self, _png: bytes) -> bool:
+        return False
+
     def has_new_combat_mail(self, _png: bytes) -> bool:
         return False
+
+
+class _MailBadgeWithoutCombatMonitor(_NoCombatMonitor):
+    def has_new_mail(self, _png: bytes) -> bool:
+        return True
+
+
+class _AttackMailMonitor(_MailBadgeWithoutCombatMonitor):
+    def has_new_combat_mail(self, _png: bytes) -> bool:
+        return True
+
+    def is_territory_attacked(self, _png: bytes) -> bool:
+        return True
 
 
 class _EventLog:
@@ -319,7 +335,7 @@ def test_cancelled_monitor_never_opens_or_reads_mail() -> None:
     assert worker.session.taps == []
 
 
-def test_second_monitor_pass_does_not_verify_mailbox_open_before_badge_scan() -> None:
+def test_second_monitor_pass_skips_profile_when_closed_mail_has_no_badge() -> None:
     worker = ProfileWorker.__new__(ProfileWorker)
     worker.session = _TapSession()
     worker.profile = SimpleNamespace(id="account-1")
@@ -333,9 +349,43 @@ def test_second_monitor_pass_does_not_verify_mailbox_open_before_badge_scan() ->
 
     assert result == "no_new_combat_mail"
     assert captures == [None]
+    assert worker.session.taps == []
+
+
+def test_second_monitor_pass_closes_mail_when_combat_has_no_badge() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker.session = _TapSession()
+    worker.profile = SimpleNamespace(id="account-1")
+    worker.event_log = _EventLog()
+    worker._mail_monitor = _MailBadgeWithoutCombatMonitor()
+    captures: list[object] = []
+    worker._capture_mail_canvas = lambda: (captures.append(None) or (b"png", (1280, 720)))
+    worker._monitor_pause = lambda _seconds: None
+
+    assert worker._check_combat_mail(initial_scan=False) == "no_new_combat_mail"
+    assert captures == [None, None]
+    assert worker.session.taps == [
+        ((146, 581, 2, 2), (1280, 720)),
+        ((1207, 81, 2, 2), (1280, 720)),
+    ]
+
+
+def test_second_monitor_pass_only_reads_first_combat_mail_after_both_badges() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker.session = _TapSession()
+    worker.profile = SimpleNamespace(id="account-1")
+    worker.event_log = _EventLog()
+    worker._mail_monitor = _AttackMailMonitor()
+    captures: list[object] = []
+    worker._capture_mail_canvas = lambda: (captures.append(None) or (b"png", (1280, 720)))
+    worker._monitor_pause = lambda _seconds: None
+
+    assert worker._check_combat_mail(initial_scan=False) == "territory_attacked"
+    assert captures == [None, None, None]
     assert worker.session.taps == [
         ((146, 581, 2, 2), (1280, 720)),
         ((51, 259, 2, 2), (1280, 720)),
+        ((321, 124, 2, 2), (1280, 720)),
         ((1207, 81, 2, 2), (1280, 720)),
     ]
 
@@ -372,6 +422,18 @@ def test_only_red_badge_one_beside_combat_category_is_accepted() -> None:
         cv2.LINE_AA,
     )
     assert monitor.has_new_combat_mail(_png(other_red_badge)) is False
+
+
+def test_only_red_badge_one_beside_closed_mail_icon_is_accepted() -> None:
+    monitor = BrowserMailMonitor()
+    canvas = np.full((720, 1280, 3), 160, dtype=np.uint8)
+    badge_one = _asset(monitor, "mail_unread_one.png")
+    _place(canvas, badge_one, 155, 530)
+    assert monitor.has_new_mail(_png(canvas)) is True
+
+    outside = np.full_like(canvas, 160)
+    _place(outside, badge_one, 500, 530)
+    assert monitor.has_new_mail(_png(outside)) is False
 
 
 def test_territory_attacked_title_is_matched_in_first_mail_area() -> None:

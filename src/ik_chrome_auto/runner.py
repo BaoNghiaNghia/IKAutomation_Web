@@ -610,12 +610,20 @@ class ProfileWorker:
                 )
                 return MAIL_BASELINE
 
-            # Lượt 2 does not need to prove that the mailbox chrome opened.
-            # The only meaningful evidence is the Combat unread badge and,
-            # if present, the subject of its first message.  Avoiding an
-            # extra close-button match also prevents a harmless visual miss
-            # from releasing this profile before its alert scan.
+            # Lượt 2 starts with the closed Mail icon. Do not open anything
+            # unless its own red ``1`` badge is present: most profiles can
+            # then return immediately without changing their game state.
             latest_size = AUTOMATION_RENDERER_SIZE
+            latest_png, latest_size = self._capture_mail_canvas()
+            has_mail_badge = monitor.has_new_mail(latest_png)
+            self._log_monitor(
+                "mail_monitor_mail_badge",
+                found=has_mail_badge,
+                capture_size=latest_size,
+            )
+            if not has_mail_badge:
+                return NO_NEW_COMBAT_MAIL
+
             mail_open = True
             baseline_direct_close = True
             self._log_monitor("mail_monitor_step", pass_number=2, action="open_mail")
@@ -624,13 +632,8 @@ class ProfileWorker:
             if self._mail_monitor_is_cancelled():
                 return SCAN_CANCELLED
 
-            # Pass 2+: Combat is the second category on the left. Use its
-            # fixed canvas-relative X/Y rather than another visual search.
-            self._log_monitor("mail_monitor_step", pass_number=2, action="select_tab", tab="Chiến đấu")
-            self._tap_monitor_viewport_point(COMBAT_TAB_POINT, latest_size)
-            self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
-            if self._mail_monitor_is_cancelled():
-                return SCAN_CANCELLED
+            # Open Mail only revealed the category badges.  Click Combat only
+            # when its own exact red ``1`` badge is present.
             latest_png, latest_size = self._capture_mail_canvas()
             has_badge = monitor.has_new_combat_mail(latest_png)
             self._log_monitor(
@@ -640,6 +643,12 @@ class ProfileWorker:
             )
             if not has_badge:
                 return NO_NEW_COMBAT_MAIL
+
+            self._log_monitor("mail_monitor_step", pass_number=2, action="select_tab", tab="Chiến đấu")
+            self._tap_monitor_viewport_point(COMBAT_TAB_POINT, latest_size)
+            self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
+            if self._mail_monitor_is_cancelled():
+                return SCAN_CANCELLED
 
             # Read exactly the first row so the game's unread state becomes
             # authoritative; no historical row below it is inspected.
