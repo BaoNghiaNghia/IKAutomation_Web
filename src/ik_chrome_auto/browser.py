@@ -118,10 +118,17 @@ class AutomationRendererLayout:
 LOGIN_USERNAME_SELECTORS = (
     "input[autocomplete='username']",
     "input[type='email']",
+    "input[type='text'][name*='account' i]",
+    "input[type='text'][name*='phone' i]",
+    "input[type='text'][name*='login' i]",
     "input[name*='email' i]",
     "input[name*='user' i]",
+    "input[name*='account' i]",
+    "input[name*='phone' i]",
     "input[placeholder*='Email' i]",
     "input[placeholder*='Tên đăng nhập' i]",
+    "input[placeholder*='Tài khoản' i]",
+    "input[placeholder*='Số điện thoại' i]",
 )
 LOGIN_PASSWORD_SELECTORS = (
     "input[autocomplete='current-password']",
@@ -387,6 +394,11 @@ class ChromeProfileSession:
             self._start_managed()
         else:
             self._start_cdp()
+        # A worker may be created long before the user opens this profile.
+        # Start the retry window here, not only in ``goto()``, so an already
+        # loaded login page still receives its full delayed-form retry period.
+        if navigate:
+            self._reset_auto_login_window()
         self._attach_lifecycle()
         if self.config.browser.low_gpu_mode:
             low_gpu_script = _low_gpu_init_script(self.config.browser.render_fps_limit)
@@ -653,9 +665,7 @@ class ChromeProfileSession:
 
     def goto(self, url: str | None = None) -> None:
         target = url or self.config.target_url
-        self._auto_login_completed = False
-        self._auto_login_next_at = 0.0
-        self._auto_login_deadline = time.monotonic() + _AUTO_LOGIN_WINDOW_SECONDS
+        self._reset_auto_login_window()
         self.page.goto(
             target,
             wait_until="domcontentloaded",
@@ -664,6 +674,12 @@ class ChromeProfileSession:
         self._configure_interaction_frames(force=True)
         self._apply_profile_title()
         self.auto_login_if_needed()
+
+    def _reset_auto_login_window(self) -> None:
+        """Give every newly opened/navigated profile a fresh login window."""
+        self._auto_login_completed = False
+        self._auto_login_next_at = 0.0
+        self._auto_login_deadline = time.monotonic() + _AUTO_LOGIN_WINDOW_SECONDS
 
     @staticmethod
     def _first_visible_input(frame: Frame, selectors: tuple[str, ...]) -> Any | None:
@@ -686,7 +702,16 @@ class ChromeProfileSession:
             return False
         if credential is None:
             return False
-        for frame in self.page.frames:
+        # The portal sometimes places its login form one or more iframes below
+        # the page frame.  ``page.frames`` is not complete in that situation.
+        # Reuse the frame walker used by canvas discovery, while retaining the
+        # host allow-list before any credential is entered.
+        seen_frames: set[int] = set()
+        for frame in self._frame_roots():
+            frame_identity = id(frame)
+            if frame_identity in seen_frames:
+                continue
+            seen_frames.add(frame_identity)
             if not is_allowed_url(frame.url, self.config.capture.allowed_hosts):
                 continue
             username = self._first_visible_input(frame, LOGIN_USERNAME_SELECTORS)
@@ -706,7 +731,16 @@ class ChromeProfileSession:
                     # The legacy portal sometimes renders no semantic button
                     # but still submits the password field on Enter.
                     password.press("Enter", timeout=3_000)
-                self._auto_login_completed = True
+                # A click can be intercepted by an overlay or rejected by a
+                # client-side validation rule.  Treat it as successful only
+                # after the actual form disappears; otherwise the idle worker
+                # will retry rather than silently abandoning this profile.
+                time.sleep(0.45)
+                self._auto_login_completed = not self._login_form_is_visible(frame)
+                if not self._auto_login_completed:
+                    self._auto_login_next_at = (
+                        time.monotonic() + _AUTO_LOGIN_RETRY_SECONDS
+                    )
                 return True
             except Exception:
                 # Several login/advert frames can coexist. A stale candidate
@@ -714,12 +748,24 @@ class ChromeProfileSession:
                 continue
         return False
 
+    def _login_form_is_visible(self, frame: Frame) -> bool:
+        """Return whether the visible credential pair remains after submit."""
+        try:
+            return (
+                self._first_visible_input(frame, LOGIN_USERNAME_SELECTORS) is not None
+                and self._first_visible_input(frame, LOGIN_PASSWORD_SELECTORS) is not None
+            )
+        except Exception:
+            # A detached/navigated frame means this submitted form is no
+            # longer a usable candidate, so do not repeat the credentials.
+            return False
+
     @staticmethod
     def _first_visible_login_button(frame: Frame) -> Any | None:
         try:
             button = frame.get_by_role(
                 "button",
-                name=re.compile(r"^(đăng nhập|login|sign in)$", re.IGNORECASE),
+                name=re.compile(r"(đăng nhập|login|sign in)", re.IGNORECASE),
             ).first
             if button.count() and button.is_visible(timeout=500):
                 return button

@@ -74,6 +74,7 @@ def test_auto_login_fills_form_and_clicks_login(tmp_path: Path, monkeypatch) -> 
     session._page = _Page(frame)  # type: ignore[assignment]
     values = iter([username, password])
     monkeypatch.setattr(session, "_first_visible_input", lambda *_args: next(values))
+    monkeypatch.setattr(session, "_login_form_is_visible", lambda *_args: False)
     monkeypatch.setattr(browser.time, "sleep", lambda _seconds: None)
 
     class Store:
@@ -126,6 +127,7 @@ def test_login_falls_back_to_enter_when_submit_button_is_not_exposed(
     values = iter([username, password])
     monkeypatch.setattr(session, "_first_visible_input", lambda *_args: next(values))
     monkeypatch.setattr(session, "_first_visible_login_button", lambda *_args: None)
+    monkeypatch.setattr(session, "_login_form_is_visible", lambda *_args: False)
     monkeypatch.setattr(browser.time, "sleep", lambda _seconds: None)
 
     class Store:
@@ -140,3 +142,41 @@ def test_login_falls_back_to_enter_when_submit_button_is_not_exposed(
 
     assert session.auto_login_if_needed() is True
     assert password.value == "legacy-secret"
+
+
+def test_login_is_retried_when_the_form_stays_visible(tmp_path: Path, monkeypatch) -> None:
+    config = AppConfig(
+        root=tmp_path,
+        source=tmp_path / "config.json",
+        target_url="https://ik.playfun.vn/play-game",
+        data_dir=tmp_path / "data",
+        browser=BrowserSettings(headless=True),
+        capture=CaptureSettings(),
+    )
+    session = browser.ChromeProfileSession(config, ProfileConfig(id="account-1", name="Account"))
+    button, username, password = _Button(), _Input(), _Input()
+    frame = _Frame(button)
+    session._page = _Page(frame)  # type: ignore[assignment]
+
+    def find_input(_frame: object, selectors: tuple[str, ...]) -> _Input:
+        return username if selectors is browser.LOGIN_USERNAME_SELECTORS else password
+
+    monkeypatch.setattr(session, "_first_visible_input", find_input)
+    monkeypatch.setattr(session, "_login_form_is_visible", lambda *_args: True)
+    monkeypatch.setattr(browser.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(browser.time, "monotonic", lambda: 25.0)
+
+    class Store:
+        def load(self, _profile_id: str) -> object:
+            return types.SimpleNamespace(username="user@example.com", password="secret")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "ik_chrome_auto.credential_store",
+        types.SimpleNamespace(WindowsCredentialStore=Store),
+    )
+
+    assert session.auto_login_if_needed() is True
+    assert button.clicked is True
+    assert session._auto_login_completed is False
+    assert session._auto_login_next_at == 25.0 + browser._AUTO_LOGIN_RETRY_SECONDS

@@ -377,7 +377,19 @@ class ProfileWorker:
 
     def _log_monitor(self, event: str, **payload: object) -> None:
         """Write privacy-safe, step-level diagnostics for remote support."""
-        self.event_log.write(event, {"profile_id": self.profile.id, **payload})
+        context = dict(getattr(self, "_monitor_log_context", {}) or {})
+        # Context supplies a stable scan id to join every capture/click/result
+        # in a remote ``events.jsonl``.  Call-specific fields deliberately win
+        # so a close step can accurately report its own pass/action.
+        event_log = getattr(self, "event_log", None)
+        write = getattr(event_log, "write", None)
+        if not callable(write):
+            return
+        profile = getattr(self, "profile", None)
+        write(
+            event,
+            {"profile_id": getattr(profile, "id", "unknown"), **context, **payload},
+        )
 
     def _monitor_pause(self, seconds: float) -> None:
         """Wait briefly without starving Playwright's browser connection."""
@@ -458,7 +470,13 @@ class ProfileWorker:
             raise RuntimeError("Profile chưa mở")
         png, _surface = self.session.capture_game_surface_png()
         image = decode_png(png)
-        return png, (image.width, image.height)
+        image_size = (image.width, image.height)
+        self._log_monitor(
+            "mail_monitor_capture",
+            capture_size=image_size,
+            png_bytes=len(png),
+        )
+        return png, image_size
 
     def _tap_monitor_point(
         self, normalized_x: float, normalized_y: float, image_size: tuple[int, int]
@@ -474,11 +492,14 @@ class ProfileWorker:
                 normalized_x * GAME_REFERENCE_WIDTH,
                 normalized_y * GAME_REFERENCE_HEIGHT,
             )
-            if isinstance(resolved, dict):
-                self.event_log.write(
-                    "mail_control_dispatched",
-                    {"profile_id": self.profile.id, "resolved": resolved},
-                )
+            self._log_monitor(
+                "mail_monitor_input_dispatched",
+                dispatcher="profile_mouse",
+                normalized_x=round(normalized_x, 6),
+                normalized_y=round(normalized_y, 6),
+                capture_size=image_size,
+                resolved=resolved if isinstance(resolved, dict) else None,
+            )
             return
         dispatch_point = getattr(self.session, "dispatch_game_surface_point", None)
         if callable(dispatch_point):
@@ -487,10 +508,24 @@ class ProfileWorker:
                 normalized_y * GAME_REFERENCE_HEIGHT,
                 input_kind="mouse",
             )
+            self._log_monitor(
+                "mail_monitor_input_dispatched",
+                dispatcher="game_surface_point",
+                normalized_x=round(normalized_x, 6),
+                normalized_y=round(normalized_y, 6),
+                capture_size=image_size,
+            )
             return
         dispatch = getattr(self.session, "dispatch_game_surface_input_ratio", None)
         if callable(dispatch):
             dispatch(normalized_x, normalized_y, input_kind="mouse")
+            self._log_monitor(
+                "mail_monitor_input_dispatched",
+                dispatcher="game_surface_ratio",
+                normalized_x=round(normalized_x, 6),
+                normalized_y=round(normalized_y, 6),
+                capture_size=image_size,
+            )
             return
 
         # Compatibility for lightweight test doubles and sessions retained
@@ -510,8 +545,18 @@ class ProfileWorker:
         click_mouse = getattr(self.session, "click_farm_template_mouse", None)
         if callable(click_mouse):
             click_mouse(bounds, image_size)
+            dispatcher = "template_mouse_fallback"
         else:
             self.session.tap_farm_template(bounds, image_size)
+            dispatcher = "template_tap_fallback"
+        self._log_monitor(
+            "mail_monitor_input_dispatched",
+            dispatcher=dispatcher,
+            normalized_x=round(normalized_x, 6),
+            normalized_y=round(normalized_y, 6),
+            capture_size=image_size,
+            fallback_bounds=bounds,
+        )
 
     def _tap_monitor_viewport_point(
         self, point: tuple[float, float], image_size: tuple[int, int]
@@ -542,18 +587,44 @@ class ProfileWorker:
         and Combat, then captures only the badge/message evidence needed for
         an alert; neither pass verifies that the mailbox chrome is open.
         """
+        pass_number = 1 if initial_scan else 2
+        scan_started_at = time.monotonic()
+        profile_id = getattr(getattr(self, "profile", None), "id", "unknown")
+        scan_id = f"{profile_id}-{time.monotonic_ns()}"
+        self._monitor_log_context = {"scan_id": scan_id, "pass_number": pass_number}
+        self._monitor_outcome: str | None = None
+
+        def finish(outcome: str) -> str:
+            self._monitor_outcome = outcome
+            return outcome
+
         if self._mail_monitor_is_cancelled():
+            self._log_monitor("mail_monitor_cancelled", stage="before_start")
+            self._log_monitor(
+                "mail_monitor_finished", outcome=SCAN_CANCELLED, duration_ms=0
+            )
+            self._monitor_log_context = {}
             return SCAN_CANCELLED
         if self.session is None:
+            self._log_monitor("mail_monitor_unavailable", reason="session_not_open")
+            self._log_monitor(
+                "mail_monitor_finished", outcome=SCAN_ERROR, duration_ms=0
+            )
+            self._monitor_log_context = {}
             return SCAN_ERROR
-        self._log_monitor("mail_monitor_started", pass_number=1 if initial_scan else 2)
+        self._log_monitor("mail_monitor_started")
+        self._log_monitor(
+            "mail_monitor_renderer_requested",
+            wait_seconds=AUTOMATION_RENDERER_WAIT_SECONDS,
+            expected_canvas_size=AUTOMATION_RENDERER_SIZE,
+        )
         if not self._acquire_automation_renderer(
             wait_seconds=AUTOMATION_RENDERER_WAIT_SECONDS
         ):
+            self._log_monitor("mail_monitor_renderer_unavailable")
             raise RuntimeError("Hết thời gian chờ renderer 1280×720 cho Giám sát")
         self._log_monitor(
             "mail_monitor_renderer_acquired",
-            pass_number=1 if initial_scan else 2,
             canvas_size=AUTOMATION_RENDERER_SIZE,
         )
         if self._mail_monitor is None:
@@ -577,7 +648,7 @@ class ProfileWorker:
                 self._tap_monitor_viewport_point(MAIL_BUTTON_POINT, baseline_size)
                 self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
                 if self._mail_monitor_is_cancelled():
-                    return SCAN_CANCELLED
+                    return finish(SCAN_CANCELLED)
 
                 baseline_tabs: tuple[tuple[str, tuple[float, float] | None], ...] = (
                     ("Hộp thư", None),
@@ -595,20 +666,20 @@ class ProfileWorker:
                         self._tap_monitor_viewport_point(tab_point, baseline_size)
                         self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
                         if self._mail_monitor_is_cancelled():
-                            return SCAN_CANCELLED
+                            return finish(SCAN_CANCELLED)
                     self._log_monitor(
                         "mail_monitor_step", pass_number=1, action="read_all", tab=tab_name
                     )
                     self._tap_monitor_viewport_point(READ_ALL_MAIL_POINT, baseline_size)
                     self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
                     if self._mail_monitor_is_cancelled():
-                        return SCAN_CANCELLED
+                        return finish(SCAN_CANCELLED)
                     completed_tabs.append(tab_name)
                 self._log_monitor(
                     "mail_monitor_baseline",
                     tabs=completed_tabs, verified=False,
                 )
-                return MAIL_BASELINE
+                return finish(MAIL_BASELINE)
 
             # Lượt 2 starts with the closed Mail icon. Do not open anything
             # unless its own red ``1`` badge is present: most profiles can
@@ -622,7 +693,7 @@ class ProfileWorker:
                 capture_size=latest_size,
             )
             if not has_mail_badge:
-                return NO_NEW_COMBAT_MAIL
+                return finish(NO_NEW_COMBAT_MAIL)
 
             mail_open = True
             baseline_direct_close = True
@@ -630,7 +701,7 @@ class ProfileWorker:
             self._tap_monitor_viewport_point(MAIL_BUTTON_POINT, latest_size)
             self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
             if self._mail_monitor_is_cancelled():
-                return SCAN_CANCELLED
+                return finish(SCAN_CANCELLED)
 
             # Open Mail only revealed the category badges.  Click Combat only
             # when its own exact red ``1`` badge is present.
@@ -642,13 +713,13 @@ class ProfileWorker:
                 capture_size=latest_size,
             )
             if not has_badge:
-                return NO_NEW_COMBAT_MAIL
+                return finish(NO_NEW_COMBAT_MAIL)
 
             self._log_monitor("mail_monitor_step", pass_number=2, action="select_tab", tab="Chiến đấu")
             self._tap_monitor_viewport_point(COMBAT_TAB_POINT, latest_size)
             self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
             if self._mail_monitor_is_cancelled():
-                return SCAN_CANCELLED
+                return finish(SCAN_CANCELLED)
 
             # Read exactly the first row so the game's unread state becomes
             # authoritative; no historical row below it is inspected.
@@ -656,13 +727,21 @@ class ProfileWorker:
             self._tap_monitor_viewport_point(FIRST_MAIL_ROW_POINT, latest_size)
             self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
             if self._mail_monitor_is_cancelled():
-                return SCAN_CANCELLED
+                return finish(SCAN_CANCELLED)
             latest_png, latest_size = self._capture_mail_canvas()
             attacked = monitor.is_territory_attacked(latest_png)
             self._log_monitor("mail_monitor_alert_classified", territory_attacked=attacked)
             if attacked:
-                return TERRITORY_ATTACKED
-            return COMBAT_MAIL_OTHER
+                return finish(TERRITORY_ATTACKED)
+            return finish(COMBAT_MAIL_OTHER)
+        except Exception as error:
+            self._monitor_outcome = SCAN_ERROR
+            self._log_monitor(
+                "mail_monitor_failed",
+                error_type=type(error).__name__,
+                message=str(error),
+            )
+            raise
         finally:
             try:
                 if mail_open:
@@ -689,7 +768,13 @@ class ProfileWorker:
                         )
             finally:
                 self._release_automation_renderer()
-                self._log_monitor("mail_monitor_renderer_released", pass_number=1 if initial_scan else 2)
+                self._log_monitor("mail_monitor_renderer_released")
+                self._log_monitor(
+                    "mail_monitor_finished",
+                    outcome=self._monitor_outcome or SCAN_ERROR,
+                    duration_ms=round((time.monotonic() - scan_started_at) * 1000),
+                )
+                self._monitor_log_context = {}
 
     def _loop(self) -> None:
         while True:

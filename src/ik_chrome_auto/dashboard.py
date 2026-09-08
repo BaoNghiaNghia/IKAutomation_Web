@@ -1075,9 +1075,21 @@ class Dashboard(QWidget):
             f"Đã bật giám sát thư Chiến đấu cho {len(opened)} profile; "
             "lượt đầu chỉ tạo baseline"
         )
+        self._log_monitor_scheduler(
+            "monitor_scheduler_started",
+            profile_count=len(opened),
+            profile_ids=sorted(opened),
+            group_size=MONITOR_GROUP_SIZE,
+            cycle_seconds=MONITOR_CYCLE_SECONDS,
+        )
         self._advance_monitoring()
 
     def _stop_monitoring(self) -> None:
+        self._log_monitor_scheduler(
+            "monitor_scheduler_stopped",
+            cycle_number=int(getattr(self, "_monitor_cycle_number", 0)),
+            in_flight_profile_ids=sorted(getattr(self, "_monitor_in_flight", {})),
+        )
         cancel_monitor = getattr(self.runner, "cancel_mail_monitor", None)
         if callable(cancel_monitor):
             cancel_monitor()
@@ -1114,6 +1126,15 @@ class Dashboard(QWidget):
             return
         events = set(snapshot.monitor_events or ())
         self._monitor_in_flight.pop(profile_id, None)
+        self._log_monitor_scheduler(
+            "monitor_scheduler_result",
+            profile_id=profile_id,
+            cycle_number=int(getattr(self, "_monitor_cycle_number", 0)),
+            phase=str(getattr(self, "_monitor_batch_phase", "")),
+            events=sorted(events),
+            remaining_in_flight=len(self._monitor_in_flight),
+            remaining_pending=len(getattr(self, "_monitor_batch_pending", ())),
+        )
         if SCAN_ERROR in events:
             # A failed open/verification is not a completed mailbox flow.
             # Keeping the old behavior here released the shared 720p renderer
@@ -1132,6 +1153,12 @@ class Dashboard(QWidget):
             )
             self._append_log(
                 f"[{profile_id}] Giám sát chưa hoàn tất; giữ profile này và thử lại"
+            )
+            self._log_monitor_scheduler(
+                "monitor_scheduler_requeued",
+                profile_id=profile_id,
+                reason="scan_error",
+                retry_seconds=MONITOR_PROFILE_RETRY_SECONDS,
             )
             return
         # Record a successful baseline before evaluating the batch barrier so
@@ -1165,6 +1192,12 @@ class Dashboard(QWidget):
                     self._append_log(
                         f"Giám sát lượt 1: đã xong {profile_id}; tiếp tục baseline các profile còn lại"
                     )
+                    self._log_monitor_scheduler(
+                        "monitor_scheduler_baseline_progress",
+                        completed_profile_id=profile_id,
+                        initialized_count=len(self._monitor_initialized_profiles),
+                        action="continue_remaining_baseline",
+                    )
                 else:
                     members = tuple(
                         profile.id
@@ -1182,6 +1215,13 @@ class Dashboard(QWidget):
                     )
                     self._append_log(
                         f"Giám sát lượt 1 hoàn tất; bắt đầu Lượt 2 cho {len(follow_up)} profile"
+                    )
+                    self._log_monitor_scheduler(
+                        "monitor_scheduler_phase_changed",
+                        from_phase="baseline",
+                        to_phase="combat",
+                        profile_count=len(follow_up),
+                        profile_ids=follow_up,
                     )
             else:
                 self._monitor_batch_members = ()
@@ -1241,6 +1281,12 @@ class Dashboard(QWidget):
             self._append_log(
                 f"[{profile_id}] Giám sát đang chậm; chờ hoàn tất nhóm hiện tại"
             )
+            self._log_monitor_scheduler(
+                "monitor_scheduler_timeout_extended",
+                profile_id=profile_id,
+                extension_seconds=30.0,
+                phase=str(getattr(self, "_monitor_batch_phase", "")),
+            )
         if (
             not self._monitor_queue
             and not self._monitor_in_flight
@@ -1261,6 +1307,12 @@ class Dashboard(QWidget):
             self._monitor_queue = deque(ordered_open)
             self._monitor_cycle_number += 1
             self._monitor_cycle_at = now + MONITOR_CYCLE_SECONDS
+            self._log_monitor_scheduler(
+                "monitor_scheduler_cycle_started",
+                cycle_number=self._monitor_cycle_number,
+                profile_count=len(ordered_open),
+                profile_ids=ordered_open,
+            )
         # Reserve one fixed group. It is never refilled as members finish:
         # the next five profiles wait until this entire group has completed.
         if (
@@ -1293,6 +1345,13 @@ class Dashboard(QWidget):
                 f"Giám sát nhóm {self._monitor_cycle_number}: "
                 f"{len(group)} profile chạy đủ lượt 1 và lượt 2"
             )
+            self._log_monitor_scheduler(
+                "monitor_scheduler_group_reserved",
+                cycle_number=self._monitor_cycle_number,
+                phase=self._monitor_batch_phase,
+                profile_ids=group,
+                profile_count=len(group),
+            )
 
         # A mailbox baseline is a full, atomic profile transaction.  Do not
         # merely stagger five commands: that still lets their renderer leases
@@ -1308,6 +1367,11 @@ class Dashboard(QWidget):
         if not self.runner.has_open_session(profile_id):
             self._monitor_initialized_profiles.discard(profile_id)
             self._monitor_batch_profiles.discard(profile_id)
+            self._log_monitor_scheduler(
+                "monitor_scheduler_profile_skipped",
+                profile_id=profile_id,
+                reason="session_not_open",
+            )
         else:
             self.runner.submit(
                 profile_id,
@@ -1315,6 +1379,14 @@ class Dashboard(QWidget):
                 initial_scan=self._monitor_batch_phase == "baseline",
             )
             self._monitor_in_flight[profile_id] = now + 30.0
+            self._log_monitor_scheduler(
+                "monitor_scheduler_dispatched",
+                profile_id=profile_id,
+                cycle_number=self._monitor_cycle_number,
+                phase=self._monitor_batch_phase,
+                initial_scan=self._monitor_batch_phase == "baseline",
+                deadline_seconds=30.0,
+            )
         self._monitor_next_profile_at = now + MONITOR_PROFILE_STAGGER_SECONDS
 
     def _toggle_farm(self, pid: str) -> None:
@@ -2069,6 +2141,24 @@ class Dashboard(QWidget):
         if hasattr(self.log,"setPlainText"): self.log.setPlainText(value)
         else:
             self.log.configure(state="normal"); self.log.delete("1.0","end"); self.log.insert("end",value+"\n"); self.log.see("end"); self.log.configure(state="disabled")
+
+    def _log_monitor_scheduler(self, event: str, **payload: object) -> None:
+        """Persist dashboard scheduling decisions beside worker scan events.
+
+        The dashboard owns cycle/group/requeue state, while workers own image
+        captures and input.  Writing both to the shared JSONL makes a remote
+        log sufficient to reconstruct a stalled or skipped profile without
+        recording credentials or mail body text.
+        """
+        runner = getattr(self, "runner", None)
+        event_log = getattr(runner, "event_log", None)
+        write = getattr(event_log, "write", None)
+        if callable(write):
+            try:
+                write(event, payload)
+            except Exception:
+                # Logging must never stop the monitoring scheduler.
+                pass
 
     @staticmethod
     def _set_roster_tooltip(card: CardWidget, roster: tuple[tuple[int, str], ...]) -> None:
