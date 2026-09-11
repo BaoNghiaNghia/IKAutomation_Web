@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from datetime import UTC, datetime
@@ -7,8 +8,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from ik_chrome_auto.event_log import JsonLineLog
 from ik_chrome_auto.config import is_allowed_url
+from ik_chrome_auto.event_log import JsonLineLog
 from ik_chrome_auto.models import CaptureSettings
 from ik_chrome_auto.storage import write_retained_json
 
@@ -147,10 +148,8 @@ class GameDataReader:
         page.on("response", self._on_response)
         page.on("websocket", self._on_websocket)
         for frame in page.frames:
-            try:
+            with contextlib.suppress(Exception):
                 frame.evaluate(MESSAGE_PROBE)
-            except Exception:
-                pass
 
     def _matches(self, url: str) -> bool:
         return is_allowed_url(url, self.settings.allowed_hosts)

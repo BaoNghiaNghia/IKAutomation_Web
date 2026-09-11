@@ -8,7 +8,6 @@ import sys
 from ctypes import wintypes
 from dataclasses import dataclass
 
-
 CRED_TYPE_GENERIC = 1
 CRED_PERSIST_LOCAL_MACHINE = 2
 ERROR_NOT_FOUND = 1168

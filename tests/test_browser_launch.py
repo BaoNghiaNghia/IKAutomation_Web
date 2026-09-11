@@ -50,3 +50,82 @@ def test_managed_chrome_launches_detached_and_connects_over_stable_cdp(
 
     expected = f"http://127.0.0.1:{browser._profile_cdp_port('main')}"
     assert fake_playwright.chromium.endpoint == expected
+
+
+def test_known_direct_play_session_error_is_detected_only_for_play_route() -> None:
+    session = browser.ChromeProfileSession.__new__(browser.ChromeProfileSession)
+    session._page = type(
+        "Page",
+        (), {
+            "locator": lambda _self, _selector: type(
+                "Body", (), {"inner_text": lambda _self, **_kwargs: '{\"code\":141303,\"msg\":211155,\"data\":[]}'},
+            )()
+        },
+    )()
+
+    assert session._is_portal_direct_play_session_error("https://ik.playfun.vn/play-game") is True
+    assert session._is_portal_direct_play_session_error("https://ik.playfun.vn/login-game") is False
+
+
+def test_managed_attach_rejects_a_known_foreign_user_data_dir(tmp_path: Path, monkeypatch) -> None:
+    config = AppConfig(
+        root=tmp_path,
+        source=tmp_path / "config.json",
+        target_url="https://ik.playfun.vn/login-game",
+        data_dir=tmp_path / "data",
+        browser=BrowserSettings(),
+        capture=CaptureSettings(),
+    )
+    session = browser.ChromeProfileSession(
+        config,
+        ProfileConfig("account-a", "Account A", user_data_dir=tmp_path / "data" / "profiles" / "a", cdp_port=21101),
+    )
+    monkeypatch.setattr(browser, "_cdp_endpoint_is_ready", lambda _endpoint: True)
+    monkeypatch.setattr(browser, "find_tcp_listener_process", lambda _port: 777)
+    monkeypatch.setattr(browser, "get_process_command_line", lambda _pid: f"chrome --user-data-dir={tmp_path / 'data' / 'profiles' / 'b'}")
+
+    assert session.can_attach_existing_browser() is False
+
+
+def test_managed_attach_accepts_equivalent_windows_user_data_dir_spelling(
+    tmp_path: Path, monkeypatch
+) -> None:
+    profile_dir = tmp_path / "data" / "profiles" / "a"
+    config = AppConfig(
+        root=tmp_path,
+        source=tmp_path / "config.json",
+        target_url="https://ik.playfun.vn/login-game",
+        data_dir=tmp_path / "data",
+        browser=BrowserSettings(),
+        capture=CaptureSettings(),
+    )
+    session = browser.ChromeProfileSession(
+        config, ProfileConfig("account-a", "Account A", user_data_dir=profile_dir, cdp_port=21101)
+    )
+    spelling = str(profile_dir).replace("\\", "/") + "/"
+    monkeypatch.setattr(browser, "_cdp_endpoint_is_ready", lambda _endpoint: True)
+    monkeypatch.setattr(browser, "find_tcp_listener_process", lambda _port: 777)
+    monkeypatch.setattr(
+        browser, "get_process_command_line", lambda _pid: f'chrome --user-data-dir="{spelling}"'
+    )
+
+    assert session.can_attach_existing_browser() is True
+
+
+def test_choose_page_prefers_game_portal_over_unrelated_tabs() -> None:
+    class Page:
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+        def is_closed(self) -> bool:
+            return False
+
+    session = browser.ChromeProfileSession.__new__(browser.ChromeProfileSession)
+    session.config = AppConfig(
+        root=Path("."), source=Path("config.json"), target_url="https://ik.playfun.vn/login-game",
+        data_dir=Path("data"), browser=BrowserSettings(), capture=CaptureSettings(),
+    )
+    game = Page("https://ik.playfun.vn/play-game")
+    session._context = type("Context", (), {"pages": [Page("about:blank"), Page("https://example.com"), game]})()
+
+    assert session._choose_page() is game

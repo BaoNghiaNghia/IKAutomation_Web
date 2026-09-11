@@ -1,17 +1,17 @@
 """One-way Telegram notifications with local encrypted credential storage."""
 from __future__ import annotations
 
+import contextlib
 import json
 import queue
 import re
 import threading
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from ik_chrome_auto.credential_store import AccountCredential, WindowsCredentialStore
-
 
 TELEGRAM_CREDENTIAL_ID = "telegram-bot"
 _CHAT_ID_MIN_DIGITS = 5
@@ -245,10 +245,8 @@ class TelegramNotifier:
             return False
 
     def close(self) -> None:
-        try:
+        with contextlib.suppress(queue.Full):
             self._messages.put_nowait(None)
-        except queue.Full:
-            pass
 
     def _run(self) -> None:
         while True:

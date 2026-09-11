@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 from tkinter import font as tkfont
 
-
 _FR_PRIVATE = 0x10
 _INTER_FILE = Path(__file__).with_name("assets") / "Inter-Variable.ttf"
 

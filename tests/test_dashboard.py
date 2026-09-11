@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import time
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
-import time
 
 import ik_chrome_auto.dashboard as dashboard_module
 from ik_chrome_auto.dashboard import (
@@ -14,7 +14,6 @@ from ik_chrome_auto.dashboard import (
     ProfileRow,
 )
 from ik_chrome_auto.farm_launch_policy import FarmLaunchPolicy
-from ik_chrome_auto.models import CommandKind, WorkerSnapshot, WorkerState
 from ik_chrome_auto.mail_monitor import (
     COMBAT_MAIL_OTHER,
     MAIL_BASELINE,
@@ -22,6 +21,7 @@ from ik_chrome_auto.mail_monitor import (
     SCAN_ERROR,
     TERRITORY_ATTACKED,
 )
+from ik_chrome_auto.models import CommandKind, WorkerSnapshot, WorkerState
 
 
 class FakeLogWidget:
@@ -157,6 +157,35 @@ def test_open_profile_does_not_repeat_command_for_an_open_session() -> None:
     dashboard._open_profile("account-2")
 
     assert button.visible
+
+
+def test_profile_reattach_disables_launch_until_every_profile_settles() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.runner = SimpleNamespace(
+        reattach_existing_profiles=lambda: {"account-1", "account-2"}
+    )
+    dashboard.farm_launcher = FakeActionButton()
+    dashboard._farm_launcher_phase = "launch"
+    dashboard._append_log = lambda _message: None
+    refreshes: list[bool] = []
+    dashboard._refresh_sync_control = lambda: refreshes.append(True)
+
+    dashboard._begin_profile_reattach()
+
+    assert dashboard.farm_launcher.enabled is False
+    assert dashboard.farm_launcher.text == "Đang kết nối…"
+
+    dashboard._settle_profile_reattach(
+        WorkerSnapshot("account-1", WorkerState.READY, "Đã kết nối")
+    )
+    assert dashboard.farm_launcher.enabled is False
+
+    dashboard._settle_profile_reattach(
+        WorkerSnapshot("account-2", WorkerState.STOPPED, "Profile đang đóng")
+    )
+    assert dashboard.farm_launcher.enabled is True
+    assert dashboard.farm_launcher.text == "Khởi động"
+    assert refreshes == [True]
 
 
 def test_individually_opened_profile_joins_active_tools() -> None:

@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-
 MAIL_BASELINE = "mail_baseline"
 NO_NEW_COMBAT_MAIL = "no_new_combat_mail"
 COMBAT_MAIL_OTHER = "combat_mail_other"

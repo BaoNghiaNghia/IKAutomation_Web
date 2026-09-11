@@ -20,13 +20,28 @@ class WorkerState(StrEnum):
     ERROR = "error"
 
 
+class AttachmentState(StrEnum):
+    """Tool-side lifecycle of a Chrome profile process.
+
+    A browser can be running while the current IK Auto process is detached;
+    this is the normal state immediately after an application restart.
+    """
+
+    DETACHED = "detached"
+    ATTACHING = "attaching"
+    ATTACHED = "attached"
+    ERROR = "error"
+
+
 class CommandKind(StrEnum):
     OPEN = "open"
+    ATTACH = "attach"
     AUTO_LOGIN = "auto_login"
     READ = "read"
     SCREENSHOT = "screenshot"
     RESIZE = "resize"
     SYNC_INPUT = "sync_input"
+    RESET_SYNC_INPUT = "reset_sync_input"
     SET_SYNC_SOURCE = "set_sync_source"
     SET_INSPECTOR = "set_inspector"
     SET_DRAG_ITEM = "set_drag_item"
@@ -79,6 +94,10 @@ class ProfileConfig:
     mode: ProfileMode = ProfileMode.MANAGED
     user_data_dir: Path | None = None
     cdp_url: str | None = None
+    # Managed profiles receive a deterministic, collision-free port during
+    # config loading. Existing installations without this field keep their
+    # legacy hash-derived endpoint as an attach candidate.
+    cdp_port: int | None = None
     enabled: bool = True
 
 
@@ -113,6 +132,8 @@ class WorkerSnapshot:
     # status currently shown on the profile card.
     monitor_events: tuple[str, ...] | None = None
     monitor_checked: tuple[str, ...] | None = None
+    browser_running: bool = False
+    attachment: AttachmentState = AttachmentState.DETACHED
 
 
 @dataclass(slots=True)

@@ -7,7 +7,11 @@ from pathlib import Path
 
 from ik_chrome_auto.browser import ChromeProfileSession
 from ik_chrome_auto.input_helpers import GAME_REFERENCE_HEIGHT, GAME_REFERENCE_WIDTH
-from ik_chrome_auto.storage import prune_profile_images, upscale_png_for_diagnostics, write_retained_png
+from ik_chrome_auto.storage import (
+    prune_profile_images,
+    upscale_png_for_diagnostics,
+    write_retained_png,
+)
 
 StatusCallback = Callable[[str], None]
 

@@ -11,7 +11,6 @@ import zlib
 from ctypes import wintypes
 from dataclasses import dataclass
 
-
 TASKBAR_APP_ID = "IKChromeAuto.Profiles"
 
 
@@ -495,6 +494,28 @@ def find_tcp_listener_process(port: int) -> int | None:
             continue
         if local_port == wanted and process_id > 0:
             return process_id
+    return None
+
+
+def get_process_command_line(process_id: int | None) -> str | None:
+    """Read a process command line for CDP profile identity verification."""
+    if sys.platform != "win32" or not process_id:
+        return None
+    try:
+        result = subprocess.run(
+            ["wmic", "process", "where", f"processid={int(process_id)}", "get", "CommandLine", "/value"],
+            capture_output=True,
+            text=True,
+            timeout=4,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("CommandLine="):
+            value = line.partition("=")[2].strip()
+            return value or None
     return None
 
 

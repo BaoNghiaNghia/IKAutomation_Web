@@ -20,7 +20,7 @@ class FarmLaunchPolicy:
     resource_constrained_interval_seconds: float = 8.0
 
     @classmethod
-    def for_total_memory(cls, total_memory_bytes: int) -> "FarmLaunchPolicy":
+    def for_total_memory(cls, total_memory_bytes: int) -> FarmLaunchPolicy:
         """Choose conservative defaults without hard-coding one workstation."""
         total = max(1, int(total_memory_bytes))
         if total >= 64 * _GIB:

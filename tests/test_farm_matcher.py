@@ -5,13 +5,12 @@ import numpy as np
 import pytest
 
 from ik_chrome_auto.farm_matcher import BrowserCanvasMatcher
-from ik_chrome_auto.farm_vision import DetectedGameState, TeamRowState
+from ik_chrome_auto.farm_vision import DetectedGameState, FarmTemplateId, TeamRowState
 
 
 def test_city_template_search_is_limited_to_bottom_left_corner() -> None:
     assert BrowserCanvasMatcher._region("city_corner", 835, 432) == (0, 324, 139, 108)
     assert BrowserCanvasMatcher._region("map_corner", 1280, 720) == (0, 540, 153, 180)
-from ik_chrome_auto.farm_vision import FarmTemplateId
 
 
 def test_browser_map_toggle_templates_match_their_actual_direction() -> None:

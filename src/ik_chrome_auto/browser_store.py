@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterator
 
-from ik_chrome_auto.browser_control import BrowserCommand, ProfileRunState, ProfileSnapshot
+from ik_chrome_auto.browser_control import BrowserCommand, ProfileSnapshot
 
 
 @dataclass(frozen=True, slots=True)

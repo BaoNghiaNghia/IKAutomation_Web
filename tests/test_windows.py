@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import ik_chrome_auto.windows as windows_module
 from ik_chrome_auto.image_utils import decode_png
 from ik_chrome_auto.windows import (
     WindowRect,
@@ -14,7 +15,6 @@ from ik_chrome_auto.windows import (
     encode_rgb_png,
     find_tcp_listener_process,
 )
-import ik_chrome_auto.windows as windows_module
 
 
 def test_descendant_process_ids_collects_full_tree_without_cycles() -> None:

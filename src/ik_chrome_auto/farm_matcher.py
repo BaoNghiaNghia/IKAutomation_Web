@@ -5,8 +5,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ik_chrome_auto.farm_vision import (
-    BrowserGameStateDetector,
     DETECTION_TEMPLATES,
+    BrowserGameStateDetector,
     DetectedGameState,
     FarmTemplateId,
     GameDetectionResult,

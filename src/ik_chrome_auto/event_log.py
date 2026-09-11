@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-
 _WINDOWS_INVALID_FILE_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 

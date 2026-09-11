@@ -91,7 +91,7 @@ def test_save_round_trip(tmp_path: Path) -> None:
     save_config(config)
     loaded = load_config(source)
 
-    assert loaded.target_url == "https://ik.playfun.vn/play-game"
+    assert loaded.target_url == "https://ik.playfun.vn/login-game"
     assert loaded.profiles[0].user_data_dir == (tmp_path / "data/profiles/main").resolve()
     assert loaded.browser.auto_resize is True
     assert loaded.browser.app_mode is True
@@ -104,3 +104,27 @@ def test_save_round_trip(tmp_path: Path) -> None:
 def test_unique_profile_id() -> None:
     assert unique_profile_id("Farm 01", set()) == "farm-01"
     assert unique_profile_id("Farm 01", {"farm-01", "farm-01-2"}) == "farm-01-3"
+
+
+def test_managed_profiles_receive_unique_stable_cdp_ports(tmp_path: Path) -> None:
+    source = tmp_path / "config.json"
+    source.write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {"id": "alpha", "name": "Alpha", "mode": "managed"},
+                    {"id": "beta", "name": "Beta", "mode": "managed"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    first = load_config(source)
+    second = load_config(source)
+
+    assert all(profile.cdp_port is not None for profile in first.profiles)
+    assert len({profile.cdp_port for profile in first.profiles}) == 2
+    assert [profile.cdp_port for profile in first.profiles] == [
+        profile.cdp_port for profile in second.profiles
+    ]

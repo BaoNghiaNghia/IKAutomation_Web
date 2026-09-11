@@ -11,5 +11,7 @@ data/screenshots/
 data/logs/
 build/
 .build-cache/
+data/
+*.egg-info/
 release/
 *.spec

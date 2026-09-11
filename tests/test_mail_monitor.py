@@ -6,21 +6,19 @@ import cv2
 import numpy as np
 import pytest
 
-from ik_chrome_auto.mail_monitor import BrowserMailMonitor
-from ik_chrome_auto.mail_monitor import SCAN_CANCELLED
+from ik_chrome_auto.mail_monitor import SCAN_CANCELLED, BrowserMailMonitor
 from ik_chrome_auto.runner import (
     ALLIANCE_TAB_POINT,
     ARCHIVE_TAB_POINT,
     AUTOMATION_RENDERER_WINDOW_SIZE,
-    AUTOMATION_RENDERER_SIZE,
     CLOSE_MAIL_POINT,
     COMBAT_TAB_POINT,
+    FIRST_MAIL_ROW_POINT,
     MAIL_BUTTON_POINT,
     MONITOR_REFERENCE_ASPECT_RATIO,
-    ProfileWorker,
     READ_ALL_MAIL_POINT,
-    FIRST_MAIL_ROW_POINT,
     SURVEY_TAB_POINT,
+    ProfileWorker,
 )
 
 

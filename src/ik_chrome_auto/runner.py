@@ -21,17 +21,6 @@ from ik_chrome_auto.input_helpers import (
     GAME_REFERENCE_WIDTH,
     control_center_ratio,
 )
-from ik_chrome_auto.models import (
-    AppConfig,
-    CommandKind,
-    ProfileConfig,
-    WorkerCommand,
-    WorkerSnapshot,
-    WorkerState,
-)
-from ik_chrome_auto.reader import redact
-from ik_chrome_auto.resource_area_points import ResourceAreaPointSelector
-from ik_chrome_auto.storage import upscale_png_for_diagnostics, write_retained_png
 from ik_chrome_auto.mail_monitor import (
     COMBAT_MAIL_OTHER,
     MAIL_BASELINE,
@@ -41,23 +30,36 @@ from ik_chrome_auto.mail_monitor import (
     TERRITORY_ATTACKED,
     BrowserMailMonitor,
 )
+from ik_chrome_auto.models import (
+    AppConfig,
+    AttachmentState,
+    CommandKind,
+    ProfileConfig,
+    WorkerCommand,
+    WorkerSnapshot,
+    WorkerState,
+)
+from ik_chrome_auto.reader import redact
+from ik_chrome_auto.resource_area_points import ResourceAreaPointSelector
+from ik_chrome_auto.storage import upscale_png_for_diagnostics, write_retained_png
 from ik_chrome_auto.windows import (
+    WindowRect,
     calculate_tiled_positions,
     get_monitor_work_areas,
     get_visible_window_rect,
-    get_window_rect,
     get_window_process_tree_usage,
+    get_window_rect,
     is_window_minimized,
     move_window_outer,
     set_window_minimized,
     snapshot_process_parents,
     trim_window_process_tree,
-    WindowRect,
 )
 
 UpdateCallback = Callable[[WorkerSnapshot], None]
 InputCallback = Callable[[str, dict[str, object]], None]
 CoordinateCallback = Callable[[str, dict[str, object]], None]
+DetachedCallback = Callable[[str, str], None]
 
 # Fixed monitor controls are expressed as X/Y ratios of the game canvas, not
 # desktop or Chrome-window pixels.  The canonical capture is 16:9, but width
@@ -84,6 +86,10 @@ FARM_MINIMUM_CANVAS_SIZE = AUTOMATION_RENDERER_SIZE
 # complete dispatch flow and is released only at a safe workflow boundary;
 # monitoring holds the same lease only for its bounded mailbox flow.
 AUTOMATION_RENDERER_WAIT_SECONDS = 30.0
+# Closing the dashboard must never wait this amount once per profile.  The
+# workers are daemon threads and Chrome is intentionally retained, so this is
+# a single, small grace period for every worker to detach its CDP connection.
+RUNNER_SHUTDOWN_WAIT_SECONDS = 0.75
 FARM_RENDERER_YIELD_STEPS = frozenset(
     {FarmStep.PREFLIGHT, FarmStep.WAITING, FarmStep.STOPPED}
 )
@@ -216,6 +222,7 @@ class ProfileWorker:
         on_update: UpdateCallback,
         on_input: InputCallback,
         on_coordinate: CoordinateCallback,
+        on_detached: DetachedCallback | None = None,
         *,
         drag_item_visible: bool = False,
         scrollbars_visible: bool = False,
@@ -228,6 +235,7 @@ class ProfileWorker:
         self.on_update = on_update
         self.on_input = on_input
         self.on_coordinate = on_coordinate
+        self.on_detached = on_detached or (lambda _profile_id, _reason: None)
         logs_dir = config.data_dir / "logs"
         self.coordinate_log = JsonLineLog(logs_dir / f"coordinates-{profile.id}.jsonl")
         # Farm diagnostics stay separate from general dashboard events so a
@@ -244,8 +252,13 @@ class ProfileWorker:
         self.thread: threading.Thread | None = None
         self.session: ChromeProfileSession | None = None
         self._thread_lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
+        self._browser_running = False
+        self._attachment_state = AttachmentState.DETACHED
+        self._attach_requested = False
         self._sync_source_enabled = False
         self._sync_rearm_at = 0.0
+        self._sync_last_health_log_at = 0.0
         self._sync_move_lock = threading.Lock()
         self._sync_pending_move: dict[str, Any] | None = None
         self._sync_move_command_queued = False
@@ -304,6 +317,18 @@ class ProfileWorker:
         self._mail_monitor_cancelled = threading.Event()
 
     def submit(self, command: WorkerCommand) -> None:
+        if command.kind == CommandKind.ATTACH:
+            # Several startup/UI callers may ask for the same reattach while
+            # the worker is still booting.  Queue exactly one effective CDP
+            # connection; a second Playwright runtime for one profile is not
+            # safe and can bind duplicate page listeners.
+            with self._lifecycle_lock:
+                if self._attachment_state in {
+                    AttachmentState.ATTACHING,
+                    AttachmentState.ATTACHED,
+                } or self._attach_requested:
+                    return
+                self._attach_requested = True
         self._ensure_thread()
         self.commands.put(command)
 
@@ -313,7 +338,12 @@ class ProfileWorker:
 
     def shutdown(self) -> None:
         self.stop_event.set()
-        self.submit(WorkerCommand(CommandKind.SHUTDOWN))
+        # Do not start an otherwise idle worker merely to make it consume a
+        # shutdown command.  That used to create one short-lived thread per
+        # closed profile while the dashboard itself was closing.
+        thread = self.thread
+        if thread is not None and thread.is_alive():
+            self.commands.put(WorkerCommand(CommandKind.SHUTDOWN))
 
     def enable_mail_monitor(self) -> None:
         self._mail_monitor_cancelled.clear()
@@ -341,12 +371,22 @@ class ProfileWorker:
             self.thread.start()
 
     def _publish(self, state: WorkerState, message: str, detail: str = "") -> None:
+        lifecycle_lock = getattr(self, "_lifecycle_lock", None)
+        if lifecycle_lock is None:
+            lifecycle_lock = self._lifecycle_lock = threading.Lock()
+            self._browser_running = bool(getattr(self, "session", None))
+            self._attachment_state = AttachmentState.ATTACHED if self._browser_running else AttachmentState.DETACHED
+        with lifecycle_lock:
+            browser_running = self._browser_running
+            attachment = self._attachment_state
         snapshot = WorkerSnapshot(
             self.profile.id,
             state,
             message,
             detail,
             tuple((row.team, row.state.value) for row in self._farm_roster),
+            browser_running=browser_running,
+            attachment=attachment,
         )
         self.on_update(snapshot)
         self.event_log.write(
@@ -356,8 +396,54 @@ class ProfileWorker:
                 "state": state.value,
                 "message": message,
                 "detail": detail,
+                "browser_running": browser_running,
+                "attachment": attachment.value,
             },
         )
+
+    def is_browser_running(self) -> bool:
+        if not hasattr(self, "_lifecycle_lock"):
+            return bool(getattr(self, "session", None))
+        with self._lifecycle_lock:
+            return self._browser_running
+
+    def is_attached(self) -> bool:
+        if not hasattr(self, "_lifecycle_lock"):
+            return bool(getattr(self, "session", None))
+        with self._lifecycle_lock:
+            attached = self._attachment_state == AttachmentState.ATTACHED
+        if not attached:
+            return False
+        session = self.session
+        if session is None:
+            return False
+        try:
+            alive = bool(session.is_alive())
+        except Exception:
+            alive = False
+        if not alive:
+            # The lifecycle can lag one idle worker pulse behind a native
+            # Chrome close.  Never allow that short interval to satisfy the
+            # Sync readiness barrier.
+            self._set_lifecycle(
+                browser_running=False, attachment=AttachmentState.DETACHED
+            )
+        return alive
+
+    def attachment_state(self) -> AttachmentState:
+        if not hasattr(self, "_lifecycle_lock"):
+            return AttachmentState.ATTACHED if getattr(self, "session", None) is not None else AttachmentState.DETACHED
+        with self._lifecycle_lock:
+            return self._attachment_state
+
+    def _set_lifecycle(
+        self, *, browser_running: bool, attachment: AttachmentState
+    ) -> None:
+        if not hasattr(self, "_lifecycle_lock"):
+            self._lifecycle_lock = threading.Lock()
+        with self._lifecycle_lock:
+            self._browser_running = browser_running
+            self._attachment_state = attachment
 
     def _publish_monitor(
         self, events: tuple[str, ...], checked: tuple[str, ...]
@@ -785,8 +871,14 @@ class ProfileWorker:
                     try:
                         self.session.pump(5)
                         self._poll_browser_events()
-                    except Exception:
-                        pass
+                    except Exception as error:
+                        self.event_log.write(
+                            "worker_pump_error",
+                            {
+                                "profile_id": self.profile.id,
+                                "message": f"{type(error).__name__}: {error}",
+                            },
+                        )
                     if self.session is not None and not self.session.is_alive():
                         self._handle_external_close()
                     elif self._farm is not None and time.monotonic() >= self._farm_next_at:
@@ -880,7 +972,19 @@ class ProfileWorker:
                     continue
                 if command.kind == CommandKind.SET_SYNC_SOURCE:
                     self._sync_source_enabled = bool(command.payload.get("enabled", False))
+                    sync_session_id = str(command.payload.get("sync_session_id", ""))
+                    self.event_log.write(
+                        "sync_source_command_started",
+                        {
+                            "profile_id": self.profile.id,
+                            "enabled": self._sync_source_enabled,
+                            "sync_session_id": sync_session_id,
+                            "session_attached": self.session is not None,
+                            "queue_depth": self.commands.qsize(),
+                        },
+                    )
                     if self.session is not None:
+                        source_started_at = time.monotonic()
                         armed_frames = self.session.set_sync_source(self._sync_source_enabled)
                         self._sync_rearm_at = time.monotonic() + 2.0
                         self.event_log.write(
@@ -889,6 +993,8 @@ class ProfileWorker:
                                 "profile_id": self.profile.id,
                                 "enabled": self._sync_source_enabled,
                                 "armed_frame_count": int(armed_frames or 0),
+                                "duration_ms": round((time.monotonic() - source_started_at) * 1000),
+                                "sync_session_id": sync_session_id,
                             },
                         )
                     continue
@@ -950,6 +1056,7 @@ class ProfileWorker:
                         sync_event = dict(command.payload["event"])
                     if self.session is not None:
                         try:
+                            started_at = time.monotonic()
                             resolved = self._apply_synced_input_with_retry(sync_event)
                             if str(sync_event.get("type", "")) in {
                                 "pointerdown",
@@ -962,9 +1069,11 @@ class ProfileWorker:
                                         "profile_id": self.profile.id,
                                         "type": str(sync_event.get("type", "")),
                                         "sequence": int(sync_event.get("sequence", 0) or 0),
-                                        "resolved": resolved,
-                                    },
-                                )
+                                    "resolved": resolved,
+                                    "duration_ms": round((time.monotonic() - started_at) * 1000),
+                                    "sync_session_id": str(sync_event.get("sync_session_id", "")),
+                                },
+                            )
                         except Exception as error:
                             # One transient frame navigation must not mark the
                             # whole profile Error or disable subsequent input.
@@ -973,8 +1082,39 @@ class ProfileWorker:
                                 {
                                     "profile_id": self.profile.id,
                                     "type": str(sync_event.get("type", "")),
+                                    "sequence": int(sync_event.get("sequence", 0) or 0),
+                                    "sync_session_id": str(sync_event.get("sync_session_id", "")),
                                     "message": f"{type(error).__name__}: {error}",
                                 },
+                            )
+                    elif str(sync_event.get("type", "")) in {"pointerdown", "pointerup", "wheel", "keydown", "keyup"}:
+                        self.event_log.write(
+                            "sync_input_skipped",
+                            {
+                                "profile_id": self.profile.id,
+                                "reason": "session_not_attached",
+                                "type": str(sync_event.get("type", "")),
+                                "sequence": int(sync_event.get("sequence", 0) or 0),
+                                "sync_session_id": str(sync_event.get("sync_session_id", "")),
+                            },
+                        )
+                    continue
+                if command.kind == CommandKind.RESET_SYNC_INPUT:
+                    if self.session is not None:
+                        try:
+                            self.session.reset_synced_input()
+                            self.event_log.write(
+                                "sync_input_reset",
+                                {
+                                    "profile_id": self.profile.id,
+                                    "reason": str(command.payload.get("reason", "sync_disabled")),
+                                    "sync_session_id": str(command.payload.get("sync_session_id", "")),
+                                },
+                            )
+                        except Exception as error:
+                            self.event_log.write(
+                                "sync_input_reset_error",
+                                {"profile_id": self.profile.id, "message": f"{type(error).__name__}: {error}"},
                             )
                     continue
                 if command.kind == CommandKind.RESIZE:
@@ -991,9 +1131,61 @@ class ProfileWorker:
                     continue
                 self.stop_event.clear()
                 if command.kind == CommandKind.OPEN:
+                    if self.is_attached():
+                        self._publish(WorkerState.READY, "Chrome profile đã mở")
+                        continue
+                    self._set_lifecycle(browser_running=False, attachment=AttachmentState.ATTACHING)
                     self._publish(WorkerState.STARTING, "Đang mở Chrome profile")
                     self._ensure_session(navigate=True)
+                    self._set_lifecycle(browser_running=True, attachment=AttachmentState.ATTACHED)
                     self._publish(WorkerState.READY, "Chrome và trang game đã mở")
+                elif command.kind == CommandKind.ATTACH:
+                    with self._lifecycle_lock:
+                        self._attach_requested = False
+                    if not self.is_attached():
+                        attach_started_at = time.monotonic()
+                        probe = ChromeProfileSession(self.config, self.profile)
+                        if not probe.can_attach_existing_browser():
+                            self._set_lifecycle(browser_running=False, attachment=AttachmentState.DETACHED)
+                            self.event_log.write(
+                                "profile_browser_discovered",
+                                {"profile_id": self.profile.id, "browser_running": False},
+                            )
+                            self._publish(WorkerState.STOPPED, "Profile đang đóng")
+                            continue
+                        self._set_lifecycle(browser_running=True, attachment=AttachmentState.ATTACHING)
+                        self.event_log.write(
+                            "profile_browser_discovered",
+                            {"profile_id": self.profile.id, "browser_running": True},
+                        )
+                        self.event_log.write(
+                            "profile_attach_started", {"profile_id": self.profile.id}
+                        )
+                        self._publish(WorkerState.STARTING, "Đang kết nối Chrome profile đang mở")
+                        # Reattachment must preserve the exact retained grid:
+                        # no navigation and no resize/move is permitted here.
+                        probe.start(navigate=False, resize=False, reattach=True)
+                        self.session = probe
+                        self._set_lifecycle(browser_running=True, attachment=AttachmentState.ATTACHED)
+                        # Do not traverse every nested iframe merely to reset
+                        # a listener left by the previous Tool process.  That
+                        # process is detached and cannot dispatch input; the
+                        # master source command below re-arms the required
+                        # frame.  On a stale iframe this old reset could block
+                        # startup for one minute and consume the first Sync
+                        # clicks before the source was armed.
+                        self.event_log.write(
+                            "profile_reattached",
+                            {
+                                "profile_id": self.profile.id,
+                                "duration_ms": round((time.monotonic() - attach_started_at) * 1000),
+                            },
+                        )
+                        self.event_log.write(
+                            "profile_attach_succeeded",
+                            {"profile_id": self.profile.id, "duration_ms": round((time.monotonic() - attach_started_at) * 1000)},
+                        )
+                    self._publish(WorkerState.READY, "Đã kết nối profile Chrome đang mở")
                 elif command.kind == CommandKind.AUTO_LOGIN:
                     if self.session is None:
                         raise RuntimeError("Profile chưa mở để tự đăng nhập")
@@ -1005,7 +1197,11 @@ class ProfileWorker:
                     )
                     self._publish(
                         WorkerState.READY,
-                        "Đã gửi đăng nhập tự động" if attempted else "Không thấy form đăng nhập",
+                        # A missing login form means the retained game page
+                        # is already usable, not that the profile is in an
+                        # error state.  Keep that diagnostic in the event log
+                        # while returning the card to its normal ready label.
+                        "Đang chờ đăng nhập hoàn tất" if attempted else "Sẵn sàng",
                     )
                 elif command.kind == CommandKind.READ:
                     self._publish(WorkerState.RUNNING, "Đang đọc dữ liệu")
@@ -1019,6 +1215,13 @@ class ProfileWorker:
             except ActionCancelled:
                 self._publish(WorkerState.STOPPED, "Đã hủy action")
             except Exception as error:
+                if command.kind == CommandKind.ATTACH:
+                    self.session = None
+                    self._set_lifecycle(browser_running=True, attachment=AttachmentState.ERROR)
+                    self.event_log.write(
+                        "profile_attach_failed",
+                        {"profile_id": self.profile.id, "message": f"{type(error).__name__}: {error}"},
+                    )
                 if self.session is not None and not self.session.is_alive():
                     self._handle_external_close()
                 else:
@@ -1033,8 +1236,10 @@ class ProfileWorker:
 
     def _ensure_session(self, *, navigate: bool) -> ChromeProfileSession:
         if self.session is None:
+            self._set_lifecycle(browser_running=False, attachment=AttachmentState.ATTACHING)
             self.session = ChromeProfileSession(self.config, self.profile)
             self.session.start(navigate=navigate)
+            self._set_lifecycle(browser_running=True, attachment=AttachmentState.ATTACHED)
             self.session.set_sync_source(self._sync_source_enabled)
             self.session.set_inspector(self._inspector_enabled)
             self.session.set_drag_item_visible(self._drag_item_visible)
@@ -1080,23 +1285,37 @@ class ProfileWorker:
     ) -> dict[str, Any] | None:
         """Retry once after repairing a follower's stale frame/CDP runtime."""
         if self.session is None:
-            return
+            self.event_log.write(
+                "sync_input_error",
+                {
+                    "profile_id": self.profile.id,
+                    "type": str(event.get("type", "")),
+                    "sequence": int(event.get("sequence", 0) or 0),
+                    "reason": "target_not_attached",
+                },
+            )
+            raise RuntimeError("Follower chưa attached khi đang nhận Sync input")
         try:
             return self.session.apply_synced_input(event)
         except Exception as first_error:
+            self.event_log.write(
+                "sync_input_first_attempt_failed",
+                {"profile_id": self.profile.id, "type": str(event.get("type", "")), "sequence": int(event.get("sequence", 0) or 0), "message": f"{type(first_error).__name__}: {first_error}"},
+            )
             repair = getattr(self.session, "repair_synced_input_runtime", None)
             if not callable(repair):
                 raise
             repair()
             try:
                 resolved = self.session.apply_synced_input(event)
-            except Exception:
-                raise first_error
+            except Exception as error:
+                raise first_error from error
             self.event_log.write(
                 "sync_input_recovered",
                 {
                     "profile_id": self.profile.id,
                     "type": str(event.get("type", "")),
+                    "sequence": int(event.get("sequence", 0) or 0),
                 },
             )
             return resolved
@@ -1130,7 +1349,27 @@ class ProfileWorker:
                         )
                 finally:
                     self._sync_rearm_at = now + 2.0
+            if now - self._sync_last_health_log_at >= 5.0:
+                self._sync_last_health_log_at = now
+                self.event_log.write(
+                    "sync_source_health",
+                    {
+                        "profile_id": self.profile.id,
+                        "armed_frame_count": int(self.session.sync_capture_frame_count() or 0),
+                    },
+                )
             for event in self.session.poll_sync_events():
+                if str(event.get("type", "")) in {"pointerdown", "pointerup", "wheel", "keydown", "keyup"}:
+                    self.event_log.write(
+                        "sync_input_captured",
+                        {
+                            "profile_id": self.profile.id,
+                            "type": str(event.get("type", "")),
+                            "sequence": int(event.get("sequence", 0) or 0),
+                            "frame_url_safe": str(event.get("frame_url_safe", "")),
+                            "canvas": event.get("canvas"),
+                        },
+                    )
                 self.on_input(self.profile.id, event)
         if self._inspector_enabled:
             for event in self.session.poll_coordinate_events():
@@ -3511,7 +3750,7 @@ class ProfileWorker:
             })
             return restored
 
-        if not self.session.read_focused_numeric_farm_input(x_field, continent_size) == original_x:
+        if self.session.read_focused_numeric_farm_input(x_field, continent_size) != original_x:
             return "unavailable"
         if not self.session.replace_focused_farm_input(point[0]):
             return "unavailable"
@@ -3826,11 +4065,19 @@ class ProfileWorker:
         # the shared high-resolution lease for the next profile.
         self._release_automation_renderer(restore=False)
         if self.session is None:
+            self._set_lifecycle(
+                browser_running=False if close_browser else self.is_browser_running(),
+                attachment=AttachmentState.DETACHED,
+            )
             return
         try:
             self.session.close(close_browser=close_browser)
         finally:
             self.session = None
+            self._set_lifecycle(
+                browser_running=not close_browser,
+                attachment=AttachmentState.DETACHED,
+            )
 
     def _handle_external_close(self) -> None:
         self._farm = None
@@ -3842,6 +4089,10 @@ class ProfileWorker:
             self.session.close()
         finally:
             self.session = None
+            self._set_lifecycle(browser_running=False, attachment=AttachmentState.DETACHED)
+        callback = getattr(self, "on_detached", None)
+        if callable(callback):
+            callback(self.profile.id, "chrome_closed")
         self._publish(WorkerState.STOPPED, "Cửa sổ Chrome đã đóng")
 
 
@@ -3860,6 +4111,7 @@ class MultiProfileRunner:
         self.sync_enabled = False
         self.sync_master_id: str | None = None
         self.sync_target_ids: set[str] = set()
+        self._sync_session_id = ""
         self._sync_last_pointer_move_at = 0.0
         self.drag_items_visible = False
         self.scrollbars_visible = False
@@ -3893,11 +4145,35 @@ class MultiProfileRunner:
                     self.on_update,
                     self._on_input,
                     self.on_coordinate,
+                    self._on_worker_detached,
                     drag_item_visible=self.drag_items_visible,
                     scrollbars_visible=self.scrollbars_visible,
                     topmost=self.windows_topmost,
                     automation_renderer_lock=self._automation_renderer_lock,
                 )
+
+    def _on_worker_detached(self, profile_id: str, reason: str) -> None:
+        """Abort the global mirror before a dead member can miss a gesture."""
+        with self._sync_lock:
+            active = self.sync_enabled and (
+                profile_id == self.sync_master_id or profile_id in self.sync_target_ids
+            )
+            master_id = self.sync_master_id
+            targets = sorted(self.sync_target_ids)
+            sync_session_id = str(getattr(self, "_sync_session_id", ""))
+        if not active:
+            return
+        self.event_log.write(
+            "sync_member_detached",
+            {
+                "profile_id": profile_id,
+                "reason": reason,
+                "master_profile_id": master_id,
+                "target_profile_ids": targets,
+                "sync_session_id": sync_session_id,
+            },
+        )
+        self.disable_sync()
 
     def submit(self, profile_id: str, kind: CommandKind, **payload: object) -> None:
         # Manual mirrored input owns every participating profile while Sync is
@@ -3946,6 +4222,15 @@ class MultiProfileRunner:
             if profile.enabled:
                 self.submit(profile.id, CommandKind.OPEN)
 
+    def reattach_existing_profiles(self) -> set[str]:
+        """Reconnect to retained Chrome windows without starting closed ones."""
+        submitted: set[str] = set()
+        for profile in self.config.profiles:
+            if profile.enabled and not self.is_attached(profile.id):
+                self.submit(profile.id, CommandKind.ATTACH)
+                submitted.add(profile.id)
+        return submitted
+
     def read_all(self) -> None:
         for profile in self.config.profiles:
             if profile.enabled:
@@ -3966,21 +4251,66 @@ class MultiProfileRunner:
         )
         if not targets:
             raise ValueError("Hãy chọn ít nhất một profile nhận đồng bộ")
+        required = {master_id, *targets}
+        unavailable: dict[str, str] = {}
+        attaching: list[str] = []
+        for profile_id in sorted(required):
+            if self.is_attached(profile_id):
+                continue
+            worker = self.workers[profile_id]
+            if self.is_browser_running(profile_id):
+                worker.submit(WorkerCommand(CommandKind.ATTACH))
+                attaching.append(profile_id)
+                unavailable[profile_id] = "đang kết nối lại CDP"
+            else:
+                unavailable[profile_id] = "Chrome/CDP không khả dụng"
+        if unavailable:
+            self.event_log.write(
+                "sync_attachment_wait",
+                {
+                    "master_profile_id": master_id,
+                    "target_profile_ids": sorted(targets),
+                    "profiles": unavailable,
+                },
+            )
+            if attaching:
+                raise RuntimeError(
+                    "Đang kết nối lại profile trước khi bật Sync: " + ", ".join(attaching)
+                )
+            raise RuntimeError(
+                "Không thể bật Sync:\n" + "\n".join(f"- {pid}: {reason}" for pid, reason in unavailable.items())
+            )
         with self._sync_lock:
             previous_master = self.sync_master_id if self.sync_enabled else None
+            sync_session_id = f"sync-{time.monotonic_ns()}"
             self.sync_enabled = True
             self.sync_master_id = master_id
             self.sync_target_ids = targets
+            self._sync_session_id = sync_session_id
             self._sync_last_pointer_move_at = 0.0
         self.event_log.write(
+            "sync_attachment_ready",
+            {
+                "master_profile_id": master_id,
+                "target_profile_ids": sorted(targets),
+            },
+        )
+        self.event_log.write(
             "sync_enabled",
-            {"master_profile_id": master_id, "target_profile_ids": sorted(targets)},
+            {
+                "master_profile_id": master_id,
+                "target_profile_ids": sorted(targets),
+                "sync_session_id": sync_session_id,
+                "target_session_status": {
+                    profile_id: self.has_open_session(profile_id) for profile_id in sorted(targets)
+                },
+            },
         )
         # Every worker starts as a follower. Only the old and new master need
         # a mode command; broadcasting 45 no-op commands delayed large syncs.
         if previous_master is not None and previous_master != master_id:
-            self.submit(previous_master, CommandKind.SET_SYNC_SOURCE, enabled=False)
-        self.submit(master_id, CommandKind.SET_SYNC_SOURCE, enabled=True)
+            self.submit(previous_master, CommandKind.SET_SYNC_SOURCE, enabled=False, sync_session_id=sync_session_id)
+        self.submit(master_id, CommandKind.SET_SYNC_SOURCE, enabled=True, sync_session_id=sync_session_id)
 
     def add_sync_target(self, profile_id: str) -> bool:
         """Add one ready follower without disturbing the active master.
@@ -4015,17 +4345,29 @@ class MultiProfileRunner:
         with self._sync_lock:
             was_enabled = self.sync_enabled
             previous_master = self.sync_master_id
+            sync_session_id = str(getattr(self, "_sync_session_id", ""))
             self.sync_enabled = False
             self.sync_master_id = None
+            previous_targets = set(self.sync_target_ids)
             self.sync_target_ids.clear()
+            self._sync_session_id = ""
             self._sync_last_pointer_move_at = 0.0
         if was_enabled:
             self.event_log.write(
                 "sync_disabled",
-                {"master_profile_id": previous_master},
+                {"master_profile_id": previous_master, "sync_session_id": sync_session_id},
             )
         if previous_master is not None and previous_master in self.workers:
-            self.submit(previous_master, CommandKind.SET_SYNC_SOURCE, enabled=False)
+            self.submit(previous_master, CommandKind.SET_SYNC_SOURCE, enabled=False, sync_session_id=sync_session_id)
+        for profile_id in previous_targets:
+            worker = self.workers.get(profile_id)
+            if worker is not None:
+                worker.submit(
+                    WorkerCommand(
+                        CommandKind.RESET_SYNC_INPUT,
+                        {"reason": "sync_disabled", "sync_session_id": sync_session_id},
+                    )
+                )
 
     def set_inspector(self, profile_id: str, enabled: bool) -> None:
         self.submit(profile_id, CommandKind.SET_INSPECTOR, enabled=enabled)
@@ -4308,8 +4650,29 @@ class MultiProfileRunner:
             return False
 
     def has_open_session(self, profile_id: str) -> bool:
+        """Compatibility alias for callers that mean *tool attached*."""
+        return self.is_attached(profile_id)
+
+    def is_browser_running(self, profile_id: str) -> bool:
         worker = self.workers.get(profile_id)
-        return bool(worker and worker.session is not None)
+        method = getattr(worker, "is_browser_running", None)
+        if callable(method):
+            return bool(method())
+        return False
+
+    def is_attached(self, profile_id: str) -> bool:
+        worker = self.workers.get(profile_id)
+        method = getattr(worker, "is_attached", None)
+        if callable(method):
+            return bool(method())
+        session = getattr(worker, "session", None)
+        if session is None:
+            return False
+        is_alive = getattr(session, "is_alive", None)
+        return bool(is_alive()) if callable(is_alive) else True
+
+    def is_profile_ready(self, profile_id: str) -> bool:
+        return self.is_attached(profile_id)
 
     def resource_overview(self) -> ResourceOverview:
         now = time.monotonic()
@@ -4374,22 +4737,59 @@ class MultiProfileRunner:
             enabled = self.sync_enabled
             master_id = self.sync_master_id
             target_ids = set(self.sync_target_ids)
+            sync_session_id = str(getattr(self, "_sync_session_id", ""))
         if not enabled or source_profile_id != master_id:
+            if str(event.get("type", "")) in {"pointerdown", "pointerup", "wheel", "keydown", "keyup"}:
+                self.event_log.write(
+                    "sync_input_dropped",
+                    {
+                        "profile_id": source_profile_id,
+                        "reason": "sync_disabled" if not enabled else "not_current_master",
+                        "type": str(event.get("type", "")),
+                        "sequence": int(event.get("sequence", 0) or 0),
+                        "current_master_profile_id": master_id,
+                    },
+                )
             return
         event_type = str(event.get("type", ""))
+        sync_event = dict(event)
+        sync_event["sync_session_id"] = sync_session_id
         # Do not throttle here. Each follower retains at most one pending
         # pointermove, so the fan-out queue stays bounded without discarding
         # the source trajectory globally for all 44 devices.
         delivered = 0
+        delivered_ids: list[str] = []
+        skipped: dict[str, str] = {}
+        detached_targets = [
+            profile_id for profile_id in sorted(target_ids)
+            if not self.is_attached(profile_id)
+        ]
+        if detached_targets:
+            self.event_log.write(
+                "sync_target_detached",
+                {
+                    "master_profile_id": source_profile_id,
+                    "profile_ids": detached_targets,
+                    "type": event_type,
+                    "reason": "target_not_attached",
+                    "sync_session_id": sync_session_id,
+                },
+            )
+            # Do not mirror a gesture to an unknown subset.  The user can
+            # safely re-enable Sync after attachment rather than receiving a
+            # false all-devices-active indication.
+            self.disable_sync()
+            return
         for profile_id, worker in self.workers.items():
-            if profile_id not in target_ids or worker.session is None:
+            if profile_id not in target_ids:
                 continue
             submit_synced_input = getattr(worker, "submit_synced_input", None)
             if callable(submit_synced_input):
-                submit_synced_input(event)
+                submit_synced_input(sync_event)
             else:
-                worker.submit(WorkerCommand(CommandKind.SYNC_INPUT, {"event": event}))
+                worker.submit(WorkerCommand(CommandKind.SYNC_INPUT, {"event": sync_event}))
             delivered += 1
+            delivered_ids.append(profile_id)
         if event_type in {"pointerdown", "pointerup", "keydown", "keyup"}:
             canvas = event.get("canvas")
             viewport = event.get("viewport")
@@ -4400,7 +4800,11 @@ class MultiProfileRunner:
                     "master_profile_id": source_profile_id,
                     "type": event_type,
                     "target_count": delivered,
+                    "configured_target_count": len(target_ids),
+                    "delivered_profile_ids": sorted(delivered_ids),
+                    "skipped_followers": skipped,
                     "sequence": int(event.get("sequence", 0) or 0),
+                    "sync_session_id": sync_session_id,
                     "source": {
                         key: source_point.get(key)
                         for key in (
@@ -4417,14 +4821,33 @@ class MultiProfileRunner:
                     },
                 },
             )
+            for profile_id in delivered_ids:
+                self.event_log.write(
+                    "sync_follower_queued",
+                    {"master_profile_id": source_profile_id, "profile_id": profile_id, "type": event_type, "sequence": int(event.get("sequence", 0) or 0), "sync_session_id": sync_session_id},
+                )
 
     def stop_all(self) -> None:
         for worker in self.workers.values():
             worker.stop()
 
-    def shutdown(self) -> None:
+    def shutdown(self, *, wait_seconds: float = RUNNER_SHUTDOWN_WAIT_SECONDS) -> None:
+        # Chrome windows intentionally survive an IK Auto update/restart.
+        # Detach the current master listener.  Sync is deliberately off on
+        # every Tool start and can only be enabled by the user.
         self.disable_sync()
-        for worker in self.workers.values():
+        workers = tuple(self.workers.values())
+        for worker in workers:
             worker.shutdown()
-        for worker in self.workers.values():
-            worker.join()
+        # ``ProfileWorker.join`` used to receive its full five-second timeout
+        # for every profile.  With 45 profiles, one stalled CDP call could
+        # freeze the close button for minutes.  Treat ``wait_seconds`` as one
+        # deadline for the complete group instead.  Any worker that is still
+        # detaching is daemonised; process exit safely releases its CDP link
+        # while leaving the user's Chrome window intact.
+        deadline = time.monotonic() + max(0.0, wait_seconds)
+        for worker in workers:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            worker.join(remaining)

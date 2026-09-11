@@ -8,7 +8,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from random import Random, SystemRandom
 
-
 MapPoint = tuple[int, int]
 
 

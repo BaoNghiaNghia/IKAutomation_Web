@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -49,6 +50,36 @@ def unique_profile_id(name: str, existing: set[str]) -> str:
 
 
 DEFAULT_ALLOWED_HOSTS = ("ik.playfun.vn", "gtarcade.com", "smobgame.com")
+_PROFILE_CDP_PORT_MIN = 21000
+_PROFILE_CDP_PORT_SPAN = 20_000
+
+
+def _legacy_cdp_port(profile_id: str) -> int:
+    digest = hashlib.sha256(profile_id.encode("utf-8")).digest()
+    return _PROFILE_CDP_PORT_MIN + int.from_bytes(digest[:4], "big") % _PROFILE_CDP_PORT_SPAN
+
+
+def _allocate_managed_cdp_ports(profiles: list[ProfileConfig]) -> None:
+    """Assign stable, unique ports without breaking legacy running Chrome."""
+    used: set[int] = set()
+    for profile in profiles:
+        if profile.mode != ProfileMode.MANAGED or profile.cdp_port is None:
+            continue
+        if not _PROFILE_CDP_PORT_MIN <= profile.cdp_port < _PROFILE_CDP_PORT_MIN + _PROFILE_CDP_PORT_SPAN:
+            raise ValueError(f"Profile {profile.id} có cdp_port ngoài dải cho phép")
+        if profile.cdp_port in used:
+            raise ValueError(f"cdp_port bị trùng: {profile.cdp_port}")
+        used.add(profile.cdp_port)
+    for profile in profiles:
+        if profile.mode != ProfileMode.MANAGED or profile.cdp_port is not None:
+            continue
+        candidate = _legacy_cdp_port(profile.id)
+        while candidate in used:
+            candidate += 1
+            if candidate >= _PROFILE_CDP_PORT_MIN + _PROFILE_CDP_PORT_SPAN:
+                candidate = _PROFILE_CDP_PORT_MIN
+        profile.cdp_port = candidate
+        used.add(candidate)
 
 
 def is_allowed_host(host: str, allowed_hosts: tuple[str, ...]) -> bool:
@@ -105,7 +136,10 @@ def load_config(path: Path) -> AppConfig:
     )
     if not allowed_hosts:
         raise ValueError("capture.allowed_hosts không được để trống")
-    target_url = str(raw.get("target_url", "https://ik.playfun.vn/play-game"))
+    # Start at the official login route.  The game redirects authenticated
+    # profiles to the playable surface, while opening /play-game directly can
+    # return a raw session-error JSON before credentials are available.
+    target_url = str(raw.get("target_url", "https://ik.playfun.vn/login-game"))
     if not is_allowed_url(target_url, allowed_hosts):
         raise ValueError("target_url phải là HTTP(S) thuộc capture.allowed_hosts")
     capture = CaptureSettings(
@@ -131,6 +165,7 @@ def load_config(path: Path) -> AppConfig:
             mode=mode,
             user_data_dir=_resolve(root, item.get("user_data_dir")),
             cdp_url=item.get("cdp_url"),
+            cdp_port=(int(item["cdp_port"]) if item.get("cdp_port") is not None else None),
             enabled=bool(item.get("enabled", True)),
         )
         if mode == ProfileMode.MANAGED and profile.user_data_dir is None:
@@ -138,6 +173,8 @@ def load_config(path: Path) -> AppConfig:
         if mode == ProfileMode.CDP and not profile.cdp_url:
             raise ValueError(f"Profile CDP {profile_id} thiếu cdp_url")
         profiles.append(profile)
+
+    _allocate_managed_cdp_ports(profiles)
 
     return AppConfig(
         root=root,
@@ -186,6 +223,7 @@ def save_config(config: AppConfig) -> None:
                 "mode": profile.mode.value,
                 "user_data_dir": _relative_or_absolute(config.root, profile.user_data_dir),
                 "cdp_url": profile.cdp_url,
+                "cdp_port": profile.cdp_port,
                 "enabled": profile.enabled,
             }
             for profile in config.profiles

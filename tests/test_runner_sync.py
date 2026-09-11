@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 import pytest
 
 import ik_chrome_auto.runner as runner_module
-from ik_chrome_auto.models import CommandKind, WorkerCommand
+from ik_chrome_auto.models import AttachmentState, CommandKind, WorkerCommand
 from ik_chrome_auto.runner import MultiProfileRunner, ProfileWorker
-from ik_chrome_auto.windows import ProcessResourceUsage
-from ik_chrome_auto.windows import WindowRect
+from ik_chrome_auto.windows import ProcessResourceUsage, WindowRect
 
 
 @dataclass
@@ -27,7 +27,7 @@ def make_runner() -> MultiProfileRunner:
     runner = MultiProfileRunner.__new__(MultiProfileRunner)
     runner.sync_enabled = True
     runner.sync_master_id = "master"
-    runner.sync_target_ids = {"follower-open", "follower-closed"}
+    runner.sync_target_ids = {"follower-open"}
     runner._sync_lock = threading.Lock()
     runner.event_log = SimpleNamespace(write=lambda _event, _payload: None)
     runner.workers = {
@@ -47,9 +47,150 @@ def test_sync_routes_master_event_only_to_open_followers() -> None:
     follower = runner.workers["follower-open"]
     assert len(follower.commands) == 1
     assert follower.commands[0].kind == CommandKind.SYNC_INPUT
-    assert follower.commands[0].payload["event"] == event
+    mirrored_event = dict(follower.commands[0].payload["event"])
+    assert mirrored_event.pop("sync_session_id") == ""
+    assert mirrored_event == event
     assert runner.workers["master"].commands == []
     assert runner.workers["follower-closed"].commands == []
+
+
+def test_dead_cdp_session_is_not_treated_as_an_open_profile() -> None:
+    runner = make_runner()
+    runner.workers["follower-open"].session = SimpleNamespace(is_alive=lambda: False)
+
+    assert runner.has_open_session("follower-open") is False
+
+
+def test_browser_running_is_distinct_from_tool_attachment() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker.session = None
+    worker._lifecycle_lock = threading.Lock()
+    worker._browser_running = True
+    worker._attachment_state = AttachmentState.DETACHED
+    runner = MultiProfileRunner.__new__(MultiProfileRunner)
+    runner.workers = {"retained": worker}
+
+    assert runner.is_browser_running("retained") is True
+    assert runner.is_attached("retained") is False
+    assert runner.has_open_session("retained") is False
+
+
+def test_duplicate_attach_requests_are_coalesced_before_worker_starts() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker._lifecycle_lock = threading.Lock()
+    worker._attachment_state = AttachmentState.DETACHED
+    worker._attach_requested = False
+    worker.commands = queue.Queue()
+    worker._ensure_thread = lambda: None
+
+    for _ in range(3):
+        worker.submit(WorkerCommand(CommandKind.ATTACH))
+
+    assert worker.commands.qsize() == 1
+    assert worker._attach_requested is True
+
+
+def test_enable_sync_refuses_a_selected_detached_follower() -> None:
+    runner = make_runner()
+    runner.sync_enabled = False
+    runner.sync_master_id = None
+    runner.sync_target_ids = set()
+    records: list[tuple[str, dict[str, object]]] = []
+    runner.event_log = SimpleNamespace(write=lambda event, payload: records.append((event, payload)))
+
+    with pytest.raises(RuntimeError, match="account|follower-closed|Chrome"):
+        runner.enable_sync("master", {"follower-closed"})
+
+    assert runner.sync_enabled is False
+    assert records[0][0] == "sync_attachment_wait"
+
+
+def test_active_sync_with_unexpected_detached_target_stops_without_partial_dispatch() -> None:
+    runner = make_runner()
+    runner.sync_target_ids = {"follower-open", "follower-closed"}
+    records: list[tuple[str, dict[str, object]]] = []
+    runner.event_log = SimpleNamespace(write=lambda event, payload: records.append((event, payload)))
+
+    runner._on_input("master", {"type": "pointerdown"})
+
+    assert [command.kind for command in runner.workers["follower-open"].commands] == [
+        CommandKind.RESET_SYNC_INPUT
+    ]
+    assert runner.sync_enabled is False
+    assert records[0][0] == "sync_target_detached"
+
+
+def test_worker_detach_disables_sync_for_master_and_resets_followers() -> None:
+    runner = make_runner()
+    runner._sync_session_id = "sync-test"
+    records: list[tuple[str, dict[str, object]]] = []
+    runner.event_log = SimpleNamespace(
+        write=lambda event, payload: records.append((event, payload))
+    )
+
+    runner._on_worker_detached("master", "chrome_closed")
+
+    assert runner.sync_enabled is False
+    assert runner.sync_master_id is None
+    assert [command.kind for command in runner.workers["follower-open"].commands] == [
+        CommandKind.RESET_SYNC_INPUT
+    ]
+    assert [event for event, _payload in records] == [
+        "sync_member_detached",
+        "sync_disabled",
+    ]
+
+
+def test_large_fanout_queues_every_selected_follower_once() -> None:
+    runner = make_runner()
+    followers = {f"follower-{index}" for index in range(44)}
+    runner.workers.update({profile_id: FakeWorker(object()) for profile_id in followers})
+    runner.sync_target_ids = followers
+
+    runner._on_input("master", {"type": "pointerup", "sequence": 9})
+
+    assert all(
+        [command.kind for command in runner.workers[profile_id].commands]
+        == [CommandKind.SYNC_INPUT]
+        for profile_id in followers
+    )
+
+
+def test_shutdown_uses_one_bounded_wait_for_all_workers() -> None:
+    class ShutdownWorker:
+        def __init__(self, *, consumes_wait: bool = False) -> None:
+            self.shutdown_calls = 0
+            self.join_timeouts: list[float] = []
+            self.consumes_wait = consumes_wait
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+        def join(self, timeout: float) -> None:
+            self.join_timeouts.append(timeout)
+            if self.consumes_wait:
+                time.sleep(timeout)
+
+    runner = MultiProfileRunner.__new__(MultiProfileRunner)
+    slow = ShutdownWorker(consumes_wait=True)
+    remaining = ShutdownWorker()
+    runner.workers = {"slow": slow, "remaining": remaining}
+    runner.sync_enabled = False
+    runner.sync_master_id = None
+    runner.sync_target_ids = set()
+    runner._sync_lock = threading.Lock()
+    runner.event_log = SimpleNamespace(write=lambda _event, _payload: None)
+
+    started = time.monotonic()
+    runner.shutdown(wait_seconds=0.02)
+
+    assert time.monotonic() - started < 0.12
+    assert slow.shutdown_calls == remaining.shutdown_calls == 1
+    assert len(slow.join_timeouts) == 1
+    assert slow.join_timeouts[0] <= 0.02
+    # The first stalled worker consumes the shared deadline; no additional
+    # per-profile wait is allowed for later workers.
+    assert remaining.join_timeouts == []
 
 
 def test_sync_dispatch_log_contains_source_ratio_for_remote_diagnostics() -> None:
@@ -71,23 +212,12 @@ def test_sync_dispatch_log_contains_source_ratio_for_remote_diagnostics() -> Non
 
     runner._on_input("master", event)
 
-    assert records == [
-        (
-            "sync_input_dispatched",
-            {
-                "master_profile_id": "master",
-                "type": "pointerdown",
-                "target_count": 1,
-                "sequence": 17,
-                "source": {
-                    "ratio_x": 0.75,
-                    "ratio_y": 0.5,
-                    "css_width": 1920.0,
-                    "css_height": 1080.0,
-                },
-            },
-        )
-    ]
+    assert records[0][0] == "sync_input_dispatched"
+    assert records[0][1]["target_count"] == 1
+    assert records[0][1]["delivered_profile_ids"] == ["follower-open"]
+    assert records[0][1]["skipped_followers"] == {}
+    assert records[0][1]["source"]["ratio_x"] == 0.75
+    assert records[1][0] == "sync_follower_queued"
 
 
 def test_sync_routes_keyboard_event_to_open_followers() -> None:
@@ -101,7 +231,9 @@ def test_sync_routes_keyboard_event_to_open_followers() -> None:
 
     command = runner.workers["follower-open"].commands[0]
     assert command.kind == CommandKind.SYNC_INPUT
-    assert command.payload["event"] == event
+    mirrored_event = dict(command.payload["event"])
+    assert mirrored_event.pop("sync_session_id") == ""
+    assert mirrored_event == event
 
 
 def test_sync_routes_input_only_to_selected_open_followers() -> None:
@@ -126,7 +258,8 @@ def test_enable_sync_keeps_only_selected_targets_and_marks_master_as_source() ->
     assert runner.sync_enabled is True
     assert runner.sync_master_id == "master"
     assert runner.sync_target_ids == {"follower-open"}
-    assert runner.workers["master"].commands[-1].payload == {"enabled": True}
+    assert runner.workers["master"].commands[-1].payload["enabled"] is True
+    assert runner.workers["master"].commands[-1].payload["sync_session_id"].startswith("sync-")
     assert runner.workers["follower-open"].commands == []
 
 
@@ -141,7 +274,7 @@ def test_add_sync_target_does_not_rearm_or_reset_the_active_master() -> None:
     assert runner.add_sync_target("follower-new") is True
 
     assert runner.sync_target_ids == {
-        "follower-open", "follower-closed", "follower-new"
+        "follower-open", "follower-new"
     }
     assert runner.workers["master"].commands == []
     assert records == [
@@ -151,7 +284,7 @@ def test_add_sync_target_does_not_rearm_or_reset_the_active_master() -> None:
                 "master_profile_id": "master",
                 "profile_id": "follower-new",
                 "target_profile_ids": [
-                    "follower-closed", "follower-new", "follower-open"
+                    "follower-new", "follower-open"
                 ],
             },
         )
@@ -166,8 +299,10 @@ def test_disable_sync_only_reconfigures_the_previous_master() -> None:
     assert runner.sync_enabled is False
     assert runner.sync_master_id is None
     assert runner.sync_target_ids == set()
-    assert runner.workers["master"].commands[-1].payload == {"enabled": False}
-    assert runner.workers["follower-open"].commands == []
+    assert runner.workers["master"].commands[-1].payload["enabled"] is False
+    assert [command.kind for command in runner.workers["follower-open"].commands] == [
+        CommandKind.RESET_SYNC_INPUT
+    ]
     assert runner.workers["follower-closed"].commands == []
 
 
@@ -274,11 +409,8 @@ def test_follower_input_repairs_stale_runtime_and_retries_once() -> None:
 
     assert worker.session.attempts == 2
     assert worker.session.repairs == 1
-    assert events == [
-        (
-            "sync_input_recovered",
-            {"profile_id": "follower", "type": "pointerdown"},
-        )
+    assert [event for event, _payload in events] == [
+        "sync_input_first_attempt_failed", "sync_input_recovered"
     ]
 
 

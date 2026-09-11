@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from ik_chrome_auto.runner import ProfileWorker
 from ik_chrome_auto.farm_vision import TeamRosterRow, TeamRowState
 from ik_chrome_auto.farm_workflow import FarmGameState
+from ik_chrome_auto.runner import ProfileWorker
 
 
 def evidence(bounds: tuple[int, int, int, int]):

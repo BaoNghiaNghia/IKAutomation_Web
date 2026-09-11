@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ik_chrome_auto.farm_matcher import BrowserCanvasMatcher
 from ik_chrome_auto.farm_vision import (
     BrowserGameStateDetector,
     DetectedGameState,
@@ -9,7 +10,6 @@ from ik_chrome_auto.farm_vision import (
     TeamRowState,
     TemplateEvidence,
 )
-from ik_chrome_auto.farm_matcher import BrowserCanvasMatcher
 
 
 def detect(*templates: FarmTemplateId):

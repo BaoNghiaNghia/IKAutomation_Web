@@ -7,7 +7,6 @@ import shutil
 import sys
 from pathlib import Path
 
-
 # Keep the handles alive for the life of the process.  Closing an
 # ``add_dll_directory`` handle removes that directory from Windows' DLL search
 # path again.

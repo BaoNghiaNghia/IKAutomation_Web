@@ -7,18 +7,18 @@ from ik_chrome_auto.farm_vision import (
     GameDetectionResult,
     TemplateEvidence,
 )
+from ik_chrome_auto.farm_workflow import FarmGameState, FarmStep, FarmWorkflow
+from ik_chrome_auto.models import WorkerState
 from ik_chrome_auto.runner import (
     AUTOMATION_RENDERER_SIZE,
     AUTOMATION_RENDERER_WINDOW_SIZE,
-    FARM_MINIMUM_CANVAS_SIZE,
     FARM_MAX_RECOVERY_ATTEMPTS,
+    FARM_MINIMUM_CANVAS_SIZE,
     FARM_NO_READY_TEAM_RESCAN_SECONDS,
     FARM_REFERENCE_ASPECT_RATIO,
     FARM_WORLD_MAP_LOAD_TIMEOUT_SECONDS,
     ProfileWorker,
 )
-from ik_chrome_auto.farm_workflow import FarmGameState, FarmStep, FarmWorkflow
-from ik_chrome_auto.models import WorkerState
 
 
 def test_farm_layout_fallbacks_use_relative_canvas_positions_at_16_by_9() -> None:

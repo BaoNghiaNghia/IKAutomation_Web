@@ -44,8 +44,7 @@ ik_chrome_auto = [
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-addopts = "--basetemp=.build-cache/pytest-tmp"
-cache_dir = ".build-cache/pytest-cache"
+norecursedirs = [".git", ".venv", ".build-cache", "build", "dist", "release"]
 
 [tool.ruff]
 line-length = 100
@@ -53,3 +52,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+# The dashboard contains deliberately compact Qt callback wiring, while the
+# browser module embeds browser-side JavaScript/CSS.  Reflowing either solely
+# for lint would make functional diffs noisy and can alter injected assets.
+ignore = ["E501", "E701", "E702"]

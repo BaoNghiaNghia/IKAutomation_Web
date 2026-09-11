@@ -1,28 +1,70 @@
 """Modern Fluent desktop dashboard."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import queue
 import subprocess
 import threading
 import time
-from io import BytesIO
 from collections import deque
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QCloseEvent, QColor, QCursor, QGuiApplication, QIcon, QPixmap
-from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
-from qfluentwidgets import CardWidget, CheckBox, ComboBox, FluentIcon as FIF, LineEdit, PasswordLineEdit, PrimaryPushButton, PrimaryToolButton, PushButton, StrongBodyLabel, SubtitleLabel, ToolButton
+from PySide6.QtGui import QAction, QCloseEvent, QCursor, QGuiApplication, QIcon, QPixmap
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QScrollArea,
+    QSizePolicy,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+from qfluentwidgets import (
+    CardWidget,
+    CheckBox,
+    ComboBox,
+    LineEdit,
+    PasswordLineEdit,
+    PrimaryPushButton,
+    PrimaryToolButton,
+    PushButton,
+    StrongBodyLabel,
+    SubtitleLabel,
+    ToolButton,
+)
+from qfluentwidgets import FluentIcon as FIF
 
 from ik_chrome_auto.build_info import release_build_label
 from ik_chrome_auto.config import ensure_data_dirs, load_config, save_config, unique_profile_id
 from ik_chrome_auto.credential_store import escape_account_export_field, parse_account_export_line
 from ik_chrome_auto.farm_launch_policy import FarmLaunchPolicy
 from ik_chrome_auto.interaction import format_coordinate
-from ik_chrome_auto.models import CommandKind, ProfileConfig, ProfileMode, WorkerSnapshot, WorkerState
+from ik_chrome_auto.mail_monitor import (
+    COMBAT_MAIL_OTHER,
+    MAIL_BASELINE,
+    NO_NEW_COMBAT_MAIL,
+    SCAN_ERROR,
+    TERRITORY_ATTACKED,
+)
+from ik_chrome_auto.models import (
+    CommandKind,
+    ProfileConfig,
+    ProfileMode,
+    WorkerSnapshot,
+    WorkerState,
+)
 from ik_chrome_auto.runner import MultiProfileRunner
 from ik_chrome_auto.telegram import (
     TelegramNotifier,
@@ -31,13 +73,6 @@ from ik_chrome_auto.telegram import (
     load_telegram_settings,
     save_telegram_settings,
     send_telegram_message,
-)
-from ik_chrome_auto.mail_monitor import (
-    COMBAT_MAIL_OTHER,
-    MAIL_BASELINE,
-    NO_NEW_COMBAT_MAIL,
-    SCAN_ERROR,
-    TERRITORY_ATTACKED,
 )
 from ik_chrome_auto.two_factor import TwoFactorEnrollment, TwoFactorService
 from ik_chrome_auto.update_check import GitUpdateCheckError, GitUpdateStatus, check_for_git_updates
@@ -193,6 +228,9 @@ class Dashboard(QWidget):
         self._auto_arrange_states: dict[str, WorkerState] = {}
         self._auto_arrange_deadline = 0.0
         self._individually_opening_profiles: set[str] = set()
+        self._reattach_pending_profiles: set[str] = set()
+        self._reattach_started_at = 0.0
+        self._reattach_total = 0
         self.drag_visible = False
         self.scrollbars_visible = False
         self._responsive_icon_buttons: list[ToolButton] = []
@@ -202,6 +240,10 @@ class Dashboard(QWidget):
         self._last_farm_window_restore = 0.0
         self._build()
         self._draw_rows()
+        # Chrome is deliberately detached from IK Auto during an update.  On
+        # the next tool launch, discover and attach those existing windows
+        # instead of asking the user to reopen every profile.
+        self._begin_profile_reattach()
         self._load_telegram_notifier()
         self._resource_monitor = threading.Thread(
             target=self._monitor_resources,
@@ -541,6 +583,40 @@ class Dashboard(QWidget):
             return
         self._append_log(f"Đang mở riêng profile {profile_id}")
 
+    def _begin_profile_reattach(self) -> None:
+        """Lock bulk launch until retained Chrome windows have settled."""
+        pending = set(self.runner.reattach_existing_profiles())
+        self._reattach_pending_profiles = pending
+        self._reattach_total = len(pending)
+        self._reattach_started_at = time.monotonic()
+        if not pending:
+            return
+        self.farm_launcher.setEnabled(False)
+        self.farm_launcher.setText("Đang kết nối…")
+        self._append_log(f"Đang kết nối lại {len(pending)} profile Chrome đang mở từ phiên trước")
+
+    def _settle_profile_reattach(self, snapshot: WorkerSnapshot) -> None:
+        pending = getattr(self, "_reattach_pending_profiles", set())
+        if snapshot.profile_id not in pending or snapshot.state not in {
+            WorkerState.READY,
+            WorkerState.STOPPED,
+            WorkerState.ERROR,
+        }:
+            return
+        pending.discard(snapshot.profile_id)
+        if pending:
+            return
+        elapsed = round((time.monotonic() - self._reattach_started_at) * 1000)
+        if self._farm_launcher_phase == "launch":
+            self.farm_launcher.setEnabled(True)
+            self.farm_launcher.setText("Khởi động")
+        self._append_log(f"Đã kiểm tra {self._reattach_total} profile trong {elapsed} ms")
+        # Sync was intentionally disabled while reconnecting the retained
+        # windows.  Refresh it as soon as the final READY/STOPPED snapshot
+        # settles; otherwise the button keeps its startup disabled state even
+        # though the profile chooser is already usable.
+        self._refresh_sync_control()
+
     def _place_individually_opened_profile(self, profile_id: str) -> None:
         place_in_grid = getattr(self.runner, "place_window_in_empty_grid_slot", None)
         if not callable(place_in_grid):
@@ -718,6 +794,12 @@ class Dashboard(QWidget):
         if self.runner.sync_enabled:
             self._set_sync_disabled_ui()
             return
+        if getattr(self, "_reattach_pending_profiles", set()):
+            self._warning(
+                "Đang kết nối profile",
+                "Chờ các profile Chrome đang mở kết nối xong rồi bật đồng bộ.",
+            )
+            return
         master = str(self.master.currentData() or "")
         opened_profiles = [
             profile for profile in self.config.profiles
@@ -750,7 +832,12 @@ class Dashboard(QWidget):
         self._sync_available_profiles = follower_ids
         self._sync_target_profiles = selected
         self._stop_automation_for_sync()
-        self.runner.enable_sync(master, selected)
+        try:
+            self.runner.enable_sync(master, selected)
+        except (KeyError, ValueError, RuntimeError) as error:
+            self._warning("Chưa thể bật đồng bộ", str(error))
+            self._refresh_sync_control()
+            return
         self.master.setEnabled(False)
         self.sync.setText("Tắt đồng bộ")
         self.sync_status.setText(f"MASTER: {self.master.currentText()} → {len(selected)} thiết bị")
@@ -816,10 +903,11 @@ class Dashboard(QWidget):
             "stopping",
         }
         sync_active = bool(getattr(getattr(self, "runner", None), "sync_enabled", False))
+        reattaching = bool(getattr(self, "_reattach_pending_profiles", set()))
         if hasattr(self, "sync"):
             # Stopping sync is always safe and must remain available even if
             # profile tabs are currently opening or closing.
-            self.sync.setEnabled(sync_active or not blocked)
+            self.sync.setEnabled(sync_active or (not blocked and not reattaching))
         if hasattr(self, "farm_all_button") and not getattr(
             self, "_farm_all_running", False
         ):
@@ -1705,8 +1793,7 @@ class Dashboard(QWidget):
                 self._farm_batch_limit = 1
             self.farm_launcher.setText("Đang mở chậm")
             self._set_labeled_action_icon(self.farm_launcher, FIF.PLAY)
-        if self._farm_resource_pause_started:
-            if not reason:
+        if self._farm_resource_pause_started and not reason:
                 self._append_log(f"Tài nguyên đã ổn định; tiếp tục mở tab (trước đó: {self._farm_resource_pause_reason})")
                 self._farm_resource_pause_started = 0.0
                 self._farm_resource_pause_reason = None
@@ -1970,6 +2057,7 @@ class Dashboard(QWidget):
                 self._append_log(f"[{snap.profile_id}] Tác vụ Farm đã kết thúc")
                 self._advance_farm_quiescing()
             self._auto_arrange_states[snap.profile_id] = snap.state
+            self._settle_profile_reattach(snap)
             if self._farm_launcher_phase == "opening" and snap.profile_id in self._farm_launch_profiles:
                 self._farm_open_states[snap.profile_id] = snap.state
             if (
@@ -2098,10 +2186,8 @@ class Dashboard(QWidget):
                 result: object = self.runner.resource_overview()
             except Exception as error:
                 result = error
-            try:
+            with contextlib.suppress(queue.Full):
                 self._resource_overview_results.put_nowait(result)
-            except queue.Full:
-                pass
 
         threading.Thread(target=sample, name="profile-resource-sample", daemon=True).start()
 
@@ -2153,10 +2239,8 @@ class Dashboard(QWidget):
                 row.last_resource = value
 
     def _trim_profile_memory_safely(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self.runner.trim_all_profile_memory()
-        except Exception:
-            pass
     @staticmethod
     def _state(state:WorkerState)->tuple[str,str,str]:
         if state in {WorkerState.READY,WorkerState.COMPLETED}:return "Sẵn sàng","#dcfce7","#15803d"
@@ -2187,11 +2271,8 @@ class Dashboard(QWidget):
         event_log = getattr(runner, "event_log", None)
         write = getattr(event_log, "write", None)
         if callable(write):
-            try:
+            with contextlib.suppress(Exception):
                 write(event, payload)
-            except Exception:
-                # Logging must never stop the monitoring scheduler.
-                pass
 
     @staticmethod
     def _set_roster_tooltip(card: CardWidget, roster: tuple[tuple[int, str], ...]) -> None:
@@ -2597,7 +2678,7 @@ class AccountManagerDialog(QDialog):
     def add_row(self,profile_id:str|None=None,username_value:str="",password_value:str="")->None:
         row=CardWidget(); row.setFixedHeight(_ui_px(104)); row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed); layout=QVBoxLayout(row); layout.setContentsMargins(_ui_px(12),_ui_px(8),_ui_px(12),_ui_px(8)); layout.setSpacing(_ui_px(7)); header=QHBoxLayout(); header.addWidget(StrongBodyLabel(f"Tài khoản {len(self.rows)+1:02d}")); header.addStretch(); remove=PushButton("×"); remove.setToolTip("Xóa tài khoản"); remove.setFixedSize(_ui_px(32),_ui_px(28)); header.addWidget(remove); layout.addLayout(header); fields=QHBoxLayout(); fields.setSpacing(_ui_px(8)); username=LineEdit(); username.addAction(QAction(FIF.PEOPLE.icon(),"Username",username),QLineEdit.ActionPosition.LeadingPosition); username.setPlaceholderText("Username / email"); username.setText(username_value); username_box=QVBoxLayout(); username_box.setContentsMargins(0,0,0,0); username_box.setSpacing(_ui_px(2)); username_box.addWidget(username); warning=QLabel(" "); warning.setStyleSheet(f"color:transparent;background:transparent;font-size:{_ui_px(10)}px;"); warning.setFixedHeight(_ui_px(14)); username_box.addWidget(warning); password=PasswordLineEdit(); password.addAction(QAction(FIF.FINGERPRINT.icon(),"Password",password),QLineEdit.ActionPosition.LeadingPosition); password.setPlaceholderText("Password"); password.setText(password_value); fields.addLayout(username_box,1); fields.addWidget(password,1,Qt.AlignmentFlag.AlignTop); layout.addLayout(fields); remove.clicked.connect(lambda:self.remove_row(row)); username.textChanged.connect(self._filter_rows); username.textChanged.connect(self._update_username_validation); self.rows.append((profile_id,username,password,row)); self._username_warnings[username]=warning; self.list.addWidget(row); self._filter_rows(); self._update_username_validation(); self._update_account_count()
     def remove_row(self,row:QWidget)->None:
-        removed = [item for item in self.rows if item[3] is row]; self.rows=[item for item in self.rows if item[3] is not row];
+        removed = [item for item in self.rows if item[3] is row]; self.rows=[item for item in self.rows if item[3] is not row]
         for _, username, _, _ in removed: self._username_warnings.pop(username, None)
         self.list.removeWidget(row); row.deleteLater(); self._filter_rows(); self._update_username_validation(); self._update_account_count()
     def _update_account_count(self) -> None:
@@ -2610,11 +2691,11 @@ class AccountManagerDialog(QDialog):
             row.setVisible(not query or query in haystack)
     def _update_username_validation(self, *_args: object) -> bool:
         values:dict[str,int]={}
-        for _, username, _, row in self.rows:
+        for _, username, _, _row in self.rows:
             value=username.text().strip().casefold()
             if value: values[value]=values.get(value,0)+1
         valid=True
-        for _, username, _, _ in self.rows:
+        for _, username, _, row in self.rows:
             raw_value = username.text()
             has_whitespace = any(character.isspace() for character in raw_value)
             duplicate=bool((value:=raw_value.strip().casefold()) and values.get(value,0)>1)

@@ -20,7 +20,6 @@ from ik_chrome_auto.input_helpers import (
     control_center_reference_point,
 )
 
-
 ASSET = (
     Path(__file__).parents[1]
     / "src"
@@ -473,6 +472,8 @@ def make_session(
     session._page_cdp_session = None
     session._direct_canvas_capture_supported = None
     session._automation_game_frame_fixed = True
+    session._sync_pressed_buttons = set()
+    session._sync_pressed_keys = {}
     session.find_frame = lambda: object()
     session._largest_canvas = lambda _frame: (canvas, BOX.copy())
     return session, canvas, context, page
@@ -716,6 +717,27 @@ def test_synced_ctrl_shortcut_does_not_inject_printable_text() -> None:
     assert "text" not in params
 
 
+def test_reset_synced_input_releases_held_pointer_and_keys() -> None:
+    session, _canvas, context, page = make_session()
+    session.apply_synced_input(
+        {
+            "type": "pointerdown",
+            "canvas": {"ratio_x": 0.5, "ratio_y": 0.5, "index": 0},
+            "pointer": {"button": 0},
+        }
+    )
+    session.apply_synced_input(
+        {"type": "keydown", "keyboard": {"key": "Shift", "code": "ShiftLeft", "key_code": 16}}
+    )
+
+    session.reset_synced_input()
+
+    assert page.mouse_calls[-1] == ("up", (), {"button": "left"})
+    assert context.sessions[0].calls[-1][1]["type"] == "keyUp"
+    assert session._sync_pressed_buttons == set()
+    assert session._sync_pressed_keys == {}
+
+
 def test_sync_probe_is_rearmed_for_a_retained_browser_frame() -> None:
     class RetainedFrame:
         url = "https://ik.playfun.vn/play-game"
@@ -738,6 +760,9 @@ def test_sync_probe_is_rearmed_for_a_retained_browser_frame() -> None:
     session._drag_item_visible = False
     session._scrollbars_visible = False
     session._configured_frames = {}
+    session._frame_roots = lambda: (_ for _ in ()).throw(
+        AssertionError("Sync must not walk nested iframe locators when CDP frames exist")
+    )
 
     armed = session._repair_and_count_sync_frames()
 
@@ -797,6 +822,74 @@ def test_unchanged_follower_sync_mode_does_not_reconfigure_slow_frames() -> None
 
     assert session.set_sync_source(False) == 0
     assert calls == []
+
+
+def test_sync_evaluate_uses_nested_frame_locator_document() -> None:
+    class Html:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, object]] = []
+
+        def evaluate(self, script: str, argument: object = None) -> object:
+            self.calls.append((script, argument))
+            return "nested-result"
+
+    html = Html()
+    nested_frame_locator = SimpleNamespace(locator=lambda selector: html)
+
+    result = ChromeProfileSession._evaluate_frame_root(
+        nested_frame_locator, "() => 'nested-result'", ["argument"]
+    )
+
+    assert result == "nested-result"
+    assert html.calls == [("() => 'nested-result'", ["argument"])]
+
+
+def test_sync_poll_reads_events_from_nested_frame_locator() -> None:
+    class Html:
+        def evaluate(self, script: str, _argument: object = None) -> object:
+            if "window.location.href" in script:
+                return "https://ik.playfun.vn/game/nested"
+            if "__IK_SYNC_EVENTS" in script:
+                return [{"type": "pointerdown", "sequence": 7}]
+            raise AssertionError(script)
+
+    nested_frame_locator = SimpleNamespace(locator=lambda selector: Html())
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session._sync_source = True
+    session._frame_roots = lambda: [nested_frame_locator]
+
+    events = session.poll_sync_events()
+
+    assert events == [{
+        "type": "pointerdown",
+        "sequence": 7,
+        "frame_url": "https://ik.playfun.vn/game/nested",
+        "frame_url_safe": "https://ik.playfun.vn/game/nested",
+    }]
+
+
+def test_idle_pump_does_not_reconfigure_retained_profile_frames() -> None:
+    class Page:
+        def is_closed(self) -> bool:
+            return False
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session._page = Page()
+    session._sync_source = False
+    session._inspector_enabled = False
+    session._drag_item_visible = False
+    session._scrollbars_visible = False
+    session._automation_game_frame_fixed = False
+    configured: list[bool] = []
+    session._configure_interaction_frames = lambda: configured.append(True)
+    session._retry_auto_login_if_due = lambda: None
+
+    session.pump(5)
+
+    assert configured == []
 
 
 def test_synced_pointer_falls_back_to_viewport_while_canvas_is_navigating() -> None:

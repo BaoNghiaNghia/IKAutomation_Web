@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 GAME_REFERENCE_WIDTH = 1280.0
 GAME_REFERENCE_HEIGHT = 720.0
 
@@ -40,7 +39,7 @@ class CanvasTransformSnapshot:
             raise ValueError("Kích thước canvas thực tế không hợp lệ")
 
     @classmethod
-    def from_box(cls, box: dict[str, float]) -> "CanvasTransformSnapshot":
+    def from_box(cls, box: dict[str, float]) -> CanvasTransformSnapshot:
         return cls(
             viewport_left=float(box.get("x", 0.0)),
             viewport_top=float(box.get("y", 0.0)),

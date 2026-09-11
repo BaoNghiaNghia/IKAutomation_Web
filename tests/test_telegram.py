@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-from io import BytesIO
 import urllib.error
+from io import BytesIO
 
 import pytest
 

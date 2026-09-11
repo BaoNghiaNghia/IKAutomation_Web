@@ -25,7 +25,7 @@ class _Input:
 
 class _Button:
     class _First:
-        def __init__(self, parent: "_Button") -> None:
+        def __init__(self, parent: _Button) -> None:
             self.parent = parent
 
         def click(self, *, timeout: int) -> None:
@@ -74,7 +74,7 @@ class _NestedFrameLocator:
     def __init__(self, button: _Button) -> None:
         self.button = button
 
-    def locator(self, selector: str) -> "_NestedFrameLocator._Html":
+    def locator(self, selector: str) -> _NestedFrameLocator._Html:
         assert selector == "html"
         return self._Html()
 

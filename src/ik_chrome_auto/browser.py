@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import random
@@ -14,12 +15,10 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
-from ik_chrome_auto.interaction import (
-    INTERACTION_PROBE,
-    calculate_target_point,
-    validate_viewport,
-)
+from ik_chrome_auto.chrome_preferences import suppress_browser_prompts
+from ik_chrome_auto.config import is_allowed_url
 from ik_chrome_auto.image_utils import RGBImage, decode_png
+from ik_chrome_auto.input_engine import ProfileInputEngine, ViewportPoint
 from ik_chrome_auto.input_helpers import (
     GAME_REFERENCE_HEIGHT,
     GAME_REFERENCE_WIDTH,
@@ -27,9 +26,11 @@ from ik_chrome_auto.input_helpers import (
     CanvasTransformSnapshot,
     control_center_reference_point,
 )
-from ik_chrome_auto.input_engine import ProfileInputEngine, ViewportPoint
-from ik_chrome_auto.config import is_allowed_url
-from ik_chrome_auto.chrome_preferences import suppress_browser_prompts
+from ik_chrome_auto.interaction import (
+    INTERACTION_PROBE,
+    calculate_target_point,
+    validate_viewport,
+)
 from ik_chrome_auto.models import AppConfig, ProfileConfig, ProfileMode
 from ik_chrome_auto.reader import GameDataReader, redact_url
 from ik_chrome_auto.windows import (
@@ -38,15 +39,18 @@ from ik_chrome_auto.windows import (
     find_chrome_window,
     find_chrome_window_for_process,
     find_tcp_listener_process,
-    get_window_rect,
+    get_process_command_line,
     get_renderer_rect,
+    get_window_rect,
     is_window,
     is_window_minimized,
     move_window_position,
     move_window_renderer,
     raise_window_above_profile_peers,
-    set_window_minimized,
     set_taskbar_group,
+    set_window_minimized,
+)
+from ik_chrome_auto.windows import (
     set_topmost as set_native_topmost,
 )
 
@@ -66,6 +70,26 @@ _GAME_SURFACE_HEIGHT = 720.0
 _FARM_INPUT_FOCUS_DELAY_SECONDS = 0.25
 _FARM_INPUT_ACTION_DELAY_SECONDS = 0.12
 _FARM_INPUT_VERIFY_TIMEOUT_SECONDS = 0.8
+_PORTAL_LOGIN_URL = "https://ik.playfun.vn/login-game"
+_PORTAL_DIRECT_PLAY_ERROR_CODE = 141303
+_PORTAL_DIRECT_PLAY_ERROR_MESSAGE = 211155
+
+
+def _normalized_windows_path(value: str | Path) -> str:
+    """Compare Chrome command-line paths with Windows filesystem semantics."""
+    return os.path.normcase(os.path.normpath(str(value))).rstrip("\\/")
+
+
+def _command_line_user_data_dir(command_line: str) -> str | None:
+    """Extract ``--user-data-dir`` without relying on argument ordering."""
+    match = re.search(
+        r"--user-data-dir(?:=|\s+)(?:\"([^\"]+)\"|'([^']+)'|(\S+))",
+        command_line,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    return next((value for value in match.groups() if value is not None), None)
 
 
 def _fixed_game_surface_box() -> dict[str, float]:
@@ -337,8 +361,13 @@ class ChromeProfileSession:
         self._scrollbars_visible = False
         self._window_handle: int | None = None
         self._managed_browser_pid: int | None = None
+        self._managed_cdp_endpoint: str | None = None
         self._topmost = False
         self._configured_frames: dict[int, str] = {}
+        # Sync polling is a hot path.  Keep the roots successfully armed by
+        # the source command instead of rediscovering nested iframe locators
+        # for every idle worker tick.
+        self._sync_capture_roots: list[Any] = []
         self._externally_closed = False
         self._closing = False
         self._tracked_pages: set[int] = set()
@@ -357,6 +386,8 @@ class ChromeProfileSession:
         # produce different sizes while Chrome lays out dozens of profiles.
         self._sync_pointer_target_box: dict[str, float] | None = None
         self._sync_last_target_box: dict[str, float] | None = None
+        self._sync_pressed_buttons: set[str] = set()
+        self._sync_pressed_keys: dict[str, dict[str, Any]] = {}
         # Login iframes arrive noticeably later when dozens of Chrome
         # profiles start together. Keep a bounded background retry window
         # instead of relying on the first DOMContentLoaded snapshot.
@@ -380,7 +411,13 @@ class ChromeProfileSession:
             self._page = self._choose_page()
         return self._page
 
-    def start(self, *, navigate: bool = True) -> Page:
+    def start(
+        self,
+        *,
+        navigate: bool = True,
+        resize: bool = True,
+        reattach: bool = False,
+    ) -> Page:
         if self._context is not None:
             if navigate:
                 self.goto()
@@ -401,6 +438,14 @@ class ChromeProfileSession:
         if navigate:
             self._reset_auto_login_window()
         self._attach_lifecycle()
+        if reattach:
+            # A profile retained across a Tool update already has its page,
+            # viewport and game DOM. Replaying startup scripts into every
+            # frame made 40+ simultaneous CDP reconnects needlessly slow.
+            self._page = self._choose_page(create=True)
+            self._track_page(self._page)
+            self._bind_native_window(retries=3)
+            return self.page
         if self.config.browser.low_gpu_mode:
             low_gpu_script = _low_gpu_init_script(self.config.browser.render_fps_limit)
             self.context.add_init_script(low_gpu_script)
@@ -429,7 +474,7 @@ class ChromeProfileSession:
         self._track_page(self._page)
         self._configure_interaction_frames(force=True)
         self._apply_profile_title()
-        if self.config.browser.auto_resize:
+        if resize and self.config.browser.auto_resize:
             self.resize(
                 self.config.browser.viewport_width,
                 self.config.browser.viewport_height,
@@ -438,6 +483,65 @@ class ChromeProfileSession:
             self.goto()
         self._bind_native_window()
         return self.page
+
+    def reset_reconnected_interaction_modes(self) -> None:
+        """Turn off listeners left by a previous Tool instance cheaply."""
+        for frame in self._frame_roots():
+            try:
+                self._evaluate_frame_root(
+                    frame,
+                    """() => {
+                        window.__IK_SYNC_SOURCE = false;
+                        window.__IK_INSPECT_ENABLED = false;
+                        window.__IK_SET_INTERACTION_MODES?.(false, false);
+                    }"""
+                )
+            except Exception:
+                continue
+
+    def can_attach_existing_browser(self) -> bool:
+        """Check whether this configured profile already has a live CDP port.
+
+        This never launches Chrome.  It is used on IK Auto startup so an
+        update can reconnect to retained browser windows independently.
+        """
+        if self.profile.mode == ProfileMode.MANAGED:
+            endpoint = self._discover_managed_cdp_endpoint()
+            if endpoint is not None:
+                self._managed_cdp_endpoint = endpoint
+                return True
+            return False
+        return bool(self.profile.cdp_url and _cdp_endpoint_is_ready(self.profile.cdp_url))
+
+    def _managed_port_candidates(self) -> tuple[int, ...]:
+        configured = self.profile.cdp_port or _profile_cdp_port(self.profile.id)
+        legacy = _profile_cdp_port(self.profile.id)
+        return (configured,) if configured == legacy else (configured, legacy)
+
+    def _discover_managed_cdp_endpoint(self) -> str | None:
+        """Find a live, identity-matching endpoint for this managed profile."""
+        expected_dir = (
+            _normalized_windows_path(self.profile.user_data_dir.resolve())
+            if self.profile.user_data_dir
+            else None
+        )
+        for port in self._managed_port_candidates():
+            endpoint = f"http://127.0.0.1:{port}"
+            if not _cdp_endpoint_is_ready(endpoint):
+                continue
+            pid = find_tcp_listener_process(port)
+            command_line = get_process_command_line(pid)
+            if expected_dir is not None:
+                actual_dir = _command_line_user_data_dir(command_line) if command_line else None
+                # Reject a positively identified foreign Chrome process. On
+                # hardened Windows where the command line is inaccessible,
+                # the collision-free configured port remains the compatible
+                # identity signal for legacy profiles.
+                if actual_dir is not None and _normalized_windows_path(actual_dir) != expected_dir:
+                    continue
+            self._managed_browser_pid = pid
+            return endpoint
+        return None
 
     def _start_managed(self) -> None:
         assert self._playwright is not None
@@ -448,7 +552,7 @@ class ChromeProfileSession:
         chrome = find_chrome(self.config.browser.chrome_executable)
         if chrome is None:
             raise RuntimeError("Không tìm thấy Google Chrome; sửa browser.chrome_executable")
-        port = _profile_cdp_port(self.profile.id)
+        port = self.profile.cdp_port or _profile_cdp_port(self.profile.id)
         endpoint = f"http://127.0.0.1:{port}"
         args: list[str] = [
             str(chrome),
@@ -494,6 +598,10 @@ class ChromeProfileSession:
                 f"--window-size={self.config.browser.viewport_width},"
                 f"{self.config.browser.viewport_height}"
             )
+        existing_endpoint = self._discover_managed_cdp_endpoint()
+        if existing_endpoint is not None:
+            self._connect_cdp(existing_endpoint)
+            return
         if not _cdp_endpoint_is_ready(endpoint):
             # Detach Chrome from the tool process.  The browser survives an
             # application close/update and is reused by the next launch.
@@ -543,9 +651,27 @@ class ChromeProfileSession:
             timeout=self.config.browser.startup_timeout_ms,
             slow_mo=self.config.browser.slow_mo_ms,
         )
-        if not self._browser.contexts:
+        contexts = list(self._browser.contexts)
+        if not contexts:
             raise RuntimeError("Chrome CDP không có browser context")
-        self._context = self._browser.contexts[0]
+        self._context = self._select_cdp_context(contexts)
+
+    def _select_cdp_context(self, contexts: list[BrowserContext]) -> BrowserContext:
+        """Select the one controlled context; never silently pick arbitrary CDP state."""
+        if len(contexts) == 1:
+            return contexts[0]
+        ranked = [
+            (sum(1 for page in context.pages if not page.is_closed() and self._is_target(page.url)), context)
+            for context in contexts
+        ]
+        highest = max(score for score, _context in ranked)
+        matches = [context for score, context in ranked if score == highest]
+        if highest > 0 and len(matches) == 1:
+            return matches[0]
+        raise RuntimeError(
+            "Chrome CDP có nhiều browser context không thể xác định profile; "
+            "hãy đóng tab/incognito không liên quan rồi thử lại"
+        )
 
     def _attach_lifecycle(self) -> None:
         self.context.on("page", self._track_page)
@@ -596,10 +722,8 @@ class ChromeProfileSession:
         session = self._page_cdp_session
         self._page_cdp_session = None
         if session is not None:
-            try:
+            with contextlib.suppress(Exception):
                 session.detach()
-            except Exception:
-                pass
 
     def is_alive(self) -> bool:
         if self._externally_closed or self._context is None:
@@ -608,9 +732,18 @@ class ChromeProfileSession:
 
     def _choose_page(self, *, create: bool = False) -> Page:
         pages = [page for page in self.context.pages if not page.is_closed()]
-        for page in pages:
-            if self._is_target(page.url):
-                return page
+        target_pages = [page for page in pages if self._is_target(page.url)]
+        if target_pages:
+            target_host = urlsplit(self.config.target_url).hostname
+            target_path = urlsplit(self.config.target_url).path.rstrip("/")
+            return max(
+                target_pages,
+                key=lambda page: (
+                    urlsplit(page.url).hostname == target_host,
+                    urlsplit(page.url).path.rstrip("/") == target_path,
+                    urlsplit(page.url).path.rstrip("/") in {"/login-game", "/play-game"},
+                ),
+            )
         if pages:
             return pages[-1]
         if create:
@@ -626,10 +759,8 @@ class ChromeProfileSession:
         for page in tuple(self.context.pages):
             if page is selected or page.is_closed() or page.url not in disposable:
                 continue
-            try:
+            with contextlib.suppress(Exception):
                 page.close(run_before_unload=False)
-            except Exception:
-                pass
 
     def _profile_title_script(self) -> str:
         title = json.dumps(self.profile.name, ensure_ascii=False)
@@ -657,10 +788,8 @@ class ChromeProfileSession:
     def _apply_profile_title(self) -> None:
         if not self.config.browser.profile_title or self._page is None or self._page.is_closed():
             return
-        try:
+        with contextlib.suppress(Exception):
             self._page.evaluate(self._profile_title_script())
-        except Exception:
-            pass
 
     def goto(self, url: str | None = None) -> None:
         target = url or self.config.target_url
@@ -670,8 +799,38 @@ class ChromeProfileSession:
             wait_until="domcontentloaded",
             timeout=self.config.browser.startup_timeout_ms,
         )
+        # The portal's direct ``/play-game`` route now responds with a raw
+        # JSON error for a fresh/expired game session.  Leaving that response
+        # in the app window hides the login form and prevents the automatic
+        # username/password recovery from running.  Redirect only this known
+        # server response to the official login route; never mask a different
+        # game response or page failure.
+        if self._is_portal_direct_play_session_error(target):
+            self.page.goto(
+                _PORTAL_LOGIN_URL,
+                wait_until="domcontentloaded",
+                timeout=self.config.browser.startup_timeout_ms,
+            )
         self._configure_interaction_frames(force=True)
         self._apply_profile_title()
+
+    def _is_portal_direct_play_session_error(self, target: str) -> bool:
+        target_path = urlsplit(target).path.rstrip("/")
+        if target_path != "/play-game":
+            return False
+        try:
+            page = self._page
+            if page is None:
+                return False
+            body = page.locator("body").inner_text(timeout=1_000).strip()
+            payload = json.loads(body)
+        except Exception:
+            return False
+        return (
+            isinstance(payload, dict)
+            and payload.get("code") == _PORTAL_DIRECT_PLAY_ERROR_CODE
+            and payload.get("msg") == _PORTAL_DIRECT_PLAY_ERROR_MESSAGE
+        )
 
     def _reset_auto_login_window(self) -> None:
         """Give every newly opened/navigated profile a fresh login window."""
@@ -1038,6 +1197,22 @@ class ChromeProfileSession:
         return roots
 
     @staticmethod
+    def _evaluate_frame_root(root: Any, script: str, argument: Any = None) -> Any:
+        """Evaluate in either a Playwright Frame or a nested FrameLocator.
+
+        ``Locator.content_frame`` returns a FrameLocator in current Playwright
+        versions. A FrameLocator has no ``evaluate`` method, so Sync previously
+        skipped the deepest game iframe and never observed user input. Its
+        ``html`` locator executes JavaScript in that nested document.
+        """
+        evaluate = getattr(root, "evaluate", None)
+        if callable(evaluate):
+            return evaluate(script) if argument is None else evaluate(script, argument)
+
+        html = root.locator("html")
+        return html.evaluate(script) if argument is None else html.evaluate(script, argument)
+
+    @staticmethod
     def _visible_canvas(root: Any) -> tuple[Any, dict[str, float]] | None:
         try:
             canvases = root.locator("canvas")
@@ -1209,7 +1384,7 @@ class ChromeProfileSession:
                 ):
                     raise RuntimeError("CDP returned an empty game screenshot")
                 png = candidate
-            except Exception:
+            except Exception as error:
                 # Compatibility fallback for older Chromium/CDP builds.  It
                 # may touch locator state, so it is intentionally last.
                 if canvas is not None:
@@ -1222,9 +1397,9 @@ class ChromeProfileSession:
                 elif sys.platform == "win32" and not self.config.browser.headless:
                     png = self._capture_visible_canvas_png(page, box)
                 else:
-                    raise RuntimeError("Chrome returned an empty game screenshot")
+                    raise RuntimeError("Chrome returned an empty game screenshot") from error
                 if not _png_has_visible_content(png):
-                    raise RuntimeError("Chrome returned a black game screenshot")
+                    raise RuntimeError("Chrome returned a black game screenshot") from error
         return png, box
 
     def capture_game_region_png(
@@ -1791,8 +1966,23 @@ class ChromeProfileSession:
             # missing probe instead of repeatedly observing zero armed frames.
             return self._repair_and_count_sync_frames() if enabled else 0
         self._sync_source = enabled
-        self._configure_interaction_frames(force=True)
-        return self._repair_and_count_sync_frames() if self._sync_source else 0
+        if enabled:
+            # Sync needs only the event probe. Running the full canvas/style
+            # configuration here delayed arming the master for many seconds
+            # on a retained profile, so early clicks were silently lost.
+            return self._repair_and_count_sync_frames()
+        for frame in self._frame_roots():
+            try:
+                self._evaluate_frame_root(
+                    frame,
+                    """() => {
+                        window.__IK_SYNC_SOURCE = false;
+                        window.__IK_SET_INTERACTION_MODES?.(false, false);
+                    }"""
+                )
+            except Exception:
+                continue
+        return 0
 
     def repair_synced_input_runtime(self) -> None:
         """Reconnect input dispatch after a follower frame/page navigation."""
@@ -1808,9 +1998,19 @@ class ChromeProfileSession:
     def _repair_and_count_sync_frames(self) -> int:
         """Re-arm input capture in retained/reconnected Chrome documents."""
         armed = 0
-        for frame in self.page.frames:
+        # ``page.frames`` is already the complete list for the normal game
+        # document and is a cheap CDP read.  Walking FrameLocators here made a
+        # reopened profile wait on stale nested iframe locators for 30 seconds
+        # each, which left Sync enabled in the UI but unable to receive input.
+        try:
+            roots = list(reversed(self.page.frames))
+        except Exception:
+            roots = self._frame_roots()
+        armed_roots: list[Any] = []
+        for frame in roots:
             try:
-                probe_installed = frame.evaluate(
+                probe_installed = self._evaluate_frame_root(
+                    frame,
                     """() => Boolean(
                         window.__IK_INTERACTION_PROBE_INSTALLED &&
                         typeof window.__IK_SET_INTERACTION_MODES === 'function'
@@ -1821,8 +2021,9 @@ class ChromeProfileSession:
                     # Frame object and configuration signature while replacing
                     # its JavaScript world. Install the actual listeners, not
                     # merely the mode variables.
-                    frame.evaluate(INTERACTION_PROBE)
-                ready = frame.evaluate(
+                    self._evaluate_frame_root(frame, INTERACTION_PROBE)
+                ready = self._evaluate_frame_root(
+                    frame,
                     """([syncSource, inspectEnabled]) => {
                         if (!Array.isArray(window.__IK_SYNC_EVENTS)) window.__IK_SYNC_EVENTS = [];
                         if (!Array.isArray(window.__IK_COORDINATE_EVENTS)) window.__IK_COORDINATE_EVENTS = [];
@@ -1846,14 +2047,40 @@ class ChromeProfileSession:
                 )
                 if ready:
                     armed += 1
+                    armed_roots.append(frame)
                     # A repaired frame must remain in the normal configuration
                     # cache; otherwise every 40 ms poll would rewrite its state.
                     self._configured_frames[id(frame)] = (
-                        f"{frame.url}|{self._sync_source}|{self._inspector_enabled}|"
+                        f"{self._automation_root_url(frame) or ''}|{self._sync_source}|{self._inspector_enabled}|"
                         f"{self._drag_item_visible}|{self._scrollbars_visible}"
                     )
             except Exception:
                 self._configured_frames.pop(id(frame), None)
+        # Some Chromium builds expose the game only through a nested
+        # FrameLocator.  Do the comparatively expensive fallback once, and
+        # only if the direct CDP frame list did not yield a capture target.
+        if not armed:
+            for frame in self._frame_roots():
+                if any(frame is existing for existing in roots):
+                    continue
+                try:
+                    self._evaluate_frame_root(frame, INTERACTION_PROBE)
+                    ready = self._evaluate_frame_root(
+                        frame,
+                        """([syncSource, inspectEnabled]) => {
+                            window.__IK_SET_INTERACTION_MODES?.(syncSource, inspectEnabled);
+                            return Boolean(window.__IK_INTERACTION_PROBE_INSTALLED &&
+                                Array.isArray(window.__IK_SYNC_EVENTS) &&
+                                window.__IK_SYNC_SOURCE === Boolean(syncSource));
+                        }""",
+                        [self._sync_source, self._inspector_enabled],
+                    )
+                    if ready:
+                        armed += 1
+                        armed_roots.append(frame)
+                except Exception:
+                    continue
+        self._sync_capture_roots = armed_roots
         return armed
 
     def sync_capture_frame_count(self) -> int:
@@ -1861,9 +2088,10 @@ class ChromeProfileSession:
         if not self._sync_source:
             return 0
         armed = 0
-        for frame in self.page.frames:
+        for frame in getattr(self, "_sync_capture_roots", ()) or self._frame_roots():
             try:
-                if frame.evaluate(
+                if self._evaluate_frame_root(
+                    frame,
                     """() => Boolean(
                         window.__IK_INTERACTION_PROBE_INSTALLED &&
                         Array.isArray(window.__IK_SYNC_EVENTS) &&
@@ -1939,18 +2167,20 @@ class ChromeProfileSession:
         set_native_topmost(hwnd, self._topmost)
 
     def poll_sync_events(self) -> list[dict[str, Any]]:
-        self._configure_interaction_frames()
         events: list[dict[str, Any]] = []
         if not self._sync_source:
             return events
-        for frame in self.page.frames:
+        for frame in getattr(self, "_sync_capture_roots", ()) or self._frame_roots():
             try:
-                rows = frame.evaluate("() => window.__IK_SYNC_EVENTS?.splice(0) || []")
+                rows = self._evaluate_frame_root(
+                    frame, "() => window.__IK_SYNC_EVENTS?.splice(0) || []"
+                )
             except Exception:
                 continue
             for row in rows:
-                row["frame_url"] = frame.url
-                row["frame_url_safe"] = redact_url(frame.url)
+                frame_url = self._automation_root_url(frame) or ""
+                row["frame_url"] = frame_url
+                row["frame_url_safe"] = redact_url(frame_url)
                 events.append(row)
         return events
 
@@ -1988,7 +2218,13 @@ class ChromeProfileSession:
                 event_type=event_type,
                 button=button,
             )
+            if event_type == "pointerdown":
+                buttons = getattr(self, "_sync_pressed_buttons", None)
+                if buttons is None:
+                    buttons = self._sync_pressed_buttons = set()
+                buttons.add(button)
             if event_type == "pointerup":
+                getattr(self, "_sync_pressed_buttons", set()).discard(button)
                 self._sync_pointer_target_box = None
         elif event_type == "wheel":
             wheel = event.get("wheel", {})
@@ -2075,38 +2311,80 @@ class ChromeProfileSession:
             params["text"] = key
             params["unmodifiedText"] = key
         ProfileInputEngine.key_event(self._get_page_cdp_session(self.page), params)
+        identity = code or key
+        pressed_keys = getattr(self, "_sync_pressed_keys", None)
+        if pressed_keys is None:
+            pressed_keys = self._sync_pressed_keys = {}
+        if event_type == "keydown":
+            pressed_keys[identity] = dict(params)
+        else:
+            pressed_keys.pop(identity, None)
+
+    def reset_synced_input(self) -> None:
+        """Release mirrored held keys/buttons after an aborted Sync session.
+
+        This only runs on the owning ProfileWorker thread.  It is deliberately
+        best-effort: a follower that already died cannot receive input, while
+        healthy followers must never be left dragging or holding a modifier.
+        """
+        page = self._page
+        if page is not None and not page.is_closed():
+            for button in tuple(getattr(self, "_sync_pressed_buttons", ())):
+                with contextlib.suppress(Exception):
+                    page.mouse.up(button=button)
+        getattr(self, "_sync_pressed_buttons", set()).clear()
+        self._sync_pointer_target_box = None
+        try:
+            cdp = self._get_page_cdp_session(self.page)
+            for params in tuple(getattr(self, "_sync_pressed_keys", {}).values()):
+                released = dict(params)
+                released.pop("text", None)
+                released.pop("unmodifiedText", None)
+                released["type"] = "keyUp"
+                released["autoRepeat"] = False
+                try:
+                    ProfileInputEngine.key_event(cdp, released)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        getattr(self, "_sync_pressed_keys", {}).clear()
 
     def _configure_interaction_frames(self, *, force: bool = False) -> None:
         if self._page is None or self._page.is_closed():
             return
         active_keys: set[int] = set()
-        for frame in self.page.frames:
+        for frame in self._frame_roots():
             key = id(frame)
             active_keys.add(key)
             signature = (
-                f"{frame.url}|{self._sync_source}|{self._inspector_enabled}|"
+                f"{self._automation_root_url(frame) or ''}|{self._sync_source}|{self._inspector_enabled}|"
                 f"{self._drag_item_visible}|{self._scrollbars_visible}"
             )
             if not force and self._configured_frames.get(key) == signature:
                 continue
             try:
-                frame.evaluate(GAME_FRAME_FIT_SCRIPT)
+                self._evaluate_frame_root(frame, GAME_FRAME_FIT_SCRIPT)
                 if getattr(self, "_automation_game_frame_fixed", False):
-                    frame.evaluate(
+                    self._evaluate_frame_root(
+                        frame,
                         GAME_FRAME_SIZE_SCRIPT,
                         [True, int(_GAME_SURFACE_WIDTH), int(_GAME_SURFACE_HEIGHT)],
                     )
-                frame.evaluate(INTERACTION_PROBE)
-                frame.evaluate(
+                self._evaluate_frame_root(frame, INTERACTION_PROBE)
+                self._evaluate_frame_root(
+                    frame,
                     "([syncSource, inspectEnabled]) => "
                     "window.__IK_SET_INTERACTION_MODES?.(syncSource, inspectEnabled)",
                     [self._sync_source, self._inspector_enabled],
                 )
-                frame.evaluate(
+                self._evaluate_frame_root(
+                    frame,
                     "visible => window.__IK_SET_DRAG_ITEM_VISIBLE?.(visible)",
                     self._drag_item_visible,
                 )
-                frame.evaluate(
+                self._evaluate_frame_root(
+                    frame,
                     """visible => {
                         const styleId = '__ik_auto_scrollbars';
                         let style = document.getElementById(styleId);
@@ -2128,7 +2406,8 @@ class ChromeProfileSession:
                 # 8px layout gutter, visibly leaving a black frame around the
                 # game.  Make every canvas ancestor fill the document and
                 # make the largest canvas fill that resulting surface.
-                frame.evaluate(
+                self._evaluate_frame_root(
+                    frame,
                     """() => {
                         if (!document.querySelector('canvas')) return;
                         const styleId = '__ik_auto_canvas_fit';
@@ -2249,7 +2528,19 @@ class ChromeProfileSession:
     def pump(self, milliseconds: int = 50) -> None:
         if self._page is not None and not self._page.is_closed():
             self._page.wait_for_timeout(milliseconds)
-            self._configure_interaction_frames()
+            # Retained profiles can be idle in this loop for their whole
+            # lifetime. Rewriting every iframe's game CSS on each pump blocks
+            # the worker for tens of seconds and delays queued Sync commands.
+            # Fresh pages are configured in ``start``; later configuration is
+            # needed only while an interactive/automation feature is active.
+            if (
+                self._sync_source
+                or self._inspector_enabled
+                or self._drag_item_visible
+                or self._scrollbars_visible
+                or getattr(self, "_automation_game_frame_fixed", False)
+            ):
+                self._configure_interaction_frames()
             self._retry_auto_login_if_due()
 
     def close(self, *, close_browser: bool = False) -> None:
@@ -2292,10 +2583,8 @@ class ChromeProfileSession:
                 (close_browser or getattr(self, "_owns_browser_process", False))
                 and self._context is not None
             ):
-                try:
+                with contextlib.suppress(Exception):
                     self._context.close()
-                except Exception:
-                    pass
         finally:
             self._page = None
             self._context = None
@@ -2306,9 +2595,7 @@ class ChromeProfileSession:
             self._configured_frames.clear()
             self._tracked_pages.clear()
             if self._playwright is not None:
-                try:
+                with contextlib.suppress(Exception):
                     self._playwright.stop()
-                except Exception:
-                    pass
                 self._playwright = None
             self._closing = False

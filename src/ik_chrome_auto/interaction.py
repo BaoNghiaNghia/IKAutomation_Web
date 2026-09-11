@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 INTERACTION_PROBE = r"""
 (() => {
   if (window.__IK_INTERACTION_PROBE_INSTALLED) return;
