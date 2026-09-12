@@ -4314,6 +4314,29 @@ class MultiProfileRunner:
                 "target_profile_ids": sorted(targets),
             },
         )
+        # Keep the field log explicit about the intended coverage.  This is
+        # deliberately separate from per-input telemetry: on a remote
+        # machine it must be possible to distinguish a follower that was not
+        # selected/opened from one that was selected but failed to receive an
+        # event.
+        config = getattr(self, "config", None)
+        configured_profile_ids = (
+            {profile.id for profile in config.profiles if profile.enabled}
+            if config is not None
+            else set(self.workers)
+        )
+        self.event_log.write(
+            "sync_target_coverage",
+            {
+                "master_profile_id": master_id,
+                "configured_profile_ids": sorted(configured_profile_ids),
+                "selected_target_profile_ids": sorted(targets),
+                "not_selected_profile_ids": sorted(
+                    configured_profile_ids - {master_id} - targets
+                ),
+                "target_count": len(targets),
+            },
+        )
         self.event_log.write(
             "sync_starting",
             {
@@ -4928,6 +4951,26 @@ class MultiProfileRunner:
             # false all-devices-active indication.
             self.disable_sync()
             return
+        snapshot_target_ids = {profile_id for profile_id, _worker in target_workers}
+        missing_snapshot_targets = sorted(target_ids - snapshot_target_ids)
+        unexpected_snapshot_targets = sorted(snapshot_target_ids - target_ids)
+        if missing_snapshot_targets or unexpected_snapshot_targets:
+            # A Sync session must either fan out to its complete, selected
+            # target set or stop.  Continuing with a stale partial snapshot
+            # makes the UI look active while silently dropping profiles.
+            self.event_log.write(
+                "sync_target_snapshot_mismatch",
+                {
+                    "master_profile_id": source_profile_id,
+                    "missing_target_profile_ids": missing_snapshot_targets,
+                    "unexpected_target_profile_ids": unexpected_snapshot_targets,
+                    "selected_target_profile_ids": sorted(target_ids),
+                    "snapshot_target_profile_ids": sorted(snapshot_target_ids),
+                    "sync_session_id": sync_session_id,
+                },
+            )
+            self.disable_sync()
+            return
         for profile_id, worker in target_workers:
             submit_synced_input = getattr(worker, "submit_synced_input", None)
             if callable(submit_synced_input):
@@ -4947,6 +4990,7 @@ class MultiProfileRunner:
                     "type": event_type,
                     "target_count": delivered,
                     "configured_target_count": len(target_ids),
+                    "snapshot_target_count": len(snapshot_target_ids),
                     "delivered_profile_ids": sorted(delivered_ids),
                     "skipped_followers": skipped,
                     "sequence": int(event.get("sequence", 0) or 0),
