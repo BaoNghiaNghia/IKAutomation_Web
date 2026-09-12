@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from ik_chrome_auto import browser
 from ik_chrome_auto.models import AppConfig, BrowserSettings, CaptureSettings, ProfileConfig
@@ -22,6 +23,24 @@ class _FakeChromium:
 class _FakePlaywright:
     def __init__(self) -> None:
         self.chromium = _FakeChromium()
+
+
+def test_live_managed_cdp_ports_reads_the_running_chrome_command_line(monkeypatch) -> None:
+    browser._CDP_PROCESS_DISCOVERY_CACHE = (0.0, {})
+    monkeypatch.setattr(
+        browser.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            stdout="  TCP    127.0.0.1:9222     0.0.0.0:0     LISTENING     777\n"
+        ),
+    )
+    monkeypatch.setattr(
+        browser,
+        "get_process_command_line",
+        lambda _pid: 'chrome --user-data-dir="D:/IK/profiles/account-1" --remote-debugging-port=9222',
+    )
+
+    assert browser._live_managed_cdp_ports() == {"d:\\ik\\profiles\\account-1": 9222}
 
 
 def test_managed_chrome_launches_detached_and_connects_over_stable_cdp(

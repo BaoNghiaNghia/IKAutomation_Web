@@ -501,9 +501,34 @@ def get_process_command_line(process_id: int | None) -> str | None:
     """Read a process command line for CDP profile identity verification."""
     if sys.platform != "win32" or not process_id:
         return None
+    process_id = int(process_id)
     try:
         result = subprocess.run(
-            ["wmic", "process", "where", f"processid={int(process_id)}", "get", "CommandLine", "/value"],
+            ["wmic", "process", "where", f"processid={process_id}", "get", "CommandLine", "/value"],
+            capture_output=True,
+            text=True,
+            timeout=4,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    for line in result.stdout.splitlines() if result is not None else ():
+        if line.startswith("CommandLine="):
+            value = line.partition("=")[2].strip()
+            return value or None
+    # WMIC is removed by default on newer Windows 11 installations.  CIM is
+    # its supported replacement and keeps retained Chrome reconnect working
+    # on machines where the previous executable was built years earlier.
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                f"(Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId={process_id}').CommandLine",
+            ],
             capture_output=True,
             text=True,
             timeout=4,
@@ -512,10 +537,8 @@ def get_process_command_line(process_id: int | None) -> str | None:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    for line in result.stdout.splitlines():
-        if line.startswith("CommandLine="):
-            value = line.partition("=")[2].strip()
-            return value or None
+    value = result.stdout.strip()
+    return value or None
     return None
 
 
