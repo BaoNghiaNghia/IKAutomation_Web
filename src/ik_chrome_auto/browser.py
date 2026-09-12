@@ -50,6 +50,7 @@ from ik_chrome_auto.windows import (
     raise_window_above_profile_peers,
     set_taskbar_group,
     set_window_minimized,
+    snapshot_process_parents,
 )
 from ik_chrome_auto.windows import (
     set_topmost as set_native_topmost,
@@ -739,7 +740,9 @@ class ChromeProfileSession:
                     active_port=active_port,
                 )
             endpoint = self._discover_managed_cdp_endpoint(candidate_ports)
-            existing_processes, command_query = self._matching_profile_chrome_processes()
+            existing_processes, root_processes, command_query = (
+                self._matching_profile_chrome_processes()
+            )
             native_window = self.window_handle
             self._last_attach_probe = {
                 "mode": self.profile.mode.value,
@@ -750,6 +753,8 @@ class ChromeProfileSession:
                 "process_discovery": process_discovery,
                 "matching_profile_process_ids": existing_processes,
                 "matching_profile_process_count": len(existing_processes),
+                "matching_profile_root_process_ids": root_processes,
+                "matching_profile_root_process_count": len(root_processes),
                 "chrome_process_query": command_query,
                 "native_window_found": native_window is not None,
             }
@@ -763,19 +768,29 @@ class ChromeProfileSession:
         """Return safe reconnect evidence for field logs."""
         return dict(getattr(self, "_last_attach_probe", {}))
 
-    def _matching_profile_chrome_processes(self) -> tuple[list[int], str]:
-        """Return only Chrome browser roots proven to use this profile dir."""
+    def _matching_profile_chrome_processes(
+        self, *, force: bool = False
+    ) -> tuple[list[int], list[int], str]:
+        """Return matching Chrome PIDs and their tree roots for this profile."""
         if self.profile.mode != ProfileMode.MANAGED or self.profile.user_data_dir is None:
-            return [], "not_managed"
+            return [], [], "not_managed"
         expected_dir = _normalized_windows_path(self.profile.user_data_dir.resolve())
-        commands, status = _chrome_process_command_lines()
+        commands, status = _chrome_process_command_lines(force=force)
         matching = [
             process_id
             for process_id, command_line in commands.items()
             if (actual_dir := _command_line_user_data_dir(command_line)) is not None
             and _normalized_windows_path(actual_dir) == expected_dir
         ]
-        return sorted(matching), status
+        matching.sort()
+        matching_set = set(matching)
+        parent_by_pid = snapshot_process_parents()
+        roots = [
+            process_id
+            for process_id in matching
+            if parent_by_pid.get(process_id) not in matching_set
+        ]
+        return matching, roots, status
 
     def repair_existing_browser_without_cdp(self) -> bool:
         """Restart exactly one retained managed Chrome with its CDP flag.
@@ -783,29 +798,23 @@ class ChromeProfileSession:
         This is opt-in through ``REPAIR_ATTACH``. A title match alone is never
         enough: the exact ``--user-data-dir`` check is the safety boundary.
         """
-        process_ids, query_status = self._matching_profile_chrome_processes()
+        process_ids, root_process_ids, query_status = self._matching_profile_chrome_processes()
         diagnostics = dict(getattr(self, "_last_attach_probe", {}))
         diagnostics.update(
             {
                 "repair_requested": True,
                 "repair_process_ids": process_ids,
+                "repair_root_process_ids": root_process_ids,
                 "repair_chrome_process_query": query_status,
             }
         )
-        if len(process_ids) != 1:
-            diagnostics["repair_result"] = "no_unique_profile_process"
+        if len(root_process_ids) != 1:
+            diagnostics["repair_result"] = "no_unique_profile_root"
             self._last_attach_probe = diagnostics
             return False
-        process_id = process_ids[0]
-        commands, current_status = _chrome_process_command_lines(force=True)
-        command_line = commands.get(process_id, "")
-        expected_dir = _normalized_windows_path(self.profile.user_data_dir.resolve())  # type: ignore[union-attr]
-        actual_dir = _command_line_user_data_dir(command_line)
-        if (
-            current_status != "ok"
-            or actual_dir is None
-            or _normalized_windows_path(actual_dir) != expected_dir
-        ):
+        process_id = root_process_ids[0]
+        _, verified_roots, current_status = self._matching_profile_chrome_processes(force=True)
+        if current_status != "ok" or verified_roots != [process_id]:
             diagnostics["repair_result"] = "profile_process_verification_failed"
             diagnostics["repair_chrome_process_query"] = current_status
             self._last_attach_probe = diagnostics

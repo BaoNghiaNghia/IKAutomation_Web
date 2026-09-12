@@ -73,6 +73,7 @@ def test_repair_restarts_only_the_exact_profile_user_data_dir(monkeypatch, tmp_p
         "_chrome_process_command_lines",
         lambda **_kwargs: (commands, "ok"),
     )
+    monkeypatch.setattr(browser, "snapshot_process_parents", lambda: {111: 1, 222: 1})
     calls: list[list[str]] = []
     monkeypatch.setattr(
         browser.subprocess,
@@ -110,6 +111,7 @@ def test_repair_never_terminates_when_profile_process_is_not_unique(monkeypatch,
             "ok",
         ),
     )
+    monkeypatch.setattr(browser, "snapshot_process_parents", lambda: {111: 1, 222: 1})
     monkeypatch.setattr(
         browser.subprocess,
         "run",
@@ -117,7 +119,7 @@ def test_repair_never_terminates_when_profile_process_is_not_unique(monkeypatch,
     )
 
     assert session.repair_existing_browser_without_cdp() is False
-    assert session.attach_diagnostics()["repair_result"] == "no_unique_profile_process"
+    assert session.attach_diagnostics()["repair_result"] == "no_unique_profile_root"
 
 
 def test_managed_chrome_launches_detached_and_connects_over_stable_cdp(
