@@ -4819,6 +4819,24 @@ class MultiProfileRunner:
         """Compatibility alias for callers that mean *tool attached*."""
         return self.is_attached(profile_id)
 
+    def has_profile_window(self, profile_id: str) -> bool:
+        """Cheap native-window preflight used before retained CDP reconnect.
+
+        It does not create Playwright or contact a DevTools port.  When no
+        profile window exists, startup can finish immediately rather than
+        spending one timeout per configured-but-closed profile.
+        """
+        worker = self.workers.get(profile_id)
+        if worker is None:
+            return False
+        session = getattr(worker, "session", None)
+        if session is not None:
+            return getattr(session, "window_handle", None) is not None
+        profile = getattr(worker, "profile", None)
+        if profile is None:
+            return False
+        return ChromeProfileSession(self.config, profile).window_handle is not None
+
     def is_browser_running(self, profile_id: str) -> bool:
         worker = self.workers.get(profile_id)
         method = getattr(worker, "is_browser_running", None)

@@ -597,10 +597,23 @@ class Dashboard(QWidget):
             # than making a UI-only scheduler change a breaking change.
             pending = set(self.runner.reattach_existing_profiles())
         else:
+            has_profile_window = getattr(self.runner, "has_profile_window", None)
+            visible_profile_ids = (
+                {
+                    profile.id
+                    for profile in config.profiles
+                    if profile.enabled and callable(has_profile_window)
+                    and has_profile_window(profile.id)
+                }
+                if callable(has_profile_window)
+                else None
+            )
             pending = {
                 profile.id
                 for profile in config.profiles
-                if profile.enabled and not self.runner.is_attached(profile.id)
+                if profile.enabled
+                and not self.runner.is_attached(profile.id)
+                and (visible_profile_ids is None or profile.id in visible_profile_ids)
             }
         self._reattach_pending_profiles = pending
         self._reattach_queue = (
@@ -613,6 +626,7 @@ class Dashboard(QWidget):
         self._reattach_total = len(pending)
         self._reattach_started_at = time.monotonic()
         if not pending:
+            self._finish_profile_reattach()
             return
         self.farm_launcher.setEnabled(False)
         self.farm_launcher.setText("Đang kết nối…")
