@@ -9,7 +9,8 @@ from types import SimpleNamespace
 import pytest
 
 import ik_chrome_auto.runner as runner_module
-from ik_chrome_auto.models import AttachmentState, CommandKind, WorkerCommand
+from ik_chrome_auto.browser import SyncSourceStatus
+from ik_chrome_auto.models import AttachmentState, CommandKind, SyncState, WorkerCommand
 from ik_chrome_auto.runner import MultiProfileRunner, ProfileWorker
 from ik_chrome_auto.windows import ProcessResourceUsage, WindowRect
 
@@ -26,6 +27,7 @@ class FakeWorker:
 def make_runner() -> MultiProfileRunner:
     runner = MultiProfileRunner.__new__(MultiProfileRunner)
     runner.sync_enabled = True
+    runner.sync_state = SyncState.ACTIVE
     runner.sync_master_id = "master"
     runner.sync_target_ids = {"follower-open"}
     runner._sync_lock = threading.Lock()
@@ -255,12 +257,50 @@ def test_enable_sync_keeps_only_selected_targets_and_marks_master_as_source() ->
 
     runner.enable_sync("master", {"follower-open", "missing", "master"})
 
-    assert runner.sync_enabled is True
+    assert runner.sync_enabled is False
+    assert runner.sync_state == SyncState.STARTING
     assert runner.sync_master_id == "master"
     assert runner.sync_target_ids == {"follower-open"}
     assert runner.workers["master"].commands[-1].payload["enabled"] is True
     assert runner.workers["master"].commands[-1].payload["sync_session_id"].startswith("sync-")
     assert runner.workers["follower-open"].commands == []
+
+
+def test_sync_becomes_active_only_after_master_source_ack() -> None:
+    runner = make_runner()
+    runner.sync_enabled = False
+    runner.sync_state = SyncState.OFF
+    runner.sync_master_id = None
+    runner.sync_target_ids.clear()
+    updates = []
+    runner.on_update = updates.append
+
+    runner.enable_sync("master", {"follower-open"})
+
+    assert runner.sync_state == SyncState.STARTING
+    assert runner.sync_enabled is False
+    runner._on_sync_source_result("master", runner._sync_session_id, SyncSourceStatus(1, 1, 1, True))
+
+    assert runner.sync_state == SyncState.ACTIVE
+    assert runner.sync_enabled is True
+    assert updates[-1].sync_state == SyncState.ACTIVE
+
+
+def test_sync_source_failure_safely_clears_pending_members() -> None:
+    runner = make_runner()
+    runner.sync_enabled = False
+    runner.sync_state = SyncState.OFF
+    runner.sync_master_id = None
+    runner.sync_target_ids.clear()
+    runner.on_update = lambda _snapshot: None
+
+    runner.enable_sync("master", {"follower-open"})
+    runner._on_sync_source_result("master", runner._sync_session_id, SyncSourceStatus(failure_reason="no canvas"))
+
+    assert runner.sync_state == SyncState.OFF
+    assert runner.sync_enabled is False
+    assert runner.sync_master_id is None
+    assert runner.sync_target_ids == set()
 
 
 def test_add_sync_target_does_not_rearm_or_reset_the_active_master() -> None:

@@ -62,6 +62,7 @@ from ik_chrome_auto.models import (
     CommandKind,
     ProfileConfig,
     ProfileMode,
+    SyncState,
     WorkerSnapshot,
     WorkerState,
 )
@@ -791,7 +792,7 @@ class Dashboard(QWidget):
         else:
             row.card.setStyleSheet("")
     def _toggle_sync(self) -> None:
-        if self.runner.sync_enabled:
+        if getattr(self.runner, "sync_state", SyncState.ACTIVE) != SyncState.OFF:
             self._set_sync_disabled_ui()
             return
         if getattr(self, "_reattach_pending_profiles", set()):
@@ -839,9 +840,9 @@ class Dashboard(QWidget):
             self._refresh_sync_control()
             return
         self.master.setEnabled(False)
-        self.sync.setText("Tắt đồng bộ")
-        self.sync_status.setText(f"MASTER: {self.master.currentText()} → {len(selected)} thiết bị")
-        self._set_sync_status_indicator(True)
+        self.sync.setText("Đang bật đồng bộ...")
+        self.sync_status.setText("Đang kết nối đồng bộ...")
+        self._set_sync_status_indicator(SyncState.STARTING)
         self._refresh_sync_control()
 
     def _default_sync_targets(self, follower_ids: set[str]) -> set[str]:
@@ -863,6 +864,31 @@ class Dashboard(QWidget):
             self.sync_status.setText("Sync đang tắt")
         if hasattr(self, "sync_status_icon"):
             self._set_sync_status_indicator(False)
+        self._refresh_sync_control()
+
+    def _apply_sync_state_snapshot(self, snap: WorkerSnapshot) -> None:
+        state = snap.sync_state
+        if state is None:
+            return
+        if state == SyncState.ACTIVE:
+            self.master.setEnabled(False)
+            self.sync.setText("Tắt đồng bộ")
+            self.sync_status.setText(snap.sync_detail or "Đồng bộ đang bật")
+        elif state == SyncState.STARTING:
+            self.master.setEnabled(False)
+            self.sync.setText("Đang bật đồng bộ...")
+            self.sync_status.setText(snap.sync_detail or "Đang kết nối đồng bộ...")
+        elif state == SyncState.ERROR:
+            # Runner has already performed safe cleanup; retain the useful
+            # failure text until its OFF update arrives in the same queue.
+            self.sync_status.setText(snap.sync_detail or "Không thể bật đồng bộ")
+            self.sync.setText("Bật đồng bộ")
+            self.master.setEnabled(True)
+        else:
+            self.master.setEnabled(True)
+            self.sync.setText("Bật đồng bộ")
+            self.sync_status.setText("Sync đang tắt")
+        self._set_sync_status_indicator(state)
         self._refresh_sync_control()
 
     def _stop_automation_for_sync(self) -> None:
@@ -902,7 +928,8 @@ class Dashboard(QWidget):
             "quiescing",
             "stopping",
         }
-        sync_active = bool(getattr(getattr(self, "runner", None), "sync_enabled", False))
+        sync_state = getattr(getattr(self, "runner", None), "sync_state", SyncState.ACTIVE if getattr(getattr(self, "runner", None), "sync_enabled", False) else SyncState.OFF)
+        sync_active = sync_state in {SyncState.STARTING, SyncState.ACTIVE}
         reattaching = bool(getattr(self, "_reattach_pending_profiles", set()))
         if hasattr(self, "sync"):
             # Stopping sync is always safe and must remain available even if
@@ -917,13 +944,15 @@ class Dashboard(QWidget):
                 and self._opened_profile_count() > 1
             )
 
-    def _set_sync_status_indicator(self, enabled: bool) -> None:
-        color = "#16a34a" if enabled else "#94a3b8"
-        state = "bật" if enabled else "tắt"
+    def _set_sync_status_indicator(self, state: SyncState | bool) -> None:
+        if isinstance(state, bool):
+            state = SyncState.ACTIVE if state else SyncState.OFF
+        color = {SyncState.ACTIVE: "#16a34a", SyncState.STARTING: "#f59e0b", SyncState.ERROR: "#dc2626"}.get(state, "#94a3b8")
+        label = {SyncState.ACTIVE: "bật", SyncState.STARTING: "đang khởi tạo", SyncState.ERROR: "lỗi"}.get(state, "tắt")
         self.sync_status_icon.setStyleSheet(
             f"color:{color}; background:transparent; font-size:{_ui_px(32)}px; font-weight:700;"
         )
-        self.sync_status_icon.setToolTip(f"Đồng bộ chuột - bàn phím đang {state}")
+        self.sync_status_icon.setToolTip(f"Đồng bộ chuột - bàn phím đang {label}")
     def _toggle_sync_section(self) -> None:
         self.sync_section_expanded = not self.sync_section_expanded
         self.sync_section.setVisible(self.sync_section_expanded)
@@ -2042,6 +2071,8 @@ class Dashboard(QWidget):
                 snap=self.updates.get_nowait()
             except queue.Empty:
                 break
+            if snap.sync_state is not None:
+                self._apply_sync_state_snapshot(snap)
             if snap.monitor_events is not None:
                 self._handle_monitor_result(snap)
                 continue

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import queue
 import threading
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ik_chrome_auto.actions import ActionCancelled, AutomationFunctions
-from ik_chrome_auto.browser import ChromeProfileSession
+from ik_chrome_auto.browser import ChromeProfileSession, SyncSourceStatus
 from ik_chrome_auto.build_info import release_diagnostic_screenshot_directory
 from ik_chrome_auto.event_log import JsonLineLog, migrate_legacy_profile_log, profile_log_path
 from ik_chrome_auto.farm_vision import DetectedGameState, FarmTemplateId, TeamRosterRow
@@ -35,6 +36,7 @@ from ik_chrome_auto.models import (
     AttachmentState,
     CommandKind,
     ProfileConfig,
+    SyncState,
     WorkerCommand,
     WorkerSnapshot,
     WorkerState,
@@ -60,6 +62,7 @@ UpdateCallback = Callable[[WorkerSnapshot], None]
 InputCallback = Callable[[str, dict[str, object]], None]
 CoordinateCallback = Callable[[str, dict[str, object]], None]
 DetachedCallback = Callable[[str, str], None]
+SyncSourceCallback = Callable[[str, str, SyncSourceStatus], None]
 
 # Fixed monitor controls are expressed as X/Y ratios of the game canvas, not
 # desktop or Chrome-window pixels.  The canonical capture is 16:9, but width
@@ -223,6 +226,7 @@ class ProfileWorker:
         on_input: InputCallback,
         on_coordinate: CoordinateCallback,
         on_detached: DetachedCallback | None = None,
+        on_sync_source: SyncSourceCallback | None = None,
         *,
         drag_item_visible: bool = False,
         scrollbars_visible: bool = False,
@@ -236,6 +240,7 @@ class ProfileWorker:
         self.on_input = on_input
         self.on_coordinate = on_coordinate
         self.on_detached = on_detached or (lambda _profile_id, _reason: None)
+        self.on_sync_source = on_sync_source or (lambda _profile_id, _session_id, _status: None)
         logs_dir = config.data_dir / "logs"
         self.coordinate_log = JsonLineLog(logs_dir / f"coordinates-{profile.id}.jsonl")
         # Farm diagnostics stay separate from general dashboard events so a
@@ -985,17 +990,34 @@ class ProfileWorker:
                     )
                     if self.session is not None:
                         source_started_at = time.monotonic()
-                        armed_frames = self.session.set_sync_source(self._sync_source_enabled)
+                        status = self.session.set_sync_source(self._sync_source_enabled)
                         self._sync_rearm_at = time.monotonic() + 2.0
+                        for diagnostic in self.session.sync_source_diagnostics():
+                            self.event_log.write(str(diagnostic.get("event", "sync_source_diagnostic")), {
+                                "profile_id": self.profile.id, "sync_session_id": sync_session_id,
+                                **{key: value for key, value in diagnostic.items() if key != "event"},
+                            })
                         self.event_log.write(
-                            "sync_source_armed",
+                            "sync_source_ready" if status.ready else "sync_source_failed",
                             {
                                 "profile_id": self.profile.id,
                                 "enabled": self._sync_source_enabled,
-                                "armed_frame_count": int(armed_frames or 0),
+                                "armed_frame_count": status.armed_frame_count,
+                                "verified_input_root_count": status.input_frame_count,
+                                "game_frame_count": status.game_frame_count,
+                                "failure_reason": status.failure_reason,
                                 "duration_ms": round((time.monotonic() - source_started_at) * 1000),
                                 "sync_session_id": sync_session_id,
                             },
+                        )
+                        if self._sync_source_enabled and not status.ready:
+                            self._sync_source_enabled = False
+                            self.session.set_sync_source(False)
+                        self.on_sync_source(self.profile.id, sync_session_id, status)
+                    elif self._sync_source_enabled:
+                        self.on_sync_source(
+                            self.profile.id, sync_session_id,
+                            SyncSourceStatus(failure_reason="Master chưa kết nối Chrome/CDP"),
                         )
                     continue
                 if command.kind == CommandKind.SET_INSPECTOR:
@@ -1327,26 +1349,25 @@ class ProfileWorker:
             now = time.monotonic()
             if now >= self._sync_rearm_at:
                 try:
-                    previous_armed_frames = self.session.sync_capture_frame_count()
-                    # Repair every currently attached frame periodically. A
-                    # portal frame can stay armed while a same-URL game iframe
-                    # has replaced its document and lost both mouse and key
-                    # listeners, so checking only `count > 0` is insufficient.
-                    armed_frames = self.session.set_sync_source(True)
-                    if (
-                        previous_armed_frames <= 0
-                        or armed_frames > previous_armed_frames
-                    ):
+                    previous = self.session.sync_source_status()
+                    status = previous if previous.ready else self.session.set_sync_source(True)
+                    if status.ready and not previous.ready:
                         self.event_log.write(
                             "sync_source_rearmed",
                             {
                                 "profile_id": self.profile.id,
-                                "armed_frame_count": int(armed_frames or 0),
-                                "previous_armed_frame_count": int(
-                                    previous_armed_frames or 0
-                                ),
+                                "verified_input_root_count": status.input_frame_count,
                             },
                         )
+                    if not status.ready:
+                        self.event_log.write("sync_source_failed", {
+                            "profile_id": self.profile.id,
+                            "failure_reason": status.failure_reason,
+                            "phase": "periodic_repair",
+                        })
+                        self._sync_source_enabled = False
+                        self.session.set_sync_source(False)
+                        self.on_sync_source(self.profile.id, "", status)
                 finally:
                     self._sync_rearm_at = now + 2.0
             if now - self._sync_last_health_log_at >= 5.0:
@@ -1355,7 +1376,8 @@ class ProfileWorker:
                     "sync_source_health",
                     {
                         "profile_id": self.profile.id,
-                        "armed_frame_count": int(self.session.sync_capture_frame_count() or 0),
+                        "armed_frame_count": self.session.sync_source_status().armed_frame_count,
+                        "source_ready": self.session.sync_source_status().ready,
                     },
                 )
             for event in self.session.poll_sync_events():
@@ -4109,9 +4131,11 @@ class MultiProfileRunner:
         self.event_log = JsonLineLog(config.data_dir / "logs" / "events.jsonl")
         self.workers: dict[str, ProfileWorker] = {}
         self.sync_enabled = False
+        self.sync_state = SyncState.OFF
         self.sync_master_id: str | None = None
         self.sync_target_ids: set[str] = set()
         self._sync_session_id = ""
+        self._sync_start_timer: threading.Timer | None = None
         self._sync_last_pointer_move_at = 0.0
         self.drag_items_visible = False
         self.scrollbars_visible = False
@@ -4146,16 +4170,21 @@ class MultiProfileRunner:
                     self._on_input,
                     self.on_coordinate,
                     self._on_worker_detached,
+                    self._on_sync_source_result,
                     drag_item_visible=self.drag_items_visible,
                     scrollbars_visible=self.scrollbars_visible,
                     topmost=self.windows_topmost,
                     automation_renderer_lock=self._automation_renderer_lock,
                 )
 
+    def _current_sync_state(self) -> SyncState:
+        """Compatibility for callers/tests restoring an older runner object."""
+        return getattr(self, "sync_state", SyncState.ACTIVE if self.sync_enabled else SyncState.OFF)
+
     def _on_worker_detached(self, profile_id: str, reason: str) -> None:
         """Abort the global mirror before a dead member can miss a gesture."""
         with self._sync_lock:
-            active = self.sync_enabled and (
+            active = self._current_sync_state() in {SyncState.STARTING, SyncState.ACTIVE} and (
                 profile_id == self.sync_master_id or profile_id in self.sync_target_ids
             )
             master_id = self.sync_master_id
@@ -4182,7 +4211,7 @@ class MultiProfileRunner:
         # silently start an autonomous input producer behind Sync's back.
         if kind in {CommandKind.START_FARM, CommandKind.MONITOR_MAIL}:
             with self._sync_lock:
-                sync_enabled = self.sync_enabled
+                sync_enabled = self._current_sync_state() in {SyncState.STARTING, SyncState.ACTIVE}
             if sync_enabled:
                 self.event_log.write(
                     "input_owner_conflict_blocked",
@@ -4199,7 +4228,7 @@ class MultiProfileRunner:
 
     def enable_mail_monitor(self, profile_ids: set[str]) -> None:
         with self._sync_lock:
-            if self.sync_enabled:
+            if self._current_sync_state() in {SyncState.STARTING, SyncState.ACTIVE}:
                 raise RuntimeError(
                     "Hãy tắt đồng bộ chuột - bàn phím trước khi bật Giám sát"
                 )
@@ -4281,9 +4310,12 @@ class MultiProfileRunner:
                 "Không thể bật Sync:\n" + "\n".join(f"- {pid}: {reason}" for pid, reason in unavailable.items())
             )
         with self._sync_lock:
-            previous_master = self.sync_master_id if self.sync_enabled else None
+            previous_master = self.sync_master_id if self._current_sync_state() != SyncState.OFF else None
             sync_session_id = f"sync-{time.monotonic_ns()}"
-            self.sync_enabled = True
+            # ``sync_enabled`` is intentionally false until the master worker
+            # ACKs a verified game input root.
+            self.sync_enabled = False
+            self.sync_state = SyncState.STARTING
             self.sync_master_id = master_id
             self.sync_target_ids = targets
             self._sync_session_id = sync_session_id
@@ -4296,7 +4328,7 @@ class MultiProfileRunner:
             },
         )
         self.event_log.write(
-            "sync_enabled",
+            "sync_starting",
             {
                 "master_profile_id": master_id,
                 "target_profile_ids": sorted(targets),
@@ -4311,6 +4343,72 @@ class MultiProfileRunner:
         if previous_master is not None and previous_master != master_id:
             self.submit(previous_master, CommandKind.SET_SYNC_SOURCE, enabled=False, sync_session_id=sync_session_id)
         self.submit(master_id, CommandKind.SET_SYNC_SOURCE, enabled=True, sync_session_id=sync_session_id)
+        with contextlib.suppress(Exception):
+            if self._sync_start_timer is not None:
+                self._sync_start_timer.cancel()
+        self._sync_start_timer = threading.Timer(5.0, self._on_sync_start_timeout, args=(master_id, sync_session_id))
+        self._sync_start_timer.daemon = True
+        self._sync_start_timer.start()
+        self._publish_sync_state(master_id, SyncState.STARTING, "Đang kết nối đồng bộ...")
+
+    def _on_sync_start_timeout(self, master_id: str, sync_session_id: str) -> None:
+        with self._sync_lock:
+            if self._current_sync_state() != SyncState.STARTING or self.sync_master_id != master_id or self._sync_session_id != sync_session_id:
+                return
+        self.event_log.write("sync_activation_failed", {
+            "master_profile_id": master_id, "sync_session_id": sync_session_id,
+            "failure_reason": "Timeout 5 giây khi arm Sync source",
+        })
+        self._publish_sync_state(master_id, SyncState.ERROR, "Không arm được Sync source trong 5 giây")
+        self.disable_sync()
+
+    def _publish_sync_state(self, profile_id: str, state: SyncState, detail: str = "") -> None:
+        callback = getattr(self, "on_update", None)
+        if not callable(callback):
+            return
+        callback(WorkerSnapshot(
+            profile_id=profile_id,
+            state=WorkerState.READY,
+            message="Đồng bộ đang bật" if state == SyncState.ACTIVE else "Đang bật đồng bộ" if state == SyncState.STARTING else "Đồng bộ đang tắt",
+            sync_state=state,
+            sync_detail=detail,
+        ))
+
+    def _on_sync_source_result(
+        self, profile_id: str, sync_session_id: str, status: SyncSourceStatus
+    ) -> None:
+        """Master worker ACK; this is the only transition to ACTIVE."""
+        with self._sync_lock:
+            if profile_id != self.sync_master_id:
+                return
+            current_session = self._sync_session_id
+            if sync_session_id and sync_session_id != current_session:
+                return
+            if status.ready:
+                self.sync_state = SyncState.ACTIVE
+                self.sync_enabled = True
+                targets = sorted(self.sync_target_ids)
+            else:
+                self.sync_state = SyncState.ERROR
+                self.sync_enabled = False
+                targets = sorted(self.sync_target_ids)
+        with contextlib.suppress(Exception):
+            if self._sync_start_timer is not None:
+                self._sync_start_timer.cancel()
+        if status.ready:
+            self.event_log.write("sync_activation_summary", {
+                "master_profile_id": profile_id, "followers": len(targets),
+                "verified_input_roots": status.input_frame_count,
+                "source_ready": True, "sync_session_id": current_session,
+            })
+            self._publish_sync_state(profile_id, SyncState.ACTIVE, f"MASTER → {len(targets)} thiết bị")
+            return
+        self.event_log.write("sync_activation_failed", {
+            "master_profile_id": profile_id, "followers": len(targets),
+            "failure_reason": status.failure_reason, "sync_session_id": current_session,
+        })
+        self._publish_sync_state(profile_id, SyncState.ERROR, status.failure_reason)
+        self.disable_sync()
 
     def add_sync_target(self, profile_id: str) -> bool:
         """Add one ready follower without disturbing the active master.
@@ -4322,7 +4420,7 @@ class MultiProfileRunner:
         """
         with self._sync_lock:
             if (
-                not self.sync_enabled
+                self._current_sync_state() != SyncState.ACTIVE
                 or profile_id == self.sync_master_id
                 or profile_id not in self.workers
                 or profile_id in self.sync_target_ids
@@ -4343,15 +4441,20 @@ class MultiProfileRunner:
 
     def disable_sync(self) -> None:
         with self._sync_lock:
-            was_enabled = self.sync_enabled
+            was_enabled = self._current_sync_state() != SyncState.OFF
             previous_master = self.sync_master_id
             sync_session_id = str(getattr(self, "_sync_session_id", ""))
             self.sync_enabled = False
+            self.sync_state = SyncState.OFF
             self.sync_master_id = None
             previous_targets = set(self.sync_target_ids)
             self.sync_target_ids.clear()
             self._sync_session_id = ""
             self._sync_last_pointer_move_at = 0.0
+            timer = getattr(self, "_sync_start_timer", None)
+            self._sync_start_timer = None
+        if timer is not None:
+            timer.cancel()
         if was_enabled:
             self.event_log.write(
                 "sync_disabled",
@@ -4368,6 +4471,8 @@ class MultiProfileRunner:
                         {"reason": "sync_disabled", "sync_session_id": sync_session_id},
                     )
                 )
+        if previous_master is not None:
+            self._publish_sync_state(previous_master, SyncState.OFF)
 
     def set_inspector(self, profile_id: str, enabled: bool) -> None:
         self.submit(profile_id, CommandKind.SET_INSPECTOR, enabled=enabled)

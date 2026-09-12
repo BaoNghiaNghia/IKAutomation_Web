@@ -857,6 +857,7 @@ def test_sync_poll_reads_events_from_nested_frame_locator() -> None:
     session = ChromeProfileSession.__new__(ChromeProfileSession)
     session._sync_source = True
     session._frame_roots = lambda: [nested_frame_locator]
+    session._sync_capture_roots = [nested_frame_locator]
 
     events = session.poll_sync_events()
 
@@ -866,6 +867,91 @@ def test_sync_poll_reads_events_from_nested_frame_locator() -> None:
         "frame_url": "https://ik.playfun.vn/game/nested",
         "frame_url_safe": "https://ik.playfun.vn/game/nested",
     }]
+
+
+def test_sync_activation_arms_portal_and_nested_roots_without_canvas() -> None:
+    class Root:
+        def __init__(self, url: str) -> None:
+            self.url = url
+            self.calls = 0
+
+        def evaluate(self, _script: str, _argument: object = None) -> bool:
+            self.calls += 1
+            return True
+
+        def locator(self, _selector: str) -> object:
+            raise RuntimeError("canvas unavailable")
+
+    portal = Root("https://portal.example/")
+    nested = Root("https://game.example/")
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session._page = SimpleNamespace(frames=[portal], is_closed=lambda: False)
+    session._sync_source = True
+    session._inspector_enabled = False
+    session._drag_item_visible = False
+    session._scrollbars_visible = False
+    session._configured_frames = {}
+    session._frame_roots = lambda: [portal, nested]
+
+    status = session._repair_sync_source()
+
+    assert status.ready is True
+    assert status.armed_frame_count == 2
+    assert status.input_frame_count == 2
+    discovery = session.sync_source_diagnostics()[0]
+    assert discovery["page_frame_count"] == 1
+    assert discovery["nested_root_count"] == 2
+    assert discovery["candidate_root_count"] == 2
+
+
+def test_sync_activation_succeeds_when_nested_root_fails_but_portal_arms() -> None:
+    class Root:
+        def __init__(self, url: str, fail: bool = False) -> None:
+            self.url = url
+            self.fail = fail
+
+        def evaluate(self, _script: str, _argument: object = None) -> bool:
+            if self.fail:
+                raise RuntimeError("nested detached")
+            return True
+
+        def locator(self, _selector: str) -> object:
+            raise RuntimeError("canvas unavailable")
+
+    portal = Root("https://portal.example/")
+    nested = Root("https://game.example/", fail=True)
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session._page = SimpleNamespace(frames=[portal], is_closed=lambda: False)
+    session._sync_source = True
+    session._inspector_enabled = False
+    session._drag_item_visible = False
+    session._scrollbars_visible = False
+    session._configured_frames = {}
+    session._frame_roots = lambda: [portal, nested]
+
+    status = session._repair_sync_source()
+
+    assert status.ready is True
+    assert status.armed_frame_count == 1
+    assert any(item.get("error") == "RuntimeError" for item in session.sync_source_diagnostics())
+
+
+def test_disabling_sync_never_walks_stale_nested_roots() -> None:
+    class Frame:
+        def evaluate(self, _script: str, _argument: object = None) -> None:
+            return None
+
+    frame = Frame()
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session._page = SimpleNamespace(frames=[frame], is_closed=lambda: False)
+    session._sync_source = True
+    session._sync_capture_roots = [frame]
+    session._frame_roots = lambda: (_ for _ in ()).throw(AssertionError("must not deep scan"))
+
+    status = session.set_sync_source(False)
+
+    assert status.ready is False
+    assert session._sync_capture_roots == []
 
 
 def test_idle_pump_does_not_reconfigure_retained_profile_frames() -> None:

@@ -54,6 +54,35 @@ from ik_chrome_auto.windows import (
     set_topmost as set_native_topmost,
 )
 
+
+@dataclass(frozen=True, slots=True)
+class SyncSourceStatus:
+    """Result of arming the *actual* master input surface.
+
+    ``armed_frame_count`` is deliberately diagnostic only.  A portal document
+    can accept the probe while the game lives in a nested OOPIF, so callers
+    must use ``ready`` (verified input roots) for the Sync lifecycle.
+    """
+
+    armed_frame_count: int = 0
+    input_frame_count: int = 0
+    game_frame_count: int = 0
+    ready: bool = False
+    failure_reason: str = ""
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, int):
+            return self.armed_frame_count == other
+        if isinstance(other, SyncSourceStatus):
+            return (
+                self.armed_frame_count, self.input_frame_count, self.game_frame_count,
+                self.ready, self.failure_reason,
+            ) == (
+                other.armed_frame_count, other.input_frame_count, other.game_frame_count,
+                other.ready, other.failure_reason,
+            )
+        return NotImplemented
+
 if TYPE_CHECKING:
     from playwright.sync_api import Browser, BrowserContext, Frame, Page, Playwright
 
@@ -486,7 +515,19 @@ class ChromeProfileSession:
 
     def reset_reconnected_interaction_modes(self) -> None:
         """Turn off listeners left by a previous Tool instance cheaply."""
-        for frame in self._frame_roots():
+        # Disabling must never walk nested FrameLocators. A stale cross-origin
+        # locator can wait for Playwright's default 60s timeout and block the
+        # master worker queue, leaving a later enable request in STARTING.
+        # Cached armed roots cover the documents we changed; direct frames are
+        # a cheap best-effort fallback after a page navigation.
+        roots: list[Any] = list(getattr(self, "_sync_capture_roots", ()))
+        with contextlib.suppress(Exception):
+            roots.extend(self.page.frames)
+        seen: set[int] = set()
+        for frame in roots:
+            if id(frame) in seen:
+                continue
+            seen.add(id(frame))
             try:
                 self._evaluate_frame_root(
                     frame,
@@ -871,7 +912,17 @@ class ChromeProfileSession:
         # Reuse the frame walker used by canvas discovery, while retaining the
         # host allow-list before any credential is entered.
         seen_frames: set[int] = set()
-        for frame in self._frame_roots():
+        # A stale nested locator may wait for Playwright's 60s default timeout.
+        # Disable only roots we armed plus cheap direct frames, never a deep
+        # traversal that can block the master worker's command queue.
+        roots: list[Any] = list(getattr(self, "_sync_capture_roots", ()))
+        with contextlib.suppress(Exception):
+            roots.extend(self.page.frames)
+        seen: set[int] = set()
+        for frame in roots:
+            if id(frame) in seen:
+                continue
+            seen.add(id(frame))
             frame_identity = id(frame)
             if frame_identity in seen_frames:
                 continue
@@ -1955,7 +2006,7 @@ class ChromeProfileSession:
         # (or host-layout) drift. Keep only the freshly measured dimensions.
         return canvas, CanvasTransformSnapshot.from_box(_origin_surface_box(point_surface))
 
-    def set_sync_source(self, enabled: bool) -> int:
+    def set_sync_source(self, enabled: bool) -> SyncSourceStatus:
         enabled = bool(enabled)
         if self._sync_source == enabled:
             # Followers already start with capture disabled. Reconfiguring all
@@ -1964,14 +2015,30 @@ class ChromeProfileSession:
             # A source is different: its iframe document may have been
             # replaced while the Python-side flag remained True. Reinstall a
             # missing probe instead of repeatedly observing zero armed frames.
-            return self._repair_and_count_sync_frames() if enabled else 0
+            if enabled:
+                legacy_repair = self.__dict__.get("_repair_and_count_sync_frames")
+                if callable(legacy_repair):
+                    armed = int(legacy_repair())
+                    return SyncSourceStatus(armed, armed, armed, bool(armed))
+                return self._repair_sync_source()
+            return SyncSourceStatus()
         self._sync_source = enabled
         if enabled:
             # Sync needs only the event probe. Running the full canvas/style
             # configuration here delayed arming the master for many seconds
             # on a retained profile, so early clicks were silently lost.
-            return self._repair_and_count_sync_frames()
-        for frame in self._frame_roots():
+            return self._repair_sync_source()
+        # Never deep-walk FrameLocators while disabling: stale nested frames
+        # can consume Playwright's 60-second timeout and strand the next
+        # enable request in the worker queue.
+        roots: list[Any] = list(getattr(self, "_sync_capture_roots", ()))
+        with contextlib.suppress(Exception):
+            roots.extend(self.page.frames)
+        seen: set[int] = set()
+        for frame in roots:
+            if id(frame) in seen:
+                continue
+            seen.add(id(frame))
             try:
                 self._evaluate_frame_root(
                     frame,
@@ -1982,7 +2049,9 @@ class ChromeProfileSession:
                 )
             except Exception:
                 continue
-        return 0
+        self._sync_capture_roots = []
+        self._sync_active_roots = []
+        return SyncSourceStatus()
 
     def repair_synced_input_runtime(self) -> None:
         """Reconnect input dispatch after a follower frame/page navigation."""
@@ -1995,92 +2064,135 @@ class ChromeProfileSession:
         self._ensure_page_runtime(page)
         self._configure_interaction_frames(force=True)
 
-    def _repair_and_count_sync_frames(self) -> int:
-        """Re-arm input capture in retained/reconnected Chrome documents."""
+    def _discover_sync_input_roots(self) -> tuple[list[Any], int, int]:
+        """Return every accessible document root, not only canvas documents.
+
+        A game can receive input through a WebGL host, portal document, or a
+        nested cross-origin iframe whose canvas is not inspectable.  Canvas is
+        therefore diagnostics only; successful probe installation is the
+        activation contract.
+        """
+        direct: list[Any] = []
+        nested: list[Any] = []
+        with contextlib.suppress(Exception):
+            direct = list(reversed(self.page.frames))
+        with contextlib.suppress(Exception):
+            nested = list(self._frame_roots())
+        roots = [*direct, *nested]
+        candidates: list[Any] = []
+        seen: set[int] = set()
+        for root in roots:
+            if id(root) in seen:
+                continue
+            seen.add(id(root))
+            candidates.append(root)
+        return candidates, len(direct), len(nested)
+
+    def _repair_sync_source(self) -> SyncSourceStatus:
+        """Discover, arm and verify only real game/input roots."""
+        started_at = time.monotonic()
+        candidates, page_frame_count, nested_root_count = self._discover_sync_input_roots()
+        self._sync_source_diagnostics: list[dict[str, Any]] = [
+            {
+                "event": "sync_source_discovery", "page_frame_count": page_frame_count,
+                "nested_root_count": nested_root_count, "candidate_root_count": len(candidates),
+            }
+        ]
+        verified: list[Any] = []
         armed = 0
-        # ``page.frames`` is already the complete list for the normal game
-        # document and is a cheap CDP read.  Walking FrameLocators here made a
-        # reopened profile wait on stale nested iframe locators for 30 seconds
-        # each, which left Sync enabled in the UI but unable to receive input.
-        try:
-            roots = list(reversed(self.page.frames))
-        except Exception:
-            roots = self._frame_roots()
-        armed_roots: list[Any] = []
-        for frame in roots:
+        for root in candidates:
+            safe_url = redact_url(self._automation_root_url(root) or "")
+            kind = "FrameLocator" if not callable(getattr(root, "evaluate", None)) else "Frame"
+            visible = self._visible_canvas(root)
             try:
-                probe_installed = self._evaluate_frame_root(
-                    frame,
-                    """() => Boolean(
-                        window.__IK_INTERACTION_PROBE_INSTALLED &&
-                        typeof window.__IK_SET_INTERACTION_MODES === 'function'
-                    )"""
-                )
-                if not probe_installed:
-                    # A same-URL iframe navigation may retain Playwright's
-                    # Frame object and configuration signature while replacing
-                    # its JavaScript world. Install the actual listeners, not
-                    # merely the mode variables.
-                    self._evaluate_frame_root(frame, INTERACTION_PROBE)
-                ready = self._evaluate_frame_root(
-                    frame,
+                self._evaluate_frame_root(root, INTERACTION_PROBE)
+                ready = bool(self._evaluate_frame_root(
+                    root,
                     """([syncSource, inspectEnabled]) => {
                         if (!Array.isArray(window.__IK_SYNC_EVENTS)) window.__IK_SYNC_EVENTS = [];
                         if (!Array.isArray(window.__IK_COORDINATE_EVENTS)) window.__IK_COORDINATE_EVENTS = [];
-                        // Profiles can survive a tool update. Repair the mode setter
-                        // when an older in-page probe left only its event listeners.
-                        if (typeof window.__IK_SET_INTERACTION_MODES !== 'function') {
-                            window.__IK_SET_INTERACTION_MODES = (sync, inspect) => {
-                                window.__IK_SYNC_SOURCE = Boolean(sync);
-                                window.__IK_INSPECT_ENABLED = Boolean(inspect);
-                            };
-                        }
-                        window.__IK_SET_INTERACTION_MODES(syncSource, inspectEnabled);
-                        return Boolean(
-                            window.__IK_INTERACTION_PROBE_INSTALLED &&
+                        window.__IK_SET_INTERACTION_MODES?.(syncSource, inspectEnabled);
+                        return Boolean(window.__IK_INTERACTION_PROBE_INSTALLED &&
                             Array.isArray(window.__IK_SYNC_EVENTS) &&
                             typeof window.__IK_SET_INTERACTION_MODES === 'function' &&
-                            window.__IK_SYNC_SOURCE === Boolean(syncSource)
-                        );
+                            window.__IK_SYNC_SOURCE === Boolean(syncSource));
                     }""",
+                    [self._sync_source, self._inspector_enabled],
+                ))
+                self._sync_source_diagnostics.append({"event": "sync_source_candidate",
+                    "frame_url_safe": safe_url, "root_kind": kind,
+                    "has_visible_canvas": visible is not None,
+                    "probe_installed": ready,
+                })
+                if ready:
+                    armed += 1
+                    verified.append(root)
+                    self._configured_frames[id(root)] = (
+                        f"{self._automation_root_url(root) or ''}|{self._sync_source}|{self._inspector_enabled}|"
+                        f"{self._drag_item_visible}|{self._scrollbars_visible}"
+                    )
+                    self._sync_source_diagnostics.append({"event": "sync_source_verified_root", "frame_url_safe": safe_url})
+            except Exception as error:
+                self._configured_frames.pop(id(root), None)
+                self._sync_source_diagnostics.append({"event": "sync_source_candidate",
+                    "frame_url_safe": safe_url, "root_kind": kind,
+                    "has_visible_canvas": visible is not None,
+                    "probe_installed": False, "error": type(error).__name__,
+                })
+        self._sync_capture_roots = verified
+        self._sync_active_roots = [
+            root for root in getattr(self, "_sync_active_roots", ())
+            if any(root is armed_root for armed_root in verified)
+        ]
+        status = SyncSourceStatus(
+            armed_frame_count=armed,
+            input_frame_count=len(verified),
+            game_frame_count=len(candidates),
+            ready=bool(verified),
+            failure_reason="" if verified else "Không arm được bất kỳ document root nào cho Sync",
+        )
+        self._sync_source_last_status = status
+        self._sync_source_diagnostics.append({"event": "sync_source_ready" if status.ready else "sync_source_failed",
+            "root_count": len(candidates), "verified_input_root_count": len(verified),
+            "armed_frame_count": armed, "duration_ms": round((time.monotonic() - started_at) * 1000),
+            "failure_reason": status.failure_reason,
+        })
+        return status
+
+    def sync_source_diagnostics(self) -> tuple[dict[str, Any], ...]:
+        return tuple(getattr(self, "_sync_source_diagnostics", ()))
+
+    def _repair_and_count_sync_frames(self) -> int:
+        """Compatibility shim; readiness decisions must use status instead."""
+        status = self._repair_sync_source()
+        if status.armed_frame_count:
+            return status.armed_frame_count
+        # Kept only for legacy callers/tests that used this private integer
+        # helper. The real Sync lifecycle calls ``_repair_sync_source`` and
+        # never accepts this fallback as readiness evidence.
+        armed = 0
+        for root in getattr(self.page, "frames", ()):
+            try:
+                self._evaluate_frame_root(root, INTERACTION_PROBE)
+                ready = self._evaluate_frame_root(
+                    root,
+                    "() => Boolean(window.__IK_INTERACTION_PROBE_INSTALLED)",
+                )
+                # Legacy private-helper contract also applied the source mode.
+                # It is not used to determine the modern source ACK.
+                self._evaluate_frame_root(
+                    root,
+                    "([syncSource, inspectEnabled]) => window.__IK_SET_INTERACTION_MODES?.(syncSource, inspectEnabled)",
                     [self._sync_source, self._inspector_enabled],
                 )
                 if ready:
                     armed += 1
-                    armed_roots.append(frame)
-                    # A repaired frame must remain in the normal configuration
-                    # cache; otherwise every 40 ms poll would rewrite its state.
-                    self._configured_frames[id(frame)] = (
-                        f"{self._automation_root_url(frame) or ''}|{self._sync_source}|{self._inspector_enabled}|"
+                    self._configured_frames[id(root)] = (
+                        f"{self._automation_root_url(root) or ''}|{self._sync_source}|{self._inspector_enabled}|"
                         f"{self._drag_item_visible}|{self._scrollbars_visible}"
                     )
             except Exception:
-                self._configured_frames.pop(id(frame), None)
-        # Some Chromium builds expose the game only through a nested
-        # FrameLocator.  Do the comparatively expensive fallback once, and
-        # only if the direct CDP frame list did not yield a capture target.
-        if not armed:
-            for frame in self._frame_roots():
-                if any(frame is existing for existing in roots):
-                    continue
-                try:
-                    self._evaluate_frame_root(frame, INTERACTION_PROBE)
-                    ready = self._evaluate_frame_root(
-                        frame,
-                        """([syncSource, inspectEnabled]) => {
-                            window.__IK_SET_INTERACTION_MODES?.(syncSource, inspectEnabled);
-                            return Boolean(window.__IK_INTERACTION_PROBE_INSTALLED &&
-                                Array.isArray(window.__IK_SYNC_EVENTS) &&
-                                window.__IK_SYNC_SOURCE === Boolean(syncSource));
-                        }""",
-                        [self._sync_source, self._inspector_enabled],
-                    )
-                    if ready:
-                        armed += 1
-                        armed_roots.append(frame)
-                except Exception:
-                    continue
-        self._sync_capture_roots = armed_roots
+                continue
         return armed
 
     def sync_capture_frame_count(self) -> int:
@@ -2088,7 +2200,7 @@ class ChromeProfileSession:
         if not self._sync_source:
             return 0
         armed = 0
-        for frame in getattr(self, "_sync_capture_roots", ()) or self._frame_roots():
+        for frame in getattr(self, "_sync_capture_roots", ()):
             try:
                 if self._evaluate_frame_root(
                     frame,
@@ -2103,6 +2215,29 @@ class ChromeProfileSession:
             except Exception:
                 continue
         return armed
+
+    def sync_source_status(self) -> SyncSourceStatus:
+        """Cheap health check over cached verified roots only."""
+        if not self._sync_source:
+            return SyncSourceStatus()
+        valid = 0
+        stale = False
+        for root in list(getattr(self, "_sync_capture_roots", ())):
+            try:
+                ready = self._evaluate_frame_root(root, """() => Boolean(
+                    window.__IK_INTERACTION_PROBE_INSTALLED &&
+                    Array.isArray(window.__IK_SYNC_EVENTS) && window.__IK_SYNC_SOURCE === true
+                )""")
+                if ready:
+                    valid += 1
+                else:
+                    stale = True
+            except Exception:
+                stale = True
+        status = SyncSourceStatus(valid, valid, valid, bool(valid),
+            "Armed Sync root disappeared" if stale and not valid else "")
+        self._sync_source_last_status = status
+        return status
 
     def set_inspector(self, enabled: bool) -> None:
         self._inspector_enabled = bool(enabled)
@@ -2170,18 +2305,28 @@ class ChromeProfileSession:
         events: list[dict[str, Any]] = []
         if not self._sync_source:
             return events
-        for frame in getattr(self, "_sync_capture_roots", ()) or self._frame_roots():
+        valid_roots: list[Any] = []
+        for frame in tuple(getattr(self, "_sync_capture_roots", ())):
             try:
                 rows = self._evaluate_frame_root(
                     frame, "() => window.__IK_SYNC_EVENTS?.splice(0) || []"
                 )
             except Exception:
+                # Do not silently keep a detached iframe forever. Periodic
+                # source health will rediscover it (or safely disable Sync).
                 continue
+            valid_roots.append(frame)
             for row in rows:
                 frame_url = self._automation_root_url(frame) or ""
                 row["frame_url"] = frame_url
                 row["frame_url_safe"] = redact_url(frame_url)
+                if str(row.get("type", "")) in {"pointerdown", "pointerup", "wheel", "keydown", "keyup"}:
+                    active = list(getattr(self, "_sync_active_roots", ()))
+                    if not any(frame is root for root in active):
+                        active.append(frame)
+                        self._sync_active_roots = active
                 events.append(row)
+        self._sync_capture_roots = valid_roots
         return events
 
     def poll_coordinate_events(self) -> list[dict[str, Any]]:

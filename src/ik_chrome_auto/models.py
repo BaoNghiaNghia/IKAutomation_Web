@@ -33,6 +33,13 @@ class AttachmentState(StrEnum):
     ERROR = "error"
 
 
+class SyncState(StrEnum):
+    OFF = "off"
+    STARTING = "starting"
+    ACTIVE = "active"
+    ERROR = "error"
+
+
 class CommandKind(StrEnum):
     OPEN = "open"
     ATTACH = "attach"
@@ -134,6 +141,9 @@ class WorkerSnapshot:
     monitor_checked: tuple[str, ...] | None = None
     browser_running: bool = False
     attachment: AttachmentState = AttachmentState.DETACHED
+    # Global Sync lifecycle signal, emitted by the runner for Dashboard UI.
+    sync_state: SyncState | None = None
+    sync_detail: str = ""
 
 
 @dataclass(slots=True)
