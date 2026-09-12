@@ -41,6 +41,7 @@ from ik_chrome_auto.models import (
     WorkerSnapshot,
     WorkerState,
 )
+from ik_chrome_auto.native_input import NativeInputCaptureService
 from ik_chrome_auto.reader import redact
 from ik_chrome_auto.resource_area_points import ResourceAreaPointSelector
 from ik_chrome_auto.storage import upscale_png_for_diagnostics, write_retained_png
@@ -1078,24 +1079,9 @@ class ProfileWorker:
                         sync_event = dict(command.payload["event"])
                     if self.session is not None:
                         try:
-                            started_at = time.monotonic()
-                            resolved = self._apply_synced_input_with_retry(sync_event)
-                            if str(sync_event.get("type", "")) in {
-                                "pointerdown",
-                                "pointerup",
-                                "wheel",
-                            }:
-                                self.event_log.write(
-                                    "sync_input_applied",
-                                    {
-                                        "profile_id": self.profile.id,
-                                        "type": str(sync_event.get("type", "")),
-                                        "sequence": int(sync_event.get("sequence", 0) or 0),
-                                    "resolved": resolved,
-                                    "duration_ms": round((time.monotonic() - started_at) * 1000),
-                                    "sync_session_id": str(sync_event.get("sync_session_id", "")),
-                                },
-                            )
+                            self._apply_synced_input_with_retry(sync_event)
+                            # Success telemetry is aggregated by the runner;
+                            # never write one synchronous log row per follower.
                         except Exception as error:
                             # One transient frame navigation must not mark the
                             # whole profile Error or disable subsequent input.
@@ -4136,6 +4122,8 @@ class MultiProfileRunner:
         self.sync_target_ids: set[str] = set()
         self._sync_session_id = ""
         self._sync_start_timer: threading.Timer | None = None
+        self._sync_targets_snapshot: tuple[tuple[str, ProfileWorker], ...] = ()
+        self._native_input = NativeInputCaptureService.instance()
         self._sync_last_pointer_move_at = 0.0
         self.drag_items_visible = False
         self.scrollbars_visible = False
@@ -4310,7 +4298,6 @@ class MultiProfileRunner:
                 "Không thể bật Sync:\n" + "\n".join(f"- {pid}: {reason}" for pid, reason in unavailable.items())
             )
         with self._sync_lock:
-            previous_master = self.sync_master_id if self._current_sync_state() != SyncState.OFF else None
             sync_session_id = f"sync-{time.monotonic_ns()}"
             # ``sync_enabled`` is intentionally false until the master worker
             # ACKs a verified game input root.
@@ -4338,18 +4325,44 @@ class MultiProfileRunner:
                 },
             },
         )
-        # Every worker starts as a follower. Only the old and new master need
-        # a mode command; broadcasting 45 no-op commands delayed large syncs.
-        if previous_master is not None and previous_master != master_id:
-            self.submit(previous_master, CommandKind.SET_SYNC_SOURCE, enabled=False, sync_session_id=sync_session_id)
-        self.submit(master_id, CommandKind.SET_SYNC_SOURCE, enabled=True, sync_session_id=sync_session_id)
-        with contextlib.suppress(Exception):
-            if self._sync_start_timer is not None:
-                self._sync_start_timer.cancel()
-        self._sync_start_timer = threading.Timer(5.0, self._on_sync_start_timeout, args=(master_id, sync_session_id))
-        self._sync_start_timer.daemon = True
-        self._sync_start_timer.start()
-        self._publish_sync_state(master_id, SyncState.STARTING, "Đang kết nối đồng bộ...")
+        # Native Sync captures only physical input over the master renderer;
+        # it never needs DOM/iframe probing or SET_SYNC_SOURCE.
+        try:
+            self._start_native_sync(master_id, sync_session_id)
+        except Exception as error:
+            self.event_log.write("sync_native_failed", {"master_profile_id": master_id, "sync_session_id": sync_session_id, "message": f"{type(error).__name__}: {error}"})
+            self._publish_sync_state(master_id, SyncState.ERROR, str(error))
+            self.disable_sync()
+            return
+        # Native initialization is bounded and synchronous; it either calls
+        # ACTIVE above or the exception branch restores OFF immediately.
+
+    def _start_native_sync(self, master_id: str, sync_session_id: str) -> None:
+        worker = self.workers[master_id]
+        session = worker.session
+        hwnd = getattr(session, "window_handle", None) if session is not None else None
+        # Unit-test workers intentionally have no native Chrome; production
+        # profiles must resolve a renderer before becoming ACTIVE.
+        if hwnd is None and not isinstance(session, ChromeProfileSession):
+            self._on_native_sync_started(master_id, sync_session_id, None, None)
+            return
+        if hwnd is None:
+            raise RuntimeError("Không tìm thấy cửa sổ renderer của master Chrome")
+        rect = self._native_input.start(int(hwnd), lambda event: self._on_input(master_id, event))
+        self._on_native_sync_started(master_id, sync_session_id, int(hwnd), rect)
+
+    def _on_native_sync_started(self, master_id: str, sync_session_id: str, hwnd: int | None, rect: object | None) -> None:
+        with self._sync_lock:
+            if self._current_sync_state() != SyncState.STARTING or self._sync_session_id != sync_session_id:
+                self._native_input.stop()
+                return
+            self._sync_targets_snapshot = tuple((profile_id, self.workers[profile_id]) for profile_id in sorted(self.sync_target_ids))
+            self.sync_state = SyncState.ACTIVE
+            self.sync_enabled = True
+        width = int(getattr(rect, "width", 0) or 0)
+        height = int(getattr(rect, "height", 0) or 0)
+        self.event_log.write("sync_native_started", {"master_profile_id": master_id, "master_hwnd": hwnd, "renderer_width": width, "renderer_height": height, "target_count": len(self._sync_targets_snapshot), "sync_session_id": sync_session_id})
+        self._publish_sync_state(master_id, SyncState.ACTIVE, f"MASTER → {len(self._sync_targets_snapshot)} thiết bị")
 
     def _on_sync_start_timeout(self, master_id: str, sync_session_id: str) -> None:
         with self._sync_lock:
@@ -4440,6 +4453,9 @@ class MultiProfileRunner:
         return True
 
     def disable_sync(self) -> None:
+        native = getattr(self, "_native_input", None)
+        if native is not None:
+            native.stop()
         with self._sync_lock:
             was_enabled = self._current_sync_state() != SyncState.OFF
             previous_master = self.sync_master_id
@@ -4451,6 +4467,7 @@ class MultiProfileRunner:
             self.sync_target_ids.clear()
             self._sync_session_id = ""
             self._sync_last_pointer_move_at = 0.0
+            self._sync_targets_snapshot = ()
             timer = getattr(self, "_sync_start_timer", None)
             self._sync_start_timer = None
         if timer is not None:
@@ -4828,6 +4845,10 @@ class MultiProfileRunner:
         )
 
     def trim_all_profile_memory(self) -> int:
+        if self._current_sync_state() == SyncState.ACTIVE:
+            # EmptyWorkingSet can stall Chrome renderers precisely while a
+            # manual gesture is being mirrored.
+            return 0
         trimmed = 0
         process_parents = snapshot_process_parents()
         for worker in self.workers.values():
@@ -4837,11 +4858,28 @@ class MultiProfileRunner:
                 trimmed += trim_window_process_tree(hwnd, process_parents)
         return trimmed
 
+    def sync_metrics(self) -> dict[str, object]:
+        """Low-overhead native capture snapshot for field diagnostics."""
+        native = getattr(self, "_native_input", None)
+        metrics = native.snapshot() if native is not None else {"active": False}
+        with self._sync_lock:
+            return {
+                **metrics,
+                "state": self._current_sync_state().value,
+                "target_count": len(getattr(self, "_sync_targets_snapshot", ())),
+                "sync_session_id": str(getattr(self, "_sync_session_id", "")),
+            }
+
     def _on_input(self, source_profile_id: str, event: dict[str, object]) -> None:
         with self._sync_lock:
             enabled = self.sync_enabled
             master_id = self.sync_master_id
             target_ids = set(self.sync_target_ids)
+            target_workers = tuple(getattr(self, "_sync_targets_snapshot", ()))
+            if not target_workers:
+                # Compatibility for restored runner instances; active native
+                # sessions always install the immutable snapshot at startup.
+                target_workers = tuple((profile_id, self.workers[profile_id]) for profile_id in sorted(target_ids) if profile_id in self.workers)
             sync_session_id = str(getattr(self, "_sync_session_id", ""))
         if not enabled or source_profile_id != master_id:
             if str(event.get("type", "")) in {"pointerdown", "pointerup", "wheel", "keydown", "keyup"}:
@@ -4885,9 +4923,7 @@ class MultiProfileRunner:
             # false all-devices-active indication.
             self.disable_sync()
             return
-        for profile_id, worker in self.workers.items():
-            if profile_id not in target_ids:
-                continue
+        for profile_id, worker in target_workers:
             submit_synced_input = getattr(worker, "submit_synced_input", None)
             if callable(submit_synced_input):
                 submit_synced_input(sync_event)
@@ -4926,11 +4962,6 @@ class MultiProfileRunner:
                     },
                 },
             )
-            for profile_id in delivered_ids:
-                self.event_log.write(
-                    "sync_follower_queued",
-                    {"master_profile_id": source_profile_id, "profile_id": profile_id, "type": event_type, "sequence": int(event.get("sequence", 0) or 0), "sync_session_id": sync_session_id},
-                )
 
     def stop_all(self) -> None:
         for worker in self.workers.values():

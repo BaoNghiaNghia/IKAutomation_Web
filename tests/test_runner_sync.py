@@ -219,7 +219,7 @@ def test_sync_dispatch_log_contains_source_ratio_for_remote_diagnostics() -> Non
     assert records[0][1]["delivered_profile_ids"] == ["follower-open"]
     assert records[0][1]["skipped_followers"] == {}
     assert records[0][1]["source"]["ratio_x"] == 0.75
-    assert records[1][0] == "sync_follower_queued"
+    assert len(records) == 1  # normal Sync fan-out is aggregate-only telemetry
 
 
 def test_sync_routes_keyboard_event_to_open_followers() -> None:
@@ -257,16 +257,16 @@ def test_enable_sync_keeps_only_selected_targets_and_marks_master_as_source() ->
 
     runner.enable_sync("master", {"follower-open", "missing", "master"})
 
-    assert runner.sync_enabled is False
-    assert runner.sync_state == SyncState.STARTING
+    assert runner.sync_enabled is True
+    assert runner.sync_state == SyncState.ACTIVE
     assert runner.sync_master_id == "master"
     assert runner.sync_target_ids == {"follower-open"}
-    assert runner.workers["master"].commands[-1].payload["enabled"] is True
-    assert runner.workers["master"].commands[-1].payload["sync_session_id"].startswith("sync-")
+    assert runner._sync_session_id.startswith("sync-")
+    assert runner.workers["master"].commands == []
     assert runner.workers["follower-open"].commands == []
 
 
-def test_sync_becomes_active_only_after_master_source_ack() -> None:
+def test_native_sync_becomes_active_without_dom_source_ack() -> None:
     runner = make_runner()
     runner.sync_enabled = False
     runner.sync_state = SyncState.OFF
@@ -276,10 +276,6 @@ def test_sync_becomes_active_only_after_master_source_ack() -> None:
     runner.on_update = updates.append
 
     runner.enable_sync("master", {"follower-open"})
-
-    assert runner.sync_state == SyncState.STARTING
-    assert runner.sync_enabled is False
-    runner._on_sync_source_result("master", runner._sync_session_id, SyncSourceStatus(1, 1, 1, True))
 
     assert runner.sync_state == SyncState.ACTIVE
     assert runner.sync_enabled is True
@@ -533,6 +529,8 @@ def test_resource_overview_sums_open_profile_process_trees(monkeypatch) -> None:
 
 def test_trim_ram_routes_each_open_window_once(monkeypatch) -> None:
     runner = make_runner()
+    runner.sync_enabled = False
+    runner.sync_state = SyncState.OFF
     runner.workers = {
         "one": FakeWorker(SimpleNamespace(window_handle=101)),
         "two": FakeWorker(SimpleNamespace(window_handle=202)),
