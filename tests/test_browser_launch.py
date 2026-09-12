@@ -150,6 +150,35 @@ def test_managed_chrome_launches_detached_and_connects_over_stable_cdp(
     assert fake_playwright.chromium.endpoint == expected
 
 
+def test_retained_attach_reuses_the_verified_endpoint_without_rediscovery(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = AppConfig(
+        root=tmp_path,
+        source=tmp_path / "config.json",
+        target_url="https://ik.playfun.vn/play-game",
+        data_dir=tmp_path / "data",
+        browser=BrowserSettings(headless=True),
+        capture=CaptureSettings(),
+    )
+    session = browser.ChromeProfileSession(
+        config,
+        ProfileConfig("main", "Main", user_data_dir=tmp_path / "data" / "profiles" / "main"),
+    )
+    fake_playwright = _FakePlaywright()
+    session._playwright = fake_playwright  # type: ignore[assignment]
+    session._managed_cdp_endpoint = "http://127.0.0.1:21901"
+    monkeypatch.setattr(
+        browser,
+        "find_chrome",
+        lambda _configured: (_ for _ in ()).throw(AssertionError("must not rediscover")),
+    )
+
+    session._start_managed()
+
+    assert fake_playwright.chromium.endpoint == "http://127.0.0.1:21901"
+
+
 def test_known_direct_play_session_error_is_detected_only_for_play_route() -> None:
     session = browser.ChromeProfileSession.__new__(browser.ChromeProfileSession)
     session._page = type(
@@ -184,7 +213,14 @@ def test_managed_attach_rejects_a_known_foreign_user_data_dir(tmp_path: Path, mo
         browser, "_live_managed_cdp_port_diagnostics", lambda: {"status": "query_failed"}
     )
     monkeypatch.setattr(browser, "find_tcp_listener_process", lambda _port: 777)
-    monkeypatch.setattr(browser, "get_process_command_line", lambda _pid: f"chrome --user-data-dir={tmp_path / 'data' / 'profiles' / 'b'}")
+    monkeypatch.setattr(
+        browser,
+        "_chrome_process_command_lines",
+        lambda **_kwargs: (
+            {777: f"chrome --user-data-dir={tmp_path / 'data' / 'profiles' / 'b'}"},
+            "ok",
+        ),
+    )
 
     assert session.can_attach_existing_browser() is False
 
@@ -212,7 +248,9 @@ def test_managed_attach_accepts_equivalent_windows_user_data_dir_spelling(
     )
     monkeypatch.setattr(browser, "find_tcp_listener_process", lambda _port: 777)
     monkeypatch.setattr(
-        browser, "get_process_command_line", lambda _pid: f'chrome --user-data-dir="{spelling}"'
+        browser,
+        "_chrome_process_command_lines",
+        lambda **_kwargs: ({777: f'chrome --user-data-dir="{spelling}"'}, "ok"),
     )
 
     assert session.can_attach_existing_browser() is True
@@ -245,12 +283,189 @@ def test_managed_attach_uses_live_devtools_active_port_after_configuration_chang
     monkeypatch.setattr(browser, "find_tcp_listener_process", lambda _port: 777)
     monkeypatch.setattr(
         browser,
-        "get_process_command_line",
-        lambda _pid: f'chrome --user-data-dir="{profile_dir}"',
+        "_chrome_process_command_lines",
+        lambda **_kwargs: ({777: f'chrome --user-data-dir="{profile_dir}"'}, "ok"),
     )
 
     assert session.can_attach_existing_browser() is True
-    assert attempted[0] == "http://127.0.0.1:27654"
+    assert attempted[:2] == ["http://127.0.0.1:21101", "http://127.0.0.1:27654"]
+
+
+def test_configured_port_survives_successful_but_incomplete_global_discovery(
+    tmp_path: Path, monkeypatch
+) -> None:
+    profile_dir = tmp_path / "data" / "profiles" / "account-3"
+    config = AppConfig(
+        root=tmp_path,
+        source=tmp_path / "config.json",
+        target_url="https://ik.playfun.vn/login-game",
+        data_dir=tmp_path / "data",
+        browser=BrowserSettings(),
+        capture=CaptureSettings(),
+    )
+    session = browser.ChromeProfileSession(
+        config,
+        ProfileConfig("account-3", "Account 3", user_data_dir=profile_dir, cdp_port=21901),
+    )
+    monkeypatch.setattr(browser, "_cdp_endpoint_is_ready", lambda endpoint: endpoint.endswith(":21901"))
+    monkeypatch.setattr(browser, "find_tcp_listener_process", lambda _port: 777)
+    monkeypatch.setattr(
+        browser,
+        "_chrome_process_command_lines",
+        lambda **_kwargs: ({777: f'chrome --user-data-dir="{profile_dir}"'}, "ok"),
+    )
+    monkeypatch.setattr(
+        browser,
+        "_live_managed_cdp_port_diagnostics",
+        lambda: {
+            "status": "ok",
+            "chrome_process_count": 447,
+            "managed_cdp_process_count": 1,
+        },
+    )
+    monkeypatch.setattr(browser, "_live_managed_cdp_ports", lambda: {})
+
+    assert session.can_attach_existing_browser() is True
+    diagnostics = session.attach_diagnostics()
+    assert diagnostics["candidate_ports"][0] == 21901
+    assert diagnostics["matched_endpoint"] == "http://127.0.0.1:21901"
+    assert diagnostics["candidate_results"][0]["identity"] == "match"
+
+
+def test_foreign_configured_port_is_rejected_before_trying_legacy_port(
+    tmp_path: Path, monkeypatch
+) -> None:
+    profile_dir = tmp_path / "data" / "profiles" / "account-3"
+    foreign_dir = tmp_path / "data" / "profiles" / "account-4"
+    config = AppConfig(
+        root=tmp_path,
+        source=tmp_path / "config.json",
+        target_url="https://ik.playfun.vn/login-game",
+        data_dir=tmp_path / "data",
+        browser=BrowserSettings(),
+        capture=CaptureSettings(),
+    )
+    session = browser.ChromeProfileSession(
+        config,
+        ProfileConfig("account-3", "Account 3", user_data_dir=profile_dir, cdp_port=21901),
+    )
+    monkeypatch.setattr(browser, "_profile_cdp_port", lambda _profile_id: 22901)
+    monkeypatch.setattr(browser, "_cdp_endpoint_is_ready", lambda _endpoint: True)
+    monkeypatch.setattr(browser, "find_tcp_listener_process", lambda port: 11 if port == 21901 else 22)
+    monkeypatch.setattr(browser, "_live_managed_cdp_ports", lambda: {})
+    monkeypatch.setattr(browser, "_live_managed_cdp_port_diagnostics", lambda: {"status": "ok"})
+    monkeypatch.setattr(
+        browser,
+        "_chrome_process_command_lines",
+        lambda **_kwargs: (
+            {
+                11: f'chrome --user-data-dir="{foreign_dir}"',
+                22: f'chrome --user-data-dir="{profile_dir}"',
+            },
+            "ok",
+        ),
+    )
+
+    assert session.can_attach_existing_browser() is True
+    diagnostics = session.attach_diagnostics()
+    assert diagnostics["matched_endpoint"] == "http://127.0.0.1:22901"
+    assert diagnostics["candidate_results"][0]["identity"] == "foreign"
+
+
+def test_45_healthy_configured_profiles_attach_without_global_discovery(
+    tmp_path: Path, monkeypatch
+) -> None:
+    ports = {f"account-{index}": 22000 + index for index in range(45)}
+    profile_dirs = {
+        profile_id: tmp_path / "data" / "profiles" / profile_id for profile_id in ports
+    }
+    pid_by_port = {port: 1000 + index for index, port in enumerate(ports.values())}
+    commands = {
+        pid_by_port[port]: f'chrome --user-data-dir="{profile_dirs[profile_id]}"'
+        for profile_id, port in ports.items()
+    }
+    config = AppConfig(
+        root=tmp_path,
+        source=tmp_path / "config.json",
+        target_url="https://ik.playfun.vn/login-game",
+        data_dir=tmp_path / "data",
+        browser=BrowserSettings(),
+        capture=CaptureSettings(),
+    )
+    global_calls = 0
+
+    def global_ports() -> dict[str, int]:
+        nonlocal global_calls
+        global_calls += 1
+        return {next(iter(profile_dirs.values())).as_posix(): next(iter(ports.values()))}
+
+    monkeypatch.setattr(browser, "_cdp_endpoint_is_ready", lambda endpoint: int(endpoint.rsplit(":", 1)[-1]) in pid_by_port)
+    monkeypatch.setattr(browser, "find_tcp_listener_process", lambda port: pid_by_port[port])
+    monkeypatch.setattr(browser, "_chrome_process_command_lines", lambda **_kwargs: (commands, "ok"))
+    monkeypatch.setattr(browser, "_live_managed_cdp_ports", global_ports)
+    monkeypatch.setattr(browser, "_live_managed_cdp_port_diagnostics", lambda: {"status": "ok", "managed_cdp_process_count": 1})
+    monkeypatch.setattr(browser, "find_chrome_window", lambda _title: None)
+    monkeypatch.setattr(browser, "find_chrome_window_for_process", lambda _pid: None)
+
+    sessions = [
+        browser.ChromeProfileSession(
+            config,
+            ProfileConfig(profile_id, profile_id, user_data_dir=profile_dirs[profile_id], cdp_port=port),
+        )
+        for profile_id, port in ports.items()
+    ]
+
+    assert all(session.can_attach_existing_browser() for session in sessions)
+    assert all(session.attach_diagnostics()["matched_endpoint"] is not None for session in sessions)
+    assert global_calls == 0
+
+
+def test_45_profile_reconnect_one_dead_port_does_not_block_44_healthy_profiles(
+    tmp_path: Path, monkeypatch
+) -> None:
+    ports = {f"account-{index}": 23000 + index for index in range(45)}
+    dead_profile = "account-44"
+    profile_dirs = {
+        profile_id: tmp_path / "data" / "profiles" / profile_id for profile_id in ports
+    }
+    pid_by_port = {port: 2000 + index for index, port in enumerate(ports.values())}
+    commands = {
+        pid_by_port[port]: f'chrome --user-data-dir="{profile_dirs[profile_id]}"'
+        for profile_id, port in ports.items()
+    }
+    config = AppConfig(
+        root=tmp_path,
+        source=tmp_path / "config.json",
+        target_url="https://ik.playfun.vn/login-game",
+        data_dir=tmp_path / "data",
+        browser=BrowserSettings(),
+        capture=CaptureSettings(),
+    )
+    dead_port = ports[dead_profile]
+    monkeypatch.setattr(
+        browser,
+        "_cdp_endpoint_is_ready",
+        lambda endpoint: int(endpoint.rsplit(":", 1)[-1]) in pid_by_port
+        and int(endpoint.rsplit(":", 1)[-1]) != dead_port,
+    )
+    monkeypatch.setattr(browser, "find_tcp_listener_process", lambda port: pid_by_port[port])
+    monkeypatch.setattr(browser, "_chrome_process_command_lines", lambda **_kwargs: (commands, "ok"))
+    monkeypatch.setattr(browser, "_live_managed_cdp_ports", lambda: {})
+    monkeypatch.setattr(browser, "_live_managed_cdp_port_diagnostics", lambda: {"status": "ok", "managed_cdp_process_count": 1})
+    monkeypatch.setattr(browser, "find_chrome_window", lambda _title: None)
+    monkeypatch.setattr(browser, "find_chrome_window_for_process", lambda _pid: None)
+    sessions = {
+        profile_id: browser.ChromeProfileSession(
+            config,
+            ProfileConfig(profile_id, profile_id, user_data_dir=profile_dirs[profile_id], cdp_port=port),
+        )
+        for profile_id, port in ports.items()
+    }
+
+    attached = [profile_id for profile_id, session in sessions.items() if session.can_attach_existing_browser()]
+    assert len(attached) == 44
+    assert dead_profile not in attached
+    assert sessions[dead_profile].attach_diagnostics()["candidate_ports"][0] == dead_port
 
 
 def test_choose_page_prefers_game_portal_over_unrelated_tabs() -> None:

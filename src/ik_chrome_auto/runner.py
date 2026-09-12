@@ -1165,7 +1165,28 @@ class ProfileWorker:
                             WorkerState.STARTING,
                             "Đang dò Chrome profile đang mở",
                         )
-                        if not probe.can_attach_existing_browser():
+                        attached_endpoint_found = probe.can_attach_existing_browser()
+                        attach_diagnostics = probe.attach_diagnostics()
+                        selected_endpoint = attach_diagnostics.get("matched_endpoint")
+                        if selected_endpoint is not None:
+                            self.event_log.write(
+                                "profile_attach_candidate_selected",
+                                {
+                                    "profile_id": self.profile.id,
+                                    "port": int(selected_endpoint.rsplit(":", 1)[-1]),
+                                    "source": attach_diagnostics.get("selected_candidate_source"),
+                                },
+                            )
+                        else:
+                            self.event_log.write(
+                                "profile_attach_candidates_exhausted",
+                                {
+                                    "profile_id": self.profile.id,
+                                    "candidate_ports": attach_diagnostics.get("candidate_ports", []),
+                                    "native_window_found": attach_diagnostics.get("native_window_found", False),
+                                },
+                            )
+                        if not attached_endpoint_found:
                             repair_requested = command.kind == CommandKind.REPAIR_ATTACH
                             if repair_requested:
                                 self.event_log.write(
@@ -1214,21 +1235,37 @@ class ProfileWorker:
                                         "attach_diagnostics": probe.attach_diagnostics(),
                                     },
                                 )
-                            self._set_lifecycle(browser_running=False, attachment=AttachmentState.DETACHED)
+                            chrome_still_open = bool(
+                                probe.attach_diagnostics().get("native_window_found")
+                                or probe.attach_diagnostics().get("matching_profile_process_count")
+                            )
+                            self._set_lifecycle(
+                                browser_running=chrome_still_open,
+                                attachment=AttachmentState.DETACHED,
+                            )
                             self.event_log.write(
                                 "profile_browser_discovered",
                                 {
                                     "profile_id": self.profile.id,
-                                    "browser_running": False,
+                                    "browser_running": chrome_still_open,
                                     "attach_diagnostics": probe.attach_diagnostics(),
                                 },
                             )
-                            self._publish(WorkerState.STOPPED, "Profile đang đóng")
+                            self._publish(
+                                WorkerState.STOPPED,
+                                "Chrome đang mở nhưng chưa kết nối được cổng điều khiển"
+                                if chrome_still_open
+                                else "Profile đang đóng",
+                            )
                             continue
                         self._set_lifecycle(browser_running=True, attachment=AttachmentState.ATTACHING)
                         self.event_log.write(
                             "profile_browser_discovered",
-                            {"profile_id": self.profile.id, "browser_running": True},
+                            {
+                                "profile_id": self.profile.id,
+                                "browser_running": True,
+                                "attach_diagnostics": attach_diagnostics,
+                            },
                         )
                         self.event_log.write(
                             "profile_attach_started", {"profile_id": self.profile.id}

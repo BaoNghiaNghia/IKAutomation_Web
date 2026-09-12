@@ -40,7 +40,6 @@ from ik_chrome_auto.windows import (
     find_chrome_window,
     find_chrome_window_for_process,
     find_tcp_listener_process,
-    get_process_command_line,
     get_renderer_rect,
     get_window_rect,
     is_window,
@@ -723,31 +722,53 @@ class ChromeProfileSession:
                 if self.profile.user_data_dir is not None
                 else None
             )
-            live_ports = _live_managed_cdp_ports()
-            process_discovery = _live_managed_cdp_port_diagnostics()
-            process_port = live_ports.get(expected_dir) if expected_dir is not None else None
             active_port = self._devtools_active_port()
-            # An authoritative process snapshot means Chrome itself told us
-            # which profiles have --remote-debugging-port. Do not spend one
-            # HTTP timeout per remaining open-but-unmanaged Chrome window.
-            if process_discovery.get("status") == "ok":
-                candidate_ports = tuple(
-                    port for port in (active_port, process_port) if port is not None
-                )
-            else:
-                candidate_ports = self._managed_port_candidates(
-                    live_port=process_port,
+            configured_port = self.profile.cdp_port
+            legacy_port = _profile_cdp_port(self.profile.id)
+            # Known per-profile ports are cheap to probe and must never be
+            # hidden behind a partial machine-wide Chrome process snapshot.
+            direct_candidates = tuple(
+                entry
+                for entry in self._managed_attach_candidates(active_port=active_port)
+                if entry[1] != "legacy"
+            )
+            endpoint, candidate_results, selected_source = self._select_managed_cdp_endpoint(
+                direct_candidates
+            )
+            process_port: int | None = None
+            process_discovery: dict[str, int | str] = {"status": "not_needed"}
+            candidate_entries = direct_candidates
+            if endpoint is None:
+                # Global discovery is a fallback hint for moved/old CDP
+                # ports.  It can miss valid Chrome listeners and therefore
+                # can never veto configured or deterministic candidates.
+                live_ports = _live_managed_cdp_ports()
+                process_discovery = _live_managed_cdp_port_diagnostics()
+                process_port = live_ports.get(expected_dir) if expected_dir is not None else None
+                candidate_entries = self._managed_attach_candidates(
                     active_port=active_port,
+                    process_port=process_port,
                 )
-            endpoint = self._discover_managed_cdp_endpoint(candidate_ports)
+                attempted_ports = {int(row["port"]) for row in candidate_results}
+                remaining = tuple(
+                    entry for entry in candidate_entries if entry[0] not in attempted_ports
+                )
+                endpoint, extra_results, selected_source = self._select_managed_cdp_endpoint(
+                    remaining
+                )
+                candidate_results.extend(extra_results)
             existing_processes, root_processes, command_query = (
                 self._matching_profile_chrome_processes()
             )
             native_window = self.window_handle
             self._last_attach_probe = {
                 "mode": self.profile.mode.value,
-                "candidate_ports": list(candidate_ports),
+                "configured_port": configured_port,
+                "legacy_port": legacy_port,
+                "candidate_ports": [port for port, _source in candidate_entries],
+                "candidate_results": candidate_results,
                 "matched_endpoint": endpoint,
+                "selected_candidate_source": selected_source,
                 "devtools_active_port": active_port,
                 "process_discovered_port": process_port,
                 "process_discovery": process_discovery,
@@ -847,29 +868,38 @@ class ChromeProfileSession:
         live_port: int | None = None,
         active_port: int | None = None,
     ) -> tuple[int, ...]:
-        configured = self.profile.cdp_port or _profile_cdp_port(self.profile.id)
-        legacy = _profile_cdp_port(self.profile.id)
-        # Chrome writes the live CDP port into this file.  Prefer it when a
-        # retained browser was started by an older build whose deterministic
-        # port calculation or configuration has since changed.  This is the
-        # only reliable reconnect signal after an independent tool update.
-        active_port = self._devtools_active_port() if active_port is None else active_port
-        expected_dir = (
-            _normalized_windows_path(self.profile.user_data_dir.resolve())
-            if self.profile.user_data_dir is not None
-            else None
-        )
-        live_port = (
-            _live_managed_cdp_ports().get(expected_dir)
-            if live_port is None and expected_dir
-            else live_port
-        )
-        candidates = (active_port, live_port, configured, legacy)
         return tuple(
             port
-            for index, port in enumerate(candidates)
-            if port is not None and port not in candidates[:index]
+            for port, _source in self._managed_attach_candidates(
+                active_port=active_port,
+                process_port=live_port,
+            )
         )
+
+    def _managed_attach_candidates(
+        self,
+        *,
+        active_port: int | None = None,
+        process_port: int | None = None,
+    ) -> tuple[tuple[int, str], ...]:
+        """Build the canonical, deduplicated managed-CDP candidate list."""
+        configured = self.profile.cdp_port
+        legacy = _profile_cdp_port(self.profile.id)
+        active_port = self._devtools_active_port() if active_port is None else active_port
+        candidates = (
+            (configured, "configured"),
+            (active_port, "devtools_active_port"),
+            (process_port, "process_discovery"),
+            (legacy, "legacy"),
+        )
+        result: list[tuple[int, str]] = []
+        seen: set[int] = set()
+        for port, source in candidates:
+            if not isinstance(port, int) or not 1 <= port <= 65535 or port in seen:
+                continue
+            seen.add(port)
+            result.append((port, source))
+        return tuple(result)
 
     def _devtools_active_port(self) -> int | None:
         profile_dir = self.profile.user_data_dir
@@ -888,34 +918,61 @@ class ChromeProfileSession:
         self, candidate_ports: tuple[int, ...] | None = None
     ) -> str | None:
         """Find a live, identity-matching endpoint for this managed profile."""
+        ports = self._managed_port_candidates() if candidate_ports is None else candidate_ports
+        endpoint, _results, _source = self._select_managed_cdp_endpoint(
+            tuple((port, "legacy_call") for port in ports)
+        )
+        return endpoint
+
+    def _select_managed_cdp_endpoint(
+        self, candidates: tuple[tuple[int, str], ...]
+    ) -> tuple[str | None, list[dict[str, Any]], str | None]:
+        """Probe candidate endpoints and retain a safe per-port diagnostic."""
         expected_dir = (
             _normalized_windows_path(self.profile.user_data_dir.resolve())
             if self.profile.user_data_dir
             else None
         )
-        ports = self._managed_port_candidates() if candidate_ports is None else candidate_ports
-        for port in ports:
+        results: list[dict[str, Any]] = []
+        for port, source in candidates:
             endpoint = f"http://127.0.0.1:{port}"
             if not _cdp_endpoint_is_ready(endpoint):
+                results.append(
+                    {"port": port, "source": source, "ready": False, "identity": "unknown", "reason": "endpoint_not_ready"}
+                )
                 continue
             pid = find_tcp_listener_process(port)
-            command_line = get_process_command_line(pid)
+            commands, command_query = _chrome_process_command_lines()
+            command_line = commands.get(pid) if pid is not None else None
             if expected_dir is not None:
                 actual_dir = _command_line_user_data_dir(command_line) if command_line else None
-                # Reject a positively identified foreign Chrome process. On
-                # hardened Windows where the command line is inaccessible,
-                # the collision-free configured port remains the compatible
-                # identity signal for legacy profiles.
                 if actual_dir is not None and _normalized_windows_path(actual_dir) != expected_dir:
+                    results.append(
+                        {"port": port, "source": source, "ready": True, "identity": "foreign", "reason": "listener_user_data_dir_mismatch"}
+                    )
                     continue
+                identity = "match" if actual_dir is not None else "unknown"
+                reason = "listener_user_data_dir_match" if actual_dir is not None else f"listener_command_unavailable:{command_query}"
+            else:
+                identity, reason = "unknown", "profile_has_no_user_data_dir"
+            results.append(
+                {"port": port, "source": source, "ready": True, "identity": identity, "reason": reason}
+            )
             self._managed_browser_pid = pid
-            return endpoint
-        return None
+            return endpoint, results, source
+        return None, results, None
 
     def _start_managed(self) -> None:
         assert self._playwright is not None
         if self.profile.user_data_dir is None:
             raise RuntimeError(f"Profile {self.profile.id} thiếu user_data_dir")
+        # ``can_attach_existing_browser`` has already probed and identity-
+        # verified this exact endpoint. Reuse it during retained reattach
+        # instead of repeating discovery (or allowing a partial global scan
+        # to change the selected port between check and connect).
+        if self._managed_cdp_endpoint is not None:
+            self._connect_cdp(self._managed_cdp_endpoint)
+            return
         self.profile.user_data_dir.mkdir(parents=True, exist_ok=True)
         suppress_browser_prompts(self.profile.user_data_dir)
         chrome = find_chrome(self.config.browser.chrome_executable)
