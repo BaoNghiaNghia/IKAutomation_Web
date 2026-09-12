@@ -1157,7 +1157,11 @@ class ProfileWorker:
                             self._set_lifecycle(browser_running=False, attachment=AttachmentState.DETACHED)
                             self.event_log.write(
                                 "profile_browser_discovered",
-                                {"profile_id": self.profile.id, "browser_running": False},
+                                {
+                                    "profile_id": self.profile.id,
+                                    "browser_running": False,
+                                    "attach_diagnostics": probe.attach_diagnostics(),
+                                },
                             )
                             self._publish(WorkerState.STOPPED, "Profile đang đóng")
                             continue

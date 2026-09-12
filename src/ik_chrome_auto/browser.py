@@ -8,6 +8,7 @@ import random
 import re
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,6 +95,9 @@ KNOWN_CHROME_PATHS = (
 
 _PROFILE_CDP_PORT_MIN = 21000
 _PROFILE_CDP_PORT_SPAN = 20_000
+_CDP_PROBE_CONCURRENCY = 8
+_CDP_PROBE_TIMEOUT_SECONDS = 2.0
+_CDP_PROBE_SEMAPHORE = threading.BoundedSemaphore(_CDP_PROBE_CONCURRENCY)
 _GAME_SURFACE_WIDTH = 1280.0
 _GAME_SURFACE_HEIGHT = 720.0
 _FARM_INPUT_FOCUS_DELAY_SECONDS = 0.25
@@ -153,11 +157,22 @@ def _profile_cdp_port(profile_id: str) -> int:
 
 
 def _cdp_endpoint_is_ready(endpoint: str) -> bool:
+    # A retained 45-profile grid starts all workers together.  Hitting every
+    # DevTools HTTP server concurrently caused short-lived connection queues
+    # to be misclassified as "Chrome closed".  Bound probe concurrency; this
+    # is detection only and never delays normal in-session CDP commands.
+    if not _CDP_PROBE_SEMAPHORE.acquire(timeout=_CDP_PROBE_TIMEOUT_SECONDS):
+        return False
     try:
-        with urlopen(f"{endpoint.rstrip('/')}/json/version", timeout=0.5) as response:
+        with urlopen(
+            f"{endpoint.rstrip('/')}/json/version",
+            timeout=_CDP_PROBE_TIMEOUT_SECONDS,
+        ) as response:
             return response.status == 200
     except Exception:
         return False
+    finally:
+        _CDP_PROBE_SEMAPHORE.release()
 
 
 @dataclass(frozen=True, slots=True)
@@ -548,11 +563,21 @@ class ChromeProfileSession:
         """
         if self.profile.mode == ProfileMode.MANAGED:
             endpoint = self._discover_managed_cdp_endpoint()
+            self._last_attach_probe = {
+                "mode": self.profile.mode.value,
+                "candidate_ports": list(self._managed_port_candidates()),
+                "matched_endpoint": endpoint,
+                "devtools_active_port": self._devtools_active_port(),
+            }
             if endpoint is not None:
                 self._managed_cdp_endpoint = endpoint
                 return True
             return False
         return bool(self.profile.cdp_url and _cdp_endpoint_is_ready(self.profile.cdp_url))
+
+    def attach_diagnostics(self) -> dict[str, Any]:
+        """Return safe reconnect evidence for field logs."""
+        return dict(getattr(self, "_last_attach_probe", {}))
 
     def _managed_port_candidates(self) -> tuple[int, ...]:
         configured = self.profile.cdp_port or _profile_cdp_port(self.profile.id)
