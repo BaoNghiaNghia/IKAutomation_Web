@@ -230,6 +230,8 @@ class Dashboard(QWidget):
         self._auto_arrange_deadline = 0.0
         self._individually_opening_profiles: set[str] = set()
         self._reattach_pending_profiles: set[str] = set()
+        self._reattach_queue: deque[str] = deque()
+        self._reattach_in_flight: str | None = None
         self._reattach_started_at = 0.0
         self._reattach_total = 0
         self.drag_visible = False
@@ -585,38 +587,68 @@ class Dashboard(QWidget):
         self._append_log(f"Đang mở riêng profile {profile_id}")
 
     def _begin_profile_reattach(self) -> None:
-        """Lock bulk launch until retained Chrome windows have settled."""
-        pending = set(self.runner.reattach_existing_profiles())
+        """Reconnect retained Chrome profiles one at a time for clear UI state."""
+        pending = {
+            profile.id
+            for profile in self.config.profiles
+            if profile.enabled and not self.runner.is_attached(profile.id)
+        }
         self._reattach_pending_profiles = pending
+        self._reattach_queue = deque(
+            profile.id for profile in self.config.profiles if profile.id in pending
+        )
+        self._reattach_in_flight = None
         self._reattach_total = len(pending)
         self._reattach_started_at = time.monotonic()
         if not pending:
             return
         self.farm_launcher.setEnabled(False)
         self.farm_launcher.setText("Đang kết nối…")
-        self._append_log(f"Đang kết nối lại {len(pending)} profile Chrome đang mở từ phiên trước")
+        self._append_log(
+            f"Đang kết nối lại {len(pending)} profile Chrome đang mở từ phiên trước, lần lượt từng thiết bị"
+        )
+        self._start_next_profile_reattach()
 
-    def _settle_profile_reattach(self, snapshot: WorkerSnapshot) -> None:
-        pending = getattr(self, "_reattach_pending_profiles", set())
-        if snapshot.profile_id not in pending or snapshot.state not in {
-            WorkerState.READY,
-            WorkerState.STOPPED,
-            WorkerState.ERROR,
-        }:
+    def _start_next_profile_reattach(self) -> None:
+        if self._reattach_in_flight is not None:
             return
-        pending.discard(snapshot.profile_id)
-        if pending:
+        if not self._reattach_queue:
+            self._finish_profile_reattach()
+            return
+        profile_id = self._reattach_queue.popleft()
+        self._reattach_in_flight = profile_id
+        completed = self._reattach_total - len(self._reattach_pending_profiles)
+        self._append_log(
+            f"Đang kết nối profile {completed + 1}/{self._reattach_total}: {profile_id}"
+        )
+        self.runner.submit(profile_id, CommandKind.ATTACH)
+
+    def _finish_profile_reattach(self) -> None:
+        if self._reattach_pending_profiles or self._reattach_in_flight is not None:
             return
         elapsed = round((time.monotonic() - self._reattach_started_at) * 1000)
         if self._farm_launcher_phase == "launch":
             self.farm_launcher.setEnabled(True)
             self.farm_launcher.setText("Khởi động")
         self._append_log(f"Đã kiểm tra {self._reattach_total} profile trong {elapsed} ms")
-        # Sync was intentionally disabled while reconnecting the retained
-        # windows.  Refresh it as soon as the final READY/STOPPED snapshot
-        # settles; otherwise the button keeps its startup disabled state even
-        # though the profile chooser is already usable.
+        # Sync stays disabled until every retained profile has a final
+        # lifecycle result, avoiding a partial target chooser mid-reconnect.
         self._refresh_sync_control()
+
+    def _settle_profile_reattach(self, snapshot: WorkerSnapshot) -> None:
+        pending = getattr(self, "_reattach_pending_profiles", set())
+        if snapshot.profile_id != self._reattach_in_flight or snapshot.state not in {
+            WorkerState.READY,
+            WorkerState.STOPPED,
+            WorkerState.ERROR,
+        }:
+            return
+        pending.discard(snapshot.profile_id)
+        self._append_log(
+            f"Đã kiểm tra profile {snapshot.profile_id}: {snapshot.message}"
+        )
+        self._reattach_in_flight = None
+        self._start_next_profile_reattach()
 
     def _place_individually_opened_profile(self, profile_id: str) -> None:
         place_in_grid = getattr(self.runner, "place_window_in_empty_grid_slot", None)
