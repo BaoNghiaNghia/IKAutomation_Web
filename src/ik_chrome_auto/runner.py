@@ -1153,6 +1153,18 @@ class ProfileWorker:
                     if not self.is_attached():
                         attach_started_at = time.monotonic()
                         probe = ChromeProfileSession(self.config, self.profile)
+                        # Report the profile being probed before any CDP
+                        # discovery work. A failed or slow external Chrome
+                        # must not leave every card looking idle while the
+                        # Dashboard correctly waits for its result.
+                        self._set_lifecycle(
+                            browser_running=False,
+                            attachment=AttachmentState.ATTACHING,
+                        )
+                        self._publish(
+                            WorkerState.STARTING,
+                            "Đang dò Chrome profile đang mở",
+                        )
                         if not probe.can_attach_existing_browser():
                             self._set_lifecycle(browser_running=False, attachment=AttachmentState.DETACHED)
                             self.event_log.write(

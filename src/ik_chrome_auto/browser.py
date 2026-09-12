@@ -184,8 +184,9 @@ def _live_managed_cdp_ports() -> dict[str, int]:
                 pids.add(int(fields[-1]))
             except (IndexError, ValueError):
                 continue
+        chrome_commands, command_query_status = _chrome_process_command_lines()
         for pid in pids:
-            command_line = get_process_command_line(pid)
+            command_line = chrome_commands.get(pid)
             if not command_line:
                 continue
             profile_dir = _command_line_user_data_dir(command_line)
@@ -195,7 +196,9 @@ def _live_managed_cdp_ports() -> dict[str, int]:
         _CDP_PROCESS_DISCOVERY_DETAILS = {
             "status": "ok",
             "listening_process_count": len(pids),
+            "chrome_process_count": len(chrome_commands),
             "managed_cdp_process_count": len(discovered),
+            "chrome_process_query": command_query_status,
         }
         _CDP_PROCESS_DISCOVERY_CACHE = (now, discovered)
         return dict(discovered)
@@ -204,6 +207,47 @@ def _live_managed_cdp_ports() -> dict[str, int]:
 def _live_managed_cdp_port_diagnostics() -> dict[str, int | str]:
     _live_managed_cdp_ports()
     return dict(_CDP_PROCESS_DISCOVERY_DETAILS)
+
+
+def _chrome_process_command_lines() -> tuple[dict[int, str], str]:
+    """Read all Chrome command lines in one bounded query.
+
+    Calling WMIC once per TCP listener can block the first retained-profile
+    reconnect for minutes on a busy desktop.  One CIM query is both faster and
+    independent of how many unrelated local services are listening.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-CimInstance -ClassName Win32_Process -Filter \"Name='chrome.exe'\" | "
+                "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        payload = json.loads(result.stdout) if result.stdout.strip() else []
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return {}, "query_failed"
+    entries = payload if isinstance(payload, list) else [payload]
+    commands: dict[int, str] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            process_id = int(entry.get("ProcessId"))
+        except (TypeError, ValueError):
+            continue
+        command_line = entry.get("CommandLine")
+        if process_id > 0 and isinstance(command_line, str) and command_line:
+            commands[process_id] = command_line
+    return commands, "ok"
 
 
 def _fixed_game_surface_box() -> dict[str, float]:

@@ -36,8 +36,14 @@ def test_live_managed_cdp_ports_reads_the_running_chrome_command_line(monkeypatc
     )
     monkeypatch.setattr(
         browser,
-        "get_process_command_line",
-        lambda _pid: 'chrome --user-data-dir="D:/IK/profiles/account-1" --remote-debugging-port=9222',
+        "_chrome_process_command_lines",
+        lambda: (
+            {
+                777: 'chrome --user-data-dir="D:/IK/profiles/account-1" '
+                "--remote-debugging-port=9222"
+            },
+            "ok",
+        ),
     )
 
     assert browser._live_managed_cdp_ports() == {"d:\\ik\\profiles\\account-1": 9222}
