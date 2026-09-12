@@ -4331,8 +4331,10 @@ class MultiProfileRunner:
             self._start_native_sync(master_id, sync_session_id)
         except Exception as error:
             self.event_log.write("sync_native_failed", {"master_profile_id": master_id, "sync_session_id": sync_session_id, "message": f"{type(error).__name__}: {error}"})
-            self._publish_sync_state(master_id, SyncState.ERROR, str(error))
             self.disable_sync()
+            # Cleanup emits OFF; publish ERROR afterwards so Dashboard keeps
+            # the actionable activation reason visible until retry.
+            self._publish_sync_state(master_id, SyncState.ERROR, str(error))
             return
         # Native initialization is bounded and synchronous; it either calls
         # ACTIVE above or the exception branch restores OFF immediately.
@@ -4362,6 +4364,9 @@ class MultiProfileRunner:
         width = int(getattr(rect, "width", 0) or 0)
         height = int(getattr(rect, "height", 0) or 0)
         self.event_log.write("sync_native_started", {"master_profile_id": master_id, "master_hwnd": hwnd, "renderer_width": width, "renderer_height": height, "target_count": len(self._sync_targets_snapshot), "sync_session_id": sync_session_id})
+        native = getattr(self, "_native_input", None)
+        for diagnostic in native.diagnostics() if native is not None else ():
+            self.event_log.write(str(diagnostic.get("event", "native_input")), {"master_profile_id": master_id, "sync_session_id": sync_session_id, **{key: value for key, value in diagnostic.items() if key != "event"}})
         self._publish_sync_state(master_id, SyncState.ACTIVE, f"MASTER → {len(self._sync_targets_snapshot)} thiết bị")
 
     def _on_sync_start_timeout(self, master_id: str, sync_session_id: str) -> None:

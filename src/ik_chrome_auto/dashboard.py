@@ -839,10 +839,8 @@ class Dashboard(QWidget):
             self._warning("Chưa thể bật đồng bộ", str(error))
             self._refresh_sync_control()
             return
-        self.master.setEnabled(False)
-        self.sync.setText("Đang bật đồng bộ...")
-        self.sync_status.setText("Đang kết nối đồng bộ...")
-        self._set_sync_status_indicator(SyncState.STARTING)
+        # Native start is bounded and may already have emitted ACTIVE/ERROR
+        # while enable_sync returned. Do not overwrite that state locally.
         self._refresh_sync_control()
 
     def _default_sync_targets(self, follower_ids: set[str]) -> set[str]:
