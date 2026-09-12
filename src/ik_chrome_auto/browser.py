@@ -101,6 +101,7 @@ _CDP_PROBE_SEMAPHORE = threading.BoundedSemaphore(_CDP_PROBE_CONCURRENCY)
 _CDP_PROCESS_DISCOVERY_LOCK = threading.Lock()
 _CDP_PROCESS_DISCOVERY_CACHE: tuple[float, dict[str, int]] = (0.0, {})
 _CDP_PROCESS_DISCOVERY_DETAILS: dict[str, int | str] = {}
+_CDP_PROCESS_DISCOVERY_CACHE_SECONDS = 10.0
 _GAME_SURFACE_WIDTH = 1280.0
 _GAME_SURFACE_HEIGHT = 720.0
 _FARM_INPUT_FOCUS_DELAY_SECONDS = 0.25
@@ -150,11 +151,11 @@ def _live_managed_cdp_ports() -> dict[str, int]:
     global _CDP_PROCESS_DISCOVERY_CACHE, _CDP_PROCESS_DISCOVERY_DETAILS
     now = time.monotonic()
     cached_at, cached = _CDP_PROCESS_DISCOVERY_CACHE
-    if now - cached_at < 2.0:
+    if now - cached_at < _CDP_PROCESS_DISCOVERY_CACHE_SECONDS:
         return dict(cached)
     with _CDP_PROCESS_DISCOVERY_LOCK:
         cached_at, cached = _CDP_PROCESS_DISCOVERY_CACHE
-        if now - cached_at < 2.0:
+        if now - cached_at < _CDP_PROCESS_DISCOVERY_CACHE_SECONDS:
             return dict(cached)
         discovered: dict[str, int] = {}
         try:
@@ -687,23 +688,35 @@ class ChromeProfileSession:
         update can reconnect to retained browser windows independently.
         """
         if self.profile.mode == ProfileMode.MANAGED:
-            endpoint = self._discover_managed_cdp_endpoint()
             expected_dir = (
                 _normalized_windows_path(self.profile.user_data_dir.resolve())
                 if self.profile.user_data_dir is not None
                 else None
             )
+            live_ports = _live_managed_cdp_ports()
+            process_discovery = _live_managed_cdp_port_diagnostics()
+            process_port = live_ports.get(expected_dir) if expected_dir is not None else None
+            active_port = self._devtools_active_port()
+            # An authoritative process snapshot means Chrome itself told us
+            # which profiles have --remote-debugging-port. Do not spend one
+            # HTTP timeout per remaining open-but-unmanaged Chrome window.
+            if process_discovery.get("status") == "ok":
+                candidate_ports = tuple(
+                    port for port in (active_port, process_port) if port is not None
+                )
+            else:
+                candidate_ports = self._managed_port_candidates(
+                    live_port=process_port,
+                    active_port=active_port,
+                )
+            endpoint = self._discover_managed_cdp_endpoint(candidate_ports)
             self._last_attach_probe = {
                 "mode": self.profile.mode.value,
-                "candidate_ports": list(self._managed_port_candidates()),
+                "candidate_ports": list(candidate_ports),
                 "matched_endpoint": endpoint,
-                "devtools_active_port": self._devtools_active_port(),
-                "process_discovered_port": (
-                    _live_managed_cdp_ports().get(expected_dir)
-                    if expected_dir is not None
-                    else None
-                ),
-                "process_discovery": _live_managed_cdp_port_diagnostics(),
+                "devtools_active_port": active_port,
+                "process_discovered_port": process_port,
+                "process_discovery": process_discovery,
             }
             if endpoint is not None:
                 self._managed_cdp_endpoint = endpoint
@@ -715,20 +728,29 @@ class ChromeProfileSession:
         """Return safe reconnect evidence for field logs."""
         return dict(getattr(self, "_last_attach_probe", {}))
 
-    def _managed_port_candidates(self) -> tuple[int, ...]:
+    def _managed_port_candidates(
+        self,
+        *,
+        live_port: int | None = None,
+        active_port: int | None = None,
+    ) -> tuple[int, ...]:
         configured = self.profile.cdp_port or _profile_cdp_port(self.profile.id)
         legacy = _profile_cdp_port(self.profile.id)
         # Chrome writes the live CDP port into this file.  Prefer it when a
         # retained browser was started by an older build whose deterministic
         # port calculation or configuration has since changed.  This is the
         # only reliable reconnect signal after an independent tool update.
-        active_port = self._devtools_active_port()
+        active_port = self._devtools_active_port() if active_port is None else active_port
         expected_dir = (
             _normalized_windows_path(self.profile.user_data_dir.resolve())
             if self.profile.user_data_dir is not None
             else None
         )
-        live_port = _live_managed_cdp_ports().get(expected_dir) if expected_dir else None
+        live_port = (
+            _live_managed_cdp_ports().get(expected_dir)
+            if live_port is None and expected_dir
+            else live_port
+        )
         candidates = (active_port, live_port, configured, legacy)
         return tuple(
             port
@@ -749,14 +771,17 @@ class ChromeProfileSession:
             return None
         return port if 1 <= port <= 65535 else None
 
-    def _discover_managed_cdp_endpoint(self) -> str | None:
+    def _discover_managed_cdp_endpoint(
+        self, candidate_ports: tuple[int, ...] | None = None
+    ) -> str | None:
         """Find a live, identity-matching endpoint for this managed profile."""
         expected_dir = (
             _normalized_windows_path(self.profile.user_data_dir.resolve())
             if self.profile.user_data_dir
             else None
         )
-        for port in self._managed_port_candidates():
+        ports = self._managed_port_candidates() if candidate_ports is None else candidate_ports
+        for port in ports:
             endpoint = f"http://127.0.0.1:{port}"
             if not _cdp_endpoint_is_ready(endpoint):
                 continue

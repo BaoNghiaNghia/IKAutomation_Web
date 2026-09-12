@@ -106,6 +106,10 @@ def test_managed_attach_rejects_a_known_foreign_user_data_dir(tmp_path: Path, mo
         ProfileConfig("account-a", "Account A", user_data_dir=tmp_path / "data" / "profiles" / "a", cdp_port=21101),
     )
     monkeypatch.setattr(browser, "_cdp_endpoint_is_ready", lambda _endpoint: True)
+    monkeypatch.setattr(browser, "_live_managed_cdp_ports", lambda: {})
+    monkeypatch.setattr(
+        browser, "_live_managed_cdp_port_diagnostics", lambda: {"status": "query_failed"}
+    )
     monkeypatch.setattr(browser, "find_tcp_listener_process", lambda _port: 777)
     monkeypatch.setattr(browser, "get_process_command_line", lambda _pid: f"chrome --user-data-dir={tmp_path / 'data' / 'profiles' / 'b'}")
 
@@ -129,6 +133,10 @@ def test_managed_attach_accepts_equivalent_windows_user_data_dir_spelling(
     )
     spelling = str(profile_dir).replace("\\", "/") + "/"
     monkeypatch.setattr(browser, "_cdp_endpoint_is_ready", lambda _endpoint: True)
+    monkeypatch.setattr(browser, "_live_managed_cdp_ports", lambda: {})
+    monkeypatch.setattr(
+        browser, "_live_managed_cdp_port_diagnostics", lambda: {"status": "query_failed"}
+    )
     monkeypatch.setattr(browser, "find_tcp_listener_process", lambda _port: 777)
     monkeypatch.setattr(
         browser, "get_process_command_line", lambda _pid: f'chrome --user-data-dir="{spelling}"'
