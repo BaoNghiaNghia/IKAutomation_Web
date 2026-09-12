@@ -190,9 +190,12 @@ def test_shutdown_uses_one_bounded_wait_for_all_workers() -> None:
     assert slow.shutdown_calls == remaining.shutdown_calls == 1
     assert len(slow.join_timeouts) == 1
     assert slow.join_timeouts[0] <= 0.02
-    # The first stalled worker consumes the shared deadline; no additional
-    # per-profile wait is allowed for later workers.
-    assert remaining.join_timeouts == []
+    # Windows scheduler granularity can leave a few milliseconds after the
+    # first join returns. A later worker may receive only that shared
+    # remainder; it must never receive a fresh per-profile timeout.
+    assert len(remaining.join_timeouts) <= 1
+    if remaining.join_timeouts:
+        assert remaining.join_timeouts[0] < slow.join_timeouts[0]
 
 
 def test_sync_dispatch_log_contains_source_ratio_for_remote_diagnostics() -> None:
