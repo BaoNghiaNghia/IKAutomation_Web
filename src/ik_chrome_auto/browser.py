@@ -100,6 +100,7 @@ _CDP_PROBE_TIMEOUT_SECONDS = 2.0
 _CDP_PROBE_SEMAPHORE = threading.BoundedSemaphore(_CDP_PROBE_CONCURRENCY)
 _CDP_PROCESS_DISCOVERY_LOCK = threading.Lock()
 _CDP_PROCESS_DISCOVERY_CACHE: tuple[float, dict[str, int]] = (0.0, {})
+_CDP_PROCESS_DISCOVERY_DETAILS: dict[str, int | str] = {}
 _GAME_SURFACE_WIDTH = 1280.0
 _GAME_SURFACE_HEIGHT = 720.0
 _FARM_INPUT_FOCUS_DELAY_SECONDS = 0.25
@@ -146,7 +147,7 @@ def _live_managed_cdp_ports() -> dict[str, int]:
     the authoritative port in its command line, so discover it once per
     short interval instead of assuming the current configuration's scheme.
     """
-    global _CDP_PROCESS_DISCOVERY_CACHE
+    global _CDP_PROCESS_DISCOVERY_CACHE, _CDP_PROCESS_DISCOVERY_DETAILS
     now = time.monotonic()
     cached_at, cached = _CDP_PROCESS_DISCOVERY_CACHE
     if now - cached_at < 2.0:
@@ -166,6 +167,7 @@ def _live_managed_cdp_ports() -> dict[str, int]:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.SubprocessError):
+            _CDP_PROCESS_DISCOVERY_DETAILS = {"status": "netstat_failed"}
             _CDP_PROCESS_DISCOVERY_CACHE = (now, discovered)
             return discovered
         pids: set[int] = set()
@@ -177,10 +179,7 @@ def _live_managed_cdp_ports() -> dict[str, int]:
                 continue
             try:
                 local_port = int(fields[1].rsplit(":", 1)[1])
-                # Current managed ports occupy 21000-40999.  The earliest
-                # releases used a compact 9222-style range, retained here so
-                # a machine can update without restarting its Chrome grid.
-                if not (9_000 <= local_port <= 10_000 or 21_000 <= local_port < 41_000):
+                if not 1 <= local_port <= 65535:
                     continue
                 pids.add(int(fields[-1]))
             except (IndexError, ValueError):
@@ -193,8 +192,18 @@ def _live_managed_cdp_ports() -> dict[str, int]:
             port = _command_line_remote_debugging_port(command_line)
             if profile_dir is not None and port is not None:
                 discovered[_normalized_windows_path(profile_dir)] = port
+        _CDP_PROCESS_DISCOVERY_DETAILS = {
+            "status": "ok",
+            "listening_process_count": len(pids),
+            "managed_cdp_process_count": len(discovered),
+        }
         _CDP_PROCESS_DISCOVERY_CACHE = (now, discovered)
         return dict(discovered)
+
+
+def _live_managed_cdp_port_diagnostics() -> dict[str, int | str]:
+    _live_managed_cdp_ports()
+    return dict(_CDP_PROCESS_DISCOVERY_DETAILS)
 
 
 def _fixed_game_surface_box() -> dict[str, float]:
@@ -650,6 +659,7 @@ class ChromeProfileSession:
                     if expected_dir is not None
                     else None
                 ),
+                "process_discovery": _live_managed_cdp_port_diagnostics(),
             }
             if endpoint is not None:
                 self._managed_cdp_endpoint = endpoint
