@@ -49,6 +49,77 @@ def test_live_managed_cdp_ports_reads_the_running_chrome_command_line(monkeypatc
     assert browser._live_managed_cdp_ports() == {"d:\\ik\\profiles\\account-1": 9222}
 
 
+def test_repair_restarts_only_the_exact_profile_user_data_dir(monkeypatch, tmp_path: Path) -> None:
+    profile_dir = tmp_path / "data" / "profiles" / "account-1"
+    config = AppConfig(
+        root=tmp_path,
+        source=tmp_path / "config.json",
+        target_url="https://ik.playfun.vn/login-game",
+        data_dir=tmp_path / "data",
+        browser=BrowserSettings(),
+        capture=CaptureSettings(),
+    )
+    session = browser.ChromeProfileSession(
+        config,
+        ProfileConfig("account-1", "Account 1", user_data_dir=profile_dir),
+    )
+    other_dir = tmp_path / "other"
+    commands = {
+        111: f'chrome --user-data-dir="{profile_dir}"',
+        222: f'chrome --user-data-dir="{other_dir}"',
+    }
+    monkeypatch.setattr(
+        browser,
+        "_chrome_process_command_lines",
+        lambda **_kwargs: (commands, "ok"),
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        browser.subprocess,
+        "run",
+        lambda args, **_kwargs: calls.append(args) or SimpleNamespace(returncode=0),
+    )
+
+    assert session.repair_existing_browser_without_cdp() is True
+    assert calls == [["taskkill", "/PID", "111", "/T", "/F"]]
+    assert session.attach_diagnostics()["repair_result"] == "terminated"
+
+
+def test_repair_never_terminates_when_profile_process_is_not_unique(monkeypatch, tmp_path: Path) -> None:
+    profile_dir = tmp_path / "data" / "profiles" / "account-1"
+    config = AppConfig(
+        root=tmp_path,
+        source=tmp_path / "config.json",
+        target_url="https://ik.playfun.vn/login-game",
+        data_dir=tmp_path / "data",
+        browser=BrowserSettings(),
+        capture=CaptureSettings(),
+    )
+    session = browser.ChromeProfileSession(
+        config,
+        ProfileConfig("account-1", "Account 1", user_data_dir=profile_dir),
+    )
+    monkeypatch.setattr(
+        browser,
+        "_chrome_process_command_lines",
+        lambda **_kwargs: (
+            {
+                111: f'chrome --user-data-dir="{profile_dir}"',
+                222: f'chrome --user-data-dir="{profile_dir}"',
+            },
+            "ok",
+        ),
+    )
+    monkeypatch.setattr(
+        browser.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not taskkill")),
+    )
+
+    assert session.repair_existing_browser_without_cdp() is False
+    assert session.attach_diagnostics()["repair_result"] == "no_unique_profile_process"
+
+
 def test_managed_chrome_launches_detached_and_connects_over_stable_cdp(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -102,6 +102,8 @@ _CDP_PROCESS_DISCOVERY_LOCK = threading.Lock()
 _CDP_PROCESS_DISCOVERY_CACHE: tuple[float, dict[str, int]] = (0.0, {})
 _CDP_PROCESS_DISCOVERY_DETAILS: dict[str, int | str] = {}
 _CDP_PROCESS_DISCOVERY_CACHE_SECONDS = 10.0
+_CHROME_COMMAND_CACHE: tuple[float, dict[int, str], str] = (0.0, {}, "not_queried")
+_CHROME_COMMAND_CACHE_LOCK = threading.Lock()
 _GAME_SURFACE_WIDTH = 1280.0
 _GAME_SURFACE_HEIGHT = 720.0
 _FARM_INPUT_FOCUS_DELAY_SECONDS = 0.25
@@ -210,13 +212,35 @@ def _live_managed_cdp_port_diagnostics() -> dict[str, int | str]:
     return dict(_CDP_PROCESS_DISCOVERY_DETAILS)
 
 
-def _chrome_process_command_lines() -> tuple[dict[int, str], str]:
+def _clear_chrome_process_discovery_cache() -> None:
+    """Invalidate process snapshots after a deliberate profile restart."""
+    global _CDP_PROCESS_DISCOVERY_CACHE, _CHROME_COMMAND_CACHE
+    _CDP_PROCESS_DISCOVERY_CACHE = (0.0, {})
+    _CHROME_COMMAND_CACHE = (0.0, {}, "not_queried")
+
+
+def _chrome_process_command_lines(*, force: bool = False) -> tuple[dict[int, str], str]:
     """Read all Chrome command lines in one bounded query.
 
     Calling WMIC once per TCP listener can block the first retained-profile
     reconnect for minutes on a busy desktop.  One CIM query is both faster and
     independent of how many unrelated local services are listening.
     """
+    global _CHROME_COMMAND_CACHE
+    now = time.monotonic()
+    cached_at, cached_commands, cached_status = _CHROME_COMMAND_CACHE
+    if not force and now - cached_at < _CDP_PROCESS_DISCOVERY_CACHE_SECONDS:
+        return dict(cached_commands), cached_status
+    with _CHROME_COMMAND_CACHE_LOCK:
+        cached_at, cached_commands, cached_status = _CHROME_COMMAND_CACHE
+        if not force and now - cached_at < _CDP_PROCESS_DISCOVERY_CACHE_SECONDS:
+            return dict(cached_commands), cached_status
+        return _query_chrome_process_command_lines(now)
+
+
+def _query_chrome_process_command_lines(now: float) -> tuple[dict[int, str], str]:
+    """Perform the bounded CIM query; kept separate to make cache scope clear."""
+    global _CHROME_COMMAND_CACHE
     try:
         result = subprocess.run(
             [
@@ -233,8 +257,12 @@ def _chrome_process_command_lines() -> tuple[dict[int, str], str]:
             check=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
+        if result.returncode != 0:
+            _CHROME_COMMAND_CACHE = (now, {}, "query_failed")
+            return {}, "query_failed"
         payload = json.loads(result.stdout) if result.stdout.strip() else []
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        _CHROME_COMMAND_CACHE = (now, {}, "query_failed")
         return {}, "query_failed"
     entries = payload if isinstance(payload, list) else [payload]
     commands: dict[int, str] = {}
@@ -248,6 +276,7 @@ def _chrome_process_command_lines() -> tuple[dict[int, str], str]:
         command_line = entry.get("CommandLine")
         if process_id > 0 and isinstance(command_line, str) and command_line:
             commands[process_id] = command_line
+    _CHROME_COMMAND_CACHE = (now, dict(commands), "ok")
     return commands, "ok"
 
 
@@ -710,6 +739,8 @@ class ChromeProfileSession:
                     active_port=active_port,
                 )
             endpoint = self._discover_managed_cdp_endpoint(candidate_ports)
+            existing_processes, command_query = self._matching_profile_chrome_processes()
+            native_window = self.window_handle
             self._last_attach_probe = {
                 "mode": self.profile.mode.value,
                 "candidate_ports": list(candidate_ports),
@@ -717,6 +748,10 @@ class ChromeProfileSession:
                 "devtools_active_port": active_port,
                 "process_discovered_port": process_port,
                 "process_discovery": process_discovery,
+                "matching_profile_process_ids": existing_processes,
+                "matching_profile_process_count": len(existing_processes),
+                "chrome_process_query": command_query,
+                "native_window_found": native_window is not None,
             }
             if endpoint is not None:
                 self._managed_cdp_endpoint = endpoint
@@ -727,6 +762,75 @@ class ChromeProfileSession:
     def attach_diagnostics(self) -> dict[str, Any]:
         """Return safe reconnect evidence for field logs."""
         return dict(getattr(self, "_last_attach_probe", {}))
+
+    def _matching_profile_chrome_processes(self) -> tuple[list[int], str]:
+        """Return only Chrome browser roots proven to use this profile dir."""
+        if self.profile.mode != ProfileMode.MANAGED or self.profile.user_data_dir is None:
+            return [], "not_managed"
+        expected_dir = _normalized_windows_path(self.profile.user_data_dir.resolve())
+        commands, status = _chrome_process_command_lines()
+        matching = [
+            process_id
+            for process_id, command_line in commands.items()
+            if (actual_dir := _command_line_user_data_dir(command_line)) is not None
+            and _normalized_windows_path(actual_dir) == expected_dir
+        ]
+        return sorted(matching), status
+
+    def repair_existing_browser_without_cdp(self) -> bool:
+        """Restart exactly one retained managed Chrome with its CDP flag.
+
+        This is opt-in through ``REPAIR_ATTACH``. A title match alone is never
+        enough: the exact ``--user-data-dir`` check is the safety boundary.
+        """
+        process_ids, query_status = self._matching_profile_chrome_processes()
+        diagnostics = dict(getattr(self, "_last_attach_probe", {}))
+        diagnostics.update(
+            {
+                "repair_requested": True,
+                "repair_process_ids": process_ids,
+                "repair_chrome_process_query": query_status,
+            }
+        )
+        if len(process_ids) != 1:
+            diagnostics["repair_result"] = "no_unique_profile_process"
+            self._last_attach_probe = diagnostics
+            return False
+        process_id = process_ids[0]
+        commands, current_status = _chrome_process_command_lines(force=True)
+        command_line = commands.get(process_id, "")
+        expected_dir = _normalized_windows_path(self.profile.user_data_dir.resolve())  # type: ignore[union-attr]
+        actual_dir = _command_line_user_data_dir(command_line)
+        if (
+            current_status != "ok"
+            or actual_dir is None
+            or _normalized_windows_path(actual_dir) != expected_dir
+        ):
+            diagnostics["repair_result"] = "profile_process_verification_failed"
+            diagnostics["repair_chrome_process_query"] = current_status
+            self._last_attach_probe = diagnostics
+            return False
+        try:
+            result = subprocess.run(
+                ["taskkill", "/PID", str(process_id), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=12,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            diagnostics["repair_result"] = "taskkill_failed"
+            diagnostics["repair_error"] = type(error).__name__
+            self._last_attach_probe = diagnostics
+            return False
+        diagnostics["repair_exit_code"] = result.returncode
+        diagnostics["repair_result"] = "terminated" if result.returncode == 0 else "taskkill_failed"
+        self._last_attach_probe = diagnostics
+        if result.returncode != 0:
+            return False
+        _clear_chrome_process_discovery_cache()
+        return True
 
     def _managed_port_candidates(
         self,

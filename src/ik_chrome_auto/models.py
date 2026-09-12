@@ -43,6 +43,7 @@ class SyncState(StrEnum):
 class CommandKind(StrEnum):
     OPEN = "open"
     ATTACH = "attach"
+    REPAIR_ATTACH = "repair_attach"
     AUTO_LOGIN = "auto_login"
     READ = "read"
     SCREENSHOT = "screenshot"

@@ -323,7 +323,7 @@ class ProfileWorker:
         self._mail_monitor_cancelled = threading.Event()
 
     def submit(self, command: WorkerCommand) -> None:
-        if command.kind == CommandKind.ATTACH:
+        if command.kind in {CommandKind.ATTACH, CommandKind.REPAIR_ATTACH}:
             # Several startup/UI callers may ask for the same reattach while
             # the worker is still booting.  Queue exactly one effective CDP
             # connection; a second Playwright runtime for one profile is not
@@ -1147,7 +1147,7 @@ class ProfileWorker:
                     self._ensure_session(navigate=True)
                     self._set_lifecycle(browser_running=True, attachment=AttachmentState.ATTACHED)
                     self._publish(WorkerState.READY, "Chrome và trang game đã mở")
-                elif command.kind == CommandKind.ATTACH:
+                elif command.kind in {CommandKind.ATTACH, CommandKind.REPAIR_ATTACH}:
                     with self._lifecycle_lock:
                         self._attach_requested = False
                     if not self.is_attached():
@@ -1166,6 +1166,54 @@ class ProfileWorker:
                             "Đang dò Chrome profile đang mở",
                         )
                         if not probe.can_attach_existing_browser():
+                            repair_requested = command.kind == CommandKind.REPAIR_ATTACH
+                            if repair_requested:
+                                self.event_log.write(
+                                    "profile_cdp_repair_discovered",
+                                    {
+                                        "profile_id": self.profile.id,
+                                        "attach_diagnostics": probe.attach_diagnostics(),
+                                    },
+                                )
+                                self._publish(
+                                    WorkerState.STARTING,
+                                    "Đang khôi phục Chrome profile thiếu cổng điều khiển",
+                                )
+                                if probe.repair_existing_browser_without_cdp():
+                                    self.event_log.write(
+                                        "profile_cdp_repair_started",
+                                        {
+                                            "profile_id": self.profile.id,
+                                            "attach_diagnostics": probe.attach_diagnostics(),
+                                        },
+                                    )
+                                    probe.start(navigate=False, resize=False)
+                                    self.session = probe
+                                    self._set_lifecycle(
+                                        browser_running=True,
+                                        attachment=AttachmentState.ATTACHED,
+                                    )
+                                    self.event_log.write(
+                                        "profile_cdp_repair_succeeded",
+                                        {
+                                            "profile_id": self.profile.id,
+                                            "duration_ms": round(
+                                                (time.monotonic() - attach_started_at) * 1000
+                                            ),
+                                        },
+                                    )
+                                    self._publish(
+                                        WorkerState.READY,
+                                        "Đã khôi phục và kết nối Chrome profile",
+                                    )
+                                    continue
+                                self.event_log.write(
+                                    "profile_cdp_repair_skipped",
+                                    {
+                                        "profile_id": self.profile.id,
+                                        "attach_diagnostics": probe.attach_diagnostics(),
+                                    },
+                                )
                             self._set_lifecycle(browser_running=False, attachment=AttachmentState.DETACHED)
                             self.event_log.write(
                                 "profile_browser_discovered",
@@ -1239,7 +1287,7 @@ class ProfileWorker:
             except ActionCancelled:
                 self._publish(WorkerState.STOPPED, "Đã hủy action")
             except Exception as error:
-                if command.kind == CommandKind.ATTACH:
+                if command.kind in {CommandKind.ATTACH, CommandKind.REPAIR_ATTACH}:
                     self.session = None
                     self._set_lifecycle(browser_running=True, attachment=AttachmentState.ERROR)
                     self.event_log.write(

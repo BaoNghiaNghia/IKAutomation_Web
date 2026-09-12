@@ -648,7 +648,10 @@ class Dashboard(QWidget):
         self._append_log(
             f"Đang kết nối profile {completed + 1}/{self._reattach_total}: {profile_id}"
         )
-        self.runner.submit(profile_id, CommandKind.ATTACH)
+        # Retained Chrome may have lost its DevTools switch while the tool was
+        # closed.  This command repairs only a process verified by its exact
+        # user-data-dir; a normal CDP profile attaches without a restart.
+        self.runner.submit(profile_id, CommandKind.REPAIR_ATTACH)
 
     def _finish_profile_reattach(self) -> None:
         if self._reattach_pending_profiles or self._reattach_in_flight is not None:
