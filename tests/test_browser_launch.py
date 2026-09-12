@@ -112,6 +112,41 @@ def test_managed_attach_accepts_equivalent_windows_user_data_dir_spelling(
     assert session.can_attach_existing_browser() is True
 
 
+def test_managed_attach_uses_live_devtools_active_port_after_configuration_change(
+    tmp_path: Path, monkeypatch
+) -> None:
+    profile_dir = tmp_path / "data" / "profiles" / "retained"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "DevToolsActivePort").write_text("27654\n/devtools/browser/test\n")
+    config = AppConfig(
+        root=tmp_path,
+        source=tmp_path / "config.json",
+        target_url="https://ik.playfun.vn/login-game",
+        data_dir=tmp_path / "data",
+        browser=BrowserSettings(),
+        capture=CaptureSettings(),
+    )
+    session = browser.ChromeProfileSession(
+        config,
+        ProfileConfig("retained", "Retained", user_data_dir=profile_dir, cdp_port=21101),
+    )
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        browser,
+        "_cdp_endpoint_is_ready",
+        lambda endpoint: (attempted.append(endpoint) or endpoint.endswith(":27654")),
+    )
+    monkeypatch.setattr(browser, "find_tcp_listener_process", lambda _port: 777)
+    monkeypatch.setattr(
+        browser,
+        "get_process_command_line",
+        lambda _pid: f'chrome --user-data-dir="{profile_dir}"',
+    )
+
+    assert session.can_attach_existing_browser() is True
+    assert attempted[0] == "http://127.0.0.1:27654"
+
+
 def test_choose_page_prefers_game_portal_over_unrelated_tabs() -> None:
     class Page:
         def __init__(self, url: str) -> None:

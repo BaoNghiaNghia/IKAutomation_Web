@@ -557,7 +557,30 @@ class ChromeProfileSession:
     def _managed_port_candidates(self) -> tuple[int, ...]:
         configured = self.profile.cdp_port or _profile_cdp_port(self.profile.id)
         legacy = _profile_cdp_port(self.profile.id)
-        return (configured,) if configured == legacy else (configured, legacy)
+        # Chrome writes the live CDP port into this file.  Prefer it when a
+        # retained browser was started by an older build whose deterministic
+        # port calculation or configuration has since changed.  This is the
+        # only reliable reconnect signal after an independent tool update.
+        active_port = self._devtools_active_port()
+        candidates = (active_port, configured, legacy)
+        return tuple(
+            port
+            for index, port in enumerate(candidates)
+            if port is not None and port not in candidates[:index]
+        )
+
+    def _devtools_active_port(self) -> int | None:
+        profile_dir = self.profile.user_data_dir
+        if profile_dir is None:
+            return None
+        try:
+            first_line = (profile_dir / "DevToolsActivePort").read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines()[0].strip()
+            port = int(first_line)
+        except (OSError, IndexError, ValueError):
+            return None
+        return port if 1 <= port <= 65535 else None
 
     def _discover_managed_cdp_endpoint(self) -> str | None:
         """Find a live, identity-matching endpoint for this managed profile."""
