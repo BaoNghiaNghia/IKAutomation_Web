@@ -232,6 +232,7 @@ class Dashboard(QWidget):
         self._reattach_pending_profiles: set[str] = set()
         self._reattach_queue: deque[str] = deque()
         self._reattach_in_flight: str | None = None
+        self._reattach_legacy_mode = False
         self._reattach_started_at = 0.0
         self._reattach_total = 0
         self.drag_visible = False
@@ -588,16 +589,27 @@ class Dashboard(QWidget):
 
     def _begin_profile_reattach(self) -> None:
         """Reconnect retained Chrome profiles one at a time for clear UI state."""
-        pending = {
-            profile.id
-            for profile in self.config.profiles
-            if profile.enabled and not self.runner.is_attached(profile.id)
-        }
+        config = getattr(self, "config", None)
+        legacy_reattach = config is None
+        if legacy_reattach:
+            # Minimal Dashboard harnesses and older third-party integrations
+            # expose only the original batch API. Preserve that API rather
+            # than making a UI-only scheduler change a breaking change.
+            pending = set(self.runner.reattach_existing_profiles())
+        else:
+            pending = {
+                profile.id
+                for profile in config.profiles
+                if profile.enabled and not self.runner.is_attached(profile.id)
+            }
         self._reattach_pending_profiles = pending
-        self._reattach_queue = deque(
-            profile.id for profile in self.config.profiles if profile.id in pending
+        self._reattach_queue = (
+            deque(profile.id for profile in config.profiles if profile.id in pending)
+            if not legacy_reattach
+            else deque()
         )
         self._reattach_in_flight = None
+        self._reattach_legacy_mode = legacy_reattach
         self._reattach_total = len(pending)
         self._reattach_started_at = time.monotonic()
         if not pending:
@@ -607,7 +619,8 @@ class Dashboard(QWidget):
         self._append_log(
             f"Đang kết nối lại {len(pending)} profile Chrome đang mở từ phiên trước, lần lượt từng thiết bị"
         )
-        self._start_next_profile_reattach()
+        if not legacy_reattach:
+            self._start_next_profile_reattach()
 
     def _start_next_profile_reattach(self) -> None:
         if self._reattach_in_flight is not None:
@@ -637,11 +650,20 @@ class Dashboard(QWidget):
 
     def _settle_profile_reattach(self, snapshot: WorkerSnapshot) -> None:
         pending = getattr(self, "_reattach_pending_profiles", set())
-        if snapshot.profile_id != self._reattach_in_flight or snapshot.state not in {
+        if snapshot.state not in {
             WorkerState.READY,
             WorkerState.STOPPED,
             WorkerState.ERROR,
         }:
+            return
+        if getattr(self, "_reattach_legacy_mode", False):
+            if snapshot.profile_id not in pending:
+                return
+            pending.discard(snapshot.profile_id)
+            if not pending:
+                self._finish_profile_reattach()
+            return
+        if snapshot.profile_id != self._reattach_in_flight:
             return
         pending.discard(snapshot.profile_id)
         self._append_log(
