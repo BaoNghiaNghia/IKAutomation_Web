@@ -938,7 +938,9 @@ def test_profile_launch_sends_an_open_command_even_when_memory_is_constrained(mo
     dashboard._farm_launch_profiles = {"account-1"}
     dashboard._farm_open_queue = deque(["account-1"])
     dashboard._farm_open_states = {}
-    dashboard._farm_open_deadline = time.monotonic() + 60.0
+    # A slow 45-profile startup must keep advancing even after an old static
+    # launch estimate would have expired.
+    dashboard._farm_open_deadline = time.monotonic() - 60.0
     dashboard._farm_launch_policy = policy
     dashboard._farm_batch_profiles = set()
     dashboard._farm_batch_submitted = 0

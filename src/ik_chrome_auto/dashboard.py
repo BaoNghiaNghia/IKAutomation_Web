@@ -1638,11 +1638,10 @@ class Dashboard(QWidget):
             except Exception:
                 self._farm_launch_policy = FarmLaunchPolicy.for_total_memory(32 * 1_073_741_824)
             self._farm_batch_limit = self._farm_launch_policy.batch_size
-            startup_timeout = self.config.browser.startup_timeout_ms / 1000
-            self._farm_open_deadline = time.monotonic() + self._farm_launch_policy.estimated_timeout_seconds(
-                pending,
-                startup_timeout,
-            )
+            # Opening is intentionally unbounded. With slow, resource-aware
+            # staging a 45-profile run can legitimately take longer than a
+            # static estimate; only explicit profile errors may stop it.
+            self._farm_open_deadline = 0.0
             self._advance_farm_opening()
             policy = self._farm_launch_policy
             self._append_log(
@@ -1781,7 +1780,7 @@ class Dashboard(QWidget):
             profile_id for profile_id, state in self._farm_open_states.items()
             if state == WorkerState.ERROR
         }
-        if ready != targets and not failed and time.monotonic() < self._farm_open_deadline:
+        if ready != targets and not failed:
             return
         if ready != targets:
             missing = targets - ready
@@ -1838,17 +1837,6 @@ class Dashboard(QWidget):
         if self._farm_launcher_phase != "opening" or not self._farm_open_queue:
             return
         now = time.monotonic()
-        if now > self._farm_open_deadline:
-            waiting = sorted(
-                profile_id
-                for profile_id in self._farm_launch_profiles
-                if self._farm_open_states.get(profile_id) not in {WorkerState.READY, WorkerState.COMPLETED}
-            )
-            self._abort_farm_opening(
-                "Mở profile quá thời gian",
-                "Các profile chưa sẵn sàng: " + ", ".join(waiting),
-            )
-            return
         policy = self._farm_launch_policy
         if self._farm_batch_submitted >= self._farm_batch_limit:
             terminal_states = {WorkerState.READY, WorkerState.COMPLETED, WorkerState.ERROR}
