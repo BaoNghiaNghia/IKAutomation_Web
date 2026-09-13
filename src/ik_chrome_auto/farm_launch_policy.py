@@ -17,7 +17,7 @@ class FarmLaunchPolicy:
     max_profile_cpu_percent: float = 80.0
     max_gpu_utilization_percent: float = 80.0
     resource_pause_timeout_seconds: float = 180.0
-    resource_constrained_interval_seconds: float = 8.0
+    resource_constrained_interval_seconds: float = 12.0
 
     @classmethod
     def for_total_memory(cls, total_memory_bytes: int) -> FarmLaunchPolicy:
@@ -25,22 +25,21 @@ class FarmLaunchPolicy:
         total = max(1, int(total_memory_bytes))
         if total >= 64 * _GIB:
             return cls(
-                # Chrome launches allocate GPU textures and renderer processes
-                # before the first profile is fully visible. Three at a time
-                # remains deliberately gentle for 45-profile layouts, including
-                # machines with ample RAM but a consumer-grade GPU.
-                batch_size=3,
-                profile_interval_seconds=3.0,
-                batch_pause_seconds=15.0,
+                # A large profile grid still spikes CPU/GPU while Chrome
+                # creates WebGL textures. Keep only two concurrent starts and
+                # leave a visible settling gap between them.
+                batch_size=2,
+                profile_interval_seconds=6.0,
+                batch_pause_seconds=25.0,
                 min_available_memory_bytes=max(16 * _GIB, int(total * 0.18)),
                 max_memory_load_percent=80.0,
                 max_profile_cpu_percent=72.0,
             )
         if total >= 32 * _GIB:
             return cls(
-                batch_size=3,
-                profile_interval_seconds=3.5,
-                batch_pause_seconds=18.0,
+                batch_size=2,
+                profile_interval_seconds=7.0,
+                batch_pause_seconds=30.0,
                 min_available_memory_bytes=max(6 * _GIB, int(total * 0.20)),
                 max_memory_load_percent=80.0,
                 max_profile_cpu_percent=70.0,
@@ -48,8 +47,8 @@ class FarmLaunchPolicy:
             )
         return cls(
             batch_size=1,
-            profile_interval_seconds=5.0,
-            batch_pause_seconds=12.0,
+            profile_interval_seconds=10.0,
+            batch_pause_seconds=20.0,
             min_available_memory_bytes=max(4 * _GIB, int(total * 0.25)),
             max_memory_load_percent=78.0,
             max_profile_cpu_percent=68.0,
