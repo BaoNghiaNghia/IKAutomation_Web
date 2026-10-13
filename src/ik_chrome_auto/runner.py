@@ -3402,6 +3402,7 @@ class ProfileWorker:
         self._farm_dispatch_clicks = 0
         self._farm_storage_limit_cancel_pending = False
         self._farm_storage_limit_close_attempts = 0
+        self._farm_area_wait_attempts = 0
         # The coordinate bag belongs to the user-started AutoFarm session,
         # not to one dispatch/recovery cycle. START_FARM creates it and a
         # STOP/START creates the next one. Keeping it here prevents a failed
@@ -3417,30 +3418,61 @@ class ProfileWorker:
         delay_seconds: float,
         after_tap_seconds: float | None = None,
     ) -> bool:
-        """Relocate after a verified Search miss without blind retries.
+        """Bounded business fallback: four resources BEFORE moving any area.
 
-        The portal's negative outcome is that the same enabled Search button
-        remains on the verified resource panel.  In that case the requested
-        behaviour is to move the current target to another eligible World Map
-        area immediately, not to silently rotate resource types first.
+        One negative Search outcome consumes exactly one resource attempt in
+        the current shuffled order. On the fourth failure, invoke the verified
+        Continent Map relocation flow. Never send an unverified search click.
         """
         if self._farm is None:
             return False
         self._log_farm(
             "search_no_result",
             {
-                "reason": reason,
-                "resource": resource,
-                "level": level,
-                "after_tap_seconds": round(after_tap_seconds, 2) if after_tap_seconds is not None else None,
+                "reason": reason, "resource": resource, "level": level,
+                "after_tap_seconds": (
+                    round(after_tap_seconds, 2)
+                    if after_tap_seconds is not None else None
+                ),
             },
         )
+        self._farm_find_resource_click_at = 0.0
+        if self._farm.advance_search_plan():
+            next_resource, next_level = self._farm.current_target()
+            # The verified search panel stays open. Re-select the next
+            # resource and independently recheck its active glyph / filter.
+            self._farm_resource_selected_at = 0.0
+            self._farm_resource_selected_by_layout = False
+            self._farm_resource_template_misses = 0
+            self._farm_target_checkbox_click_at = 0.0
+            self._farm_target_checkbox_verified = False
+            self._farm_target_checkbox_seen_unchecked = False
+            self._farm_target_checkbox_clicks = 0
+            self._farm_find_resource_clicks = 0
+            self._farm_next_at = time.monotonic() + max(0.4, delay_seconds)
+            self._log_farm(
+                "search_resource_fallback",
+                {
+                    "previous_resource": resource, "next_resource": next_resource,
+                    "level": next_level, "reason": reason,
+                    "resource_attempt": self._farm.resource_index + 1,
+                },
+            )
+            self._publish(
+                WorkerState.RUNNING,
+                f"Auto Farm: không thấy {resource} cấp {level}; "
+                f"chuyển sang {next_resource} cùng cấp",
+            )
+            return True
+
+        self._log_farm(
+            "search_resource_round_exhausted",
+            {"level": level, "resource_order": self._farm.resource_order, "reason": reason},
+        )
+        # Only after four real no-result outcomes is it valid to move area.
         relocation = self._try_resource_area_relocation(resource, level)
         return self._apply_resource_area_relocation_result(
-            relocation,
-            resource,
-            level,
-            reason=reason,
+            relocation, resource, level, reason=reason,
         )
 
     def _apply_resource_area_relocation_result(
@@ -3455,6 +3487,11 @@ class ProfileWorker:
         if self._farm is None:
             return False
         if relocation == "moved":
+            # A verified relocation starts another four-resource round at the
+            # *same* level, with the original randomized order intact.
+            self._farm.step = FarmStep.OPEN_SEARCH
+            self._farm_search_clicks = 0
+            self._farm_area_wait_attempts = 0
             self._farm_area_relocation_pending = None
             self._farm_area_pending_selection = None
             self._farm_resource_selected_at = 0.0
@@ -3473,52 +3510,78 @@ class ProfileWorker:
             )
             self._farm_next_at = time.monotonic() + 1.0
             return True
-        if relocation == "map_button_waiting":
+        if relocation in {"map_button_waiting", "unavailable"}:
+            attempt = getattr(self, "_farm_area_wait_attempts", 0) + 1
+            self._farm_area_wait_attempts = attempt
+            # Either missing map icon or failed coordinate verification can
+            # otherwise create endless 1.5s loops and flood farm logs.
+            if attempt >= 6:
+                screenshot = self._save_farm_debug_capture("area-relocation-blocked")
+                self._log_farm("area_relocation_circuit_cooldown", {
+                    "resource": resource, "level": level, "failed_checks": attempt,
+                    "failure": relocation,
+                    "screenshot": str(screenshot) if screenshot else None,
+                })
+                self._farm_area_wait_attempts = 0
+                self._retry_farm_or_stop(
+                    "area_relocation_unverified",
+                    "đổi khu vực không được xác minh sau 6 lần kiểm tra",
+                    screenshot,
+                )
+                return True
+            # Preserve the selected area point while re-checking. Do not
+            # consume a new coordinate or click unless the UI is verified.
             self._farm_area_relocation_pending = (resource, level)
-            self._farm_next_at = time.monotonic() + 1.5
-            self._log_farm(
-                "resource_area_continent_map_waiting",
-                {"reason": reason, "level": level, "resource": resource},
+            event = (
+                "resource_area_continent_map_waiting"
+                if relocation == "map_button_waiting"
+                else "search_round_area_waiting"
             )
+            self._log_farm(event, {
+                "reason": reason, "level": level, "resource": resource,
+                "verification_attempt": attempt,
+            })
+            self._farm_next_at = time.monotonic() + min(30.0, 2.0 ** attempt)
             self._publish(
                 WorkerState.RUNNING,
-                "Auto Farm: đang chờ xác minh icon Map để mở Continent Map",
-            )
-            return True
-        if relocation == "unavailable":
-            # Keep both the requested target and its already selected point.
-            # Clearing them here used to reset the workflow to PREFLIGHT while
-            # the profile was still visibly on Continent Map, after which it
-            # could never reach the X/Y input branch again.
-            self._farm_area_relocation_pending = (resource, level)
-            self._log_farm(
-                "search_round_area_waiting",
-                {"reason": reason, "level": level, "resource": resource},
-            )
-            self._farm_next_at = time.monotonic() + 1.5
-            self._publish(
-                WorkerState.RUNNING,
-                "Auto Farm: giữ mục tiêu đổi khu vực và đang thử lại bước X/Y",
+                f"Auto Farm: chờ xác minh Map/X,Y ({attempt}/6), không click mù",
             )
             return True
 
         self._farm_area_relocation_pending = None
         self._farm_area_pending_selection = None
 
-        # Three non-repeating points are the whole bounded fallback for this
-        # target.  Keep Auto Farm active, but do not loop through coordinates
-        # or invent another level after the pool has been exhausted.
-        self._farm.step = FarmStep.WAITING
-        self._farm.waiting_for_ready_team = False
-        self._farm_next_at = time.monotonic() + FARM_NO_READY_TEAM_RESCAN_SECONDS
-        self._log_farm(
-            "resource_area_pool_unavailable",
-            {"reason": reason, "level": level, "resource": resource, "max_attempts": 3},
-        )
-        self._publish(
-            WorkerState.RUNNING,
-            f"Auto Farm: không còn điểm khu vực khả dụng cho {resource} cấp {level}; chờ lượt kiểm tra sau",
-        )
+        # Three non-repeating area points are exhausted for this level.
+        # The contract defines 6 -> 7 -> 8, but actual game level changes
+        # still require a verified UI control. Do not claim a new level
+        # while the browser continues to show the previous one.
+        previous_level = level
+        next_available = self._farm.advance_level_plan()
+        if next_available:
+            next_resource, next_level = self._farm.current_target()
+            self._farm_search_clicks = 0
+            self._farm_resource_selected_at = 0.0
+            self._farm_target_checkbox_verified = False
+            self._farm_next_at = time.monotonic() + 1.0
+            self._log_farm("resource_level_fallback_planned", {
+                "previous_level": previous_level, "next_level": next_level,
+                "resource": next_resource, "verification_required": True,
+            })
+            # Another pass must visually verify the intended level before
+            # searching; the dispatcher will gate a mismatched level.
+            self._publish(WorkerState.RUNNING,
+                f"Auto Farm: hết 3 khu vực cấp {previous_level}; "
+                f"cần xác minh chuyển sang cấp {next_level}")
+        else:
+            self._farm.step = FarmStep.WAITING
+            self._farm.waiting_for_ready_team = False
+            self._farm_next_at = time.monotonic() + FARM_NO_READY_TEAM_RESCAN_SECONDS
+            self._log_farm("resource_area_pool_unavailable", {
+                "reason": reason, "level": level, "resource": resource,
+                "max_attempts": 3, "all_levels_exhausted": True,
+            })
+            self._publish(WorkerState.RUNNING,
+                f"Auto Farm: hết điểm khu vực cấp {level}; chờ một cycle mới")
         return True
 
     @staticmethod

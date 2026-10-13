@@ -5,6 +5,13 @@ Tài liệu này khóa các invariant triển khai cho browser. Nguồn yêu c�
 mục 1.2, 1.3, 5, 6, 7 và 10; `farm-automation-browser-spec.md` là tài liệu
 chuyển đổi adapter từ ADB sang browser/CDP.
 
+**Production observation:** See [Farm live observability and recovery runbook](farm-live-observability-runbook.md)
+for evidence requirements, safe recovery policy, current verified limitations and
+read-only 60-second diagnostics. The normative search fallback remains
+**4 resources at the same level → up to 3 area coordinates → next VERIFIED
+level**. Documented intent alone does not authorize a level-change click when
+a verified control/template is missing.
+
 ## Luồng không được thay đổi
 
 `Preflight → World Map → quét roster → chọn resource + level → mở/search panel

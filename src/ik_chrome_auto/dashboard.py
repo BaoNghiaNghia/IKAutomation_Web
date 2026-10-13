@@ -52,6 +52,7 @@ from ik_chrome_auto.build_info import release_build_label
 from ik_chrome_auto.config import ensure_data_dirs, load_config, save_config, unique_profile_id
 from ik_chrome_auto.credential_store import escape_account_export_field, parse_account_export_line
 from ik_chrome_auto.diagnostics import diagnostic_log, fleet_health_payload, record
+from ik_chrome_auto.memory_guard import get_windows_commit_snapshot
 from ik_chrome_auto.farm_launch_policy import FarmLaunchPolicy
 from ik_chrome_auto.interaction import format_coordinate
 from ik_chrome_auto.mail_monitor import (
@@ -2153,7 +2154,6 @@ class Dashboard(QWidget):
         self._set_labeled_action_icon(self.farm_launcher, FIF.CLOSE)
         self.farm_all_button.setEnabled(self._opened_profile_count() > 1)
         self._append_log("Đã hoàn tất lượt kiểm tra tự đăng nhập")
-        self._notify_telegram(f"✅ Tổng profile đang mở: {self._opened_profile_count()}.")
 
     def _advance_farm_opening(self) -> None:
         """Open profiles in resource-guarded batches instead of one startup burst."""
@@ -2172,6 +2172,33 @@ class Dashboard(QWidget):
             self._farm_batch_submitted = 0
             self._farm_batch_limit = policy.batch_size
         if now < self._farm_next_open_at:
+            return
+        # Physical RAM can be 90% free while Windows commit is 99% used.
+        # Unlike ordinary GPU/CPU pressure, critical commit is a HARD gate:
+        # never start another Chrome until headroom recovers. Existing
+        # browser windows and CDP sessions are never closed by this pause.
+        try:
+            commit = get_windows_commit_snapshot()
+            if commit is not None and commit.critical:
+                if self._farm_resource_pause_reason != "commit_critical":
+                    self._farm_resource_pause_reason = "commit_critical"
+                    self._farm_resource_pause_started = now
+                    self._append_log(
+                        "TẠM DỪNG mở Chrome: commit "
+                        f"{commit.usage_ratio * 100:.1f}%, còn "
+                        f"{commit.available_bytes / (1024**3):.2f} GiB. "
+                        "Giữ nguyên profile đã mở."
+                    )
+                self._farm_next_open_at = now + 10.0
+                self.farm_launcher.setText("Chờ Commit Memory")
+                self._set_labeled_action_icon(self.farm_launcher, FIF.PAUSE)
+                return
+        except OSError as error:
+            self._append_log(
+                f"Không xác minh được commit memory: {type(error).__name__}; "
+                "tạm dừng mở Chrome mới"
+            )
+            self._farm_next_open_at = now + 10.0
             return
         reason: str | None = None
         try:
@@ -2351,7 +2378,6 @@ class Dashboard(QWidget):
         self.farm_all_button.setEnabled(False)
         self._set_farm_launcher_launch_style()
         self._append_log("Đã đóng toàn bộ tab profile")
-        self._notify_telegram(f"⬛ Đã đóng tổng cộng {closed_total} profile.")
 
     def _set_farm_launcher_launch_style(self) -> None:
         self._set_labeled_action_style(self.farm_launcher, f"QPushButton {{ background:#2563eb; border:1px solid #2563eb; border-radius:{_ui_px(8)}px; color:#ffffff; font-weight:600; }} QPushButton:hover {{ background:#1d4ed8; border-color:#1d4ed8; }} QPushButton:disabled {{ background:#93c5fd; border-color:#93c5fd; color:#eff6ff; }}")

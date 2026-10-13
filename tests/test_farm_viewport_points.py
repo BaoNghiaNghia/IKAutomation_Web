@@ -356,7 +356,7 @@ def test_coordinate_input_failure_keeps_pending_point_and_does_not_reset_preflig
     assert handled is True
     assert worker._farm_area_relocation_pending == ("stone", 6)
     assert worker._farm_area_pending_selection is pending_point
-    assert "thử lại bước X/Y" in updates[-1][1]
+    assert "chờ xác minh Map/X,Y" in updates[-1][1]
 
 
 def test_new_farm_cycle_preserves_the_running_sessions_coordinate_bag() -> None:

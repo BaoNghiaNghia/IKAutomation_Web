@@ -19,6 +19,7 @@ from urllib.request import urlopen
 from ik_chrome_auto.chrome_preferences import suppress_browser_prompts
 from ik_chrome_auto.config import is_allowed_url
 from ik_chrome_auto.image_utils import RGBImage, decode_png
+from ik_chrome_auto.memory_guard import guard_new_chrome_launch
 from ik_chrome_auto.input_engine import ProfileInputEngine, ViewportPoint
 from ik_chrome_auto.input_helpers import (
     GAME_REFERENCE_HEIGHT,
@@ -1054,6 +1055,9 @@ class ChromeProfileSession:
                 f"{self.config.browser.viewport_height}"
             )
         if not _cdp_endpoint_is_ready(endpoint):
+            # Prevent new launches when Windows commit is exhausted.
+            # Never close existing Chrome or block a verified CDP reattach.
+            guard_new_chrome_launch()
             # Detach Chrome from the tool process.  The browser survives an
             # application close/update and is reused by the next launch.
             creationflags = (

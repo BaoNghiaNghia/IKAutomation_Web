@@ -5,6 +5,9 @@ param(
     [switch]$Archive,
     [switch]$CleanCache,
     [switch]$ForcePackage,
+    # Create a verified next-release package without modifying the running EXE
+    # or its data. A separate scheduled activator applies it after app exit.
+    [switch]$StageOnly,
     # Used by the in-app updater: Chrome profile files can remain locked while
     # the executable is rebuilt, so leave the existing release profile data
     # untouched and package code only.
@@ -383,6 +386,7 @@ try {
     $applicationExe = Join-Path $applicationDir "$applicationName.exe"
     $packageSignature = Get-ApplicationPackageSignature
     $packageCacheHit = (
+        -not $StageOnly -and
         -not $CleanCache -and
         -not $ForcePackage -and
         (Test-Path -LiteralPath $packageSourceManifest) -and
@@ -422,6 +426,54 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed to create the application.' }
         $packageDirectory = Join-Path $pyInstallerDistRoot $applicationName
         if (-not (Test-Path -LiteralPath $packageDirectory)) { throw "Build folder not found: $packageDirectory" }
+        if ($StageOnly) {
+            # Only application binaries are staged; no release config/profile
+            # path is opened for writing while IK Auto and Chrome are running.
+            $nextDir = Join-Path $releaseRoot '.ik-auto-app-next'
+            if (Test-Path -LiteralPath $nextDir) {
+                Remove-Item -LiteralPath $nextDir -Recurse -Force
+            }
+            New-Item -ItemType Directory -Path $nextDir -Force | Out-Null
+            $nextExe = Join-Path $nextDir "$applicationName.exe"
+            $nextInternal = Join-Path $nextDir '_internal'
+            Copy-Item -LiteralPath (Join-Path $packageDirectory "$applicationName.exe") -Destination $nextExe -Force
+            & robocopy (Join-Path $packageDirectory '_internal') $nextInternal '/MIR' '/COPY:DAT' '/DCOPY:DAT' '/R:2' '/W:1' '/XJ' | Out-Host
+            if ($LASTEXITCODE -gt 7) { throw "Could not stage next release (robocopy $LASTEXITCODE)" }
+            if (-not (Test-Path -LiteralPath $nextExe) -or -not (Test-Path -LiteralPath $nextInternal)) {
+                throw "Next-release package incomplete"
+            }
+            # Hash the complete _internal tree, not just its EXE. The
+            # activator independently verifies every staged file.
+            $hashList = Get-ChildItem -LiteralPath $nextInternal -Recurse -File |
+                Sort-Object FullName |
+                ForEach-Object {
+                    $relative = $_.FullName.Substring($nextInternal.Length).TrimStart('\')
+                    $fileHash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                    "$relative|$fileHash"
+                }
+            $joined = ($hashList -join "`n")
+            $treeBytes = [System.Text.Encoding]::UTF8.GetBytes($joined)
+            $hashApi = [System.Security.Cryptography.SHA256]::Create()
+            try {
+                $treeHash = [BitConverter]::ToString($hashApi.ComputeHash($treeBytes)).Replace('-', '').ToLowerInvariant()
+            } finally {
+                $hashApi.Dispose()
+            }
+            $nextManifest = @{
+                schema = 2
+                exe_sha256 = (Get-FileHash -LiteralPath $nextExe -Algorithm SHA256).Hash.ToLowerInvariant()
+                internal_tree_sha256 = $treeHash
+                internal_files = @($hashList)
+                package_signature = $packageSignature
+                staged_at = (Get-Date).ToUniversalTime().ToString('o')
+            } | ConvertTo-Json -Depth 4 -Compress
+            [System.IO.File]::WriteAllText(
+                (Join-Path $nextDir 'update.json'), $nextManifest, $utf8NoBom
+            )
+            Write-Host "Staged ONLY: $nextDir" -ForegroundColor Green
+            Write-Host "IK Auto.exe and all Chrome/profile data remain untouched." -ForegroundColor DarkCyan
+            return
+        }
         Update-ReleaseApplication -PackageDirectory $packageDirectory -Destination $applicationDir
         [System.IO.File]::WriteAllText($packageSourceManifest, $packageSignature, $utf8NoBom)
     }
