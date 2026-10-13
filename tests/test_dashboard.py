@@ -124,8 +124,11 @@ class FakeProfileOpenButton(FakeActionButton):
     def setVisible(self, visible: bool) -> None:
         self.visible = visible
 
+    def setToolTip(self, tooltip: str) -> None:
+        self.tooltip = tooltip
 
-def test_open_closed_profile_submits_one_open_command_and_hides_its_button() -> None:
+
+def test_open_closed_profile_submits_one_open_command_and_disables_its_button() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     button = FakeProfileOpenButton()
     row = SimpleNamespace(open_button=button)
@@ -141,8 +144,9 @@ def test_open_closed_profile_submits_one_open_command_and_hides_its_button() -> 
     dashboard._open_profile("account-2")
 
     assert commands == [("account-2", CommandKind.OPEN)]
-    assert not button.visible
+    assert button.visible
     assert not button.enabled
+    assert button.text == "Đang mở…"
 
 
 def test_open_profile_does_not_repeat_command_for_an_open_session() -> None:
@@ -157,6 +161,49 @@ def test_open_profile_does_not_repeat_command_for_an_open_session() -> None:
     dashboard._open_profile("account-2")
 
     assert button.visible
+    assert not button.enabled
+    assert button.text == "Đã mở"
+
+
+def test_open_profile_rejects_second_click_before_worker_attaches() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    button = FakeProfileOpenButton()
+    submitted: list[tuple[str, CommandKind]] = []
+    dashboard.rows = {"account-2": SimpleNamespace(open_button=button)}
+    dashboard.runner = SimpleNamespace(
+        has_open_session=lambda _pid: False,
+        submit=lambda pid, cmd: submitted.append((pid, cmd)),
+    )
+    dashboard._append_log = lambda _message: None
+    dashboard._error = lambda _title, _message: None
+
+    dashboard._open_profile("account-2")
+    dashboard._open_profile("account-2")
+
+    assert submitted == [("account-2", CommandKind.OPEN)]
+    assert not button.enabled
+
+
+def test_detected_chrome_disables_open_even_without_cdp() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    button = FakeProfileOpenButton()
+    dashboard.rows = {"account-2": SimpleNamespace(open_button=button)}
+    dashboard.runner = SimpleNamespace(
+        has_open_session=lambda _pid: False,
+        is_browser_running=lambda _pid: False,
+        submit=lambda *_args: (_ for _ in ()).throw(AssertionError("must not submit")),
+    )
+    dashboard._chrome_process_results = __import__("queue").Queue(maxsize=1)
+    dashboard._chrome_process_results.put({"account-2"})
+    dashboard._chrome_process_sample_in_flight = True
+    dashboard._detected_open_profiles = set()
+    dashboard._chrome_process_probe_ok = False
+
+    dashboard._drain_chrome_process_sample()
+    dashboard._open_profile("account-2")
+
+    assert button.visible and not button.enabled
+    assert button.text == "Đã mở"
 
 
 def test_profile_reattach_disables_launch_until_every_profile_settles() -> None:
@@ -720,11 +767,15 @@ def test_farm_profile_picker_uses_two_columns_only_above_ten_profiles() -> None:
 
 def test_farm_profile_picker_uses_one_button_to_toggle_all_profiles() -> None:
     class FakeCheck:
-        def __init__(self, checked: bool) -> None:
+        def __init__(self, checked: bool, enabled: bool = True) -> None:
             self.checked = checked
+            self.enabled = enabled
 
         def isChecked(self) -> bool:
             return self.checked
+
+        def isEnabled(self) -> bool:
+            return self.enabled
 
         def setChecked(self, checked: bool) -> None:
             self.checked = checked
@@ -743,6 +794,38 @@ def test_farm_profile_picker_uses_one_button_to_toggle_all_profiles() -> None:
     dialog._toggle_all_profiles()
     assert not any(check.isChecked() for check in dialog._checks.values())
     assert dialog.selection_toggle.text == "Chọn tất cả"
+
+
+def test_farm_profile_picker_never_reselects_running_chrome() -> None:
+    class FakeCheck:
+        def __init__(self, enabled: bool) -> None:
+            self.enabled = enabled
+            self.checked = False
+
+        def isEnabled(self) -> bool:
+            return self.enabled
+
+        def isChecked(self) -> bool:
+            return self.checked
+
+        def setChecked(self, checked: bool) -> None:
+            self.checked = checked
+
+    dialog = FarmProfileDialog.__new__(FarmProfileDialog)
+    dialog._checks = {
+        "already-open": FakeCheck(False),
+        "closed-one": FakeCheck(True),
+        "closed-two": FakeCheck(True),
+    }
+    dialog.selection_toggle = FakeActionButton()
+
+    dialog._toggle_all_profiles()
+    assert dialog.selected_profile_ids() == {"closed-one", "closed-two"}
+    assert not dialog._checks["already-open"].isChecked()
+
+    dialog._toggle_all_profiles()
+    assert dialog.selected_profile_ids() == set()
+    assert not dialog._checks["already-open"].isChecked()
 
 
 def test_bulk_farm_button_starts_and_stops_without_closing_open_tabs() -> None:
@@ -953,6 +1036,7 @@ def test_profile_launch_sends_an_open_command_even_when_memory_is_constrained(mo
     dashboard.farm_launcher = FakeActionButton()
     dashboard._log_lines = deque(maxlen=10)
     dashboard.log = FakeLogWidget()
+    monkeypatch.setattr(dashboard_module, "get_windows_commit_snapshot", lambda: None)
     monkeypatch.setattr(
         dashboard_module,
         "get_system_memory_status",
@@ -999,6 +1083,7 @@ def test_profile_launch_does_not_arrange_between_batches(monkeypatch) -> None:
     dashboard.farm_launcher = FakeActionButton()
     dashboard._log_lines = deque(maxlen=10)
     dashboard.log = FakeLogWidget()
+    monkeypatch.setattr(dashboard_module, "get_windows_commit_snapshot", lambda: None)
     monkeypatch.setattr(
         dashboard_module,
         "get_system_memory_status",

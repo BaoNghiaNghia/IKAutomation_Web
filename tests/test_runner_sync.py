@@ -4,13 +4,14 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import ik_chrome_auto.runner as runner_module
 from ik_chrome_auto.browser import SyncSourceStatus
-from ik_chrome_auto.models import AttachmentState, CommandKind, SyncState, WorkerCommand
+from ik_chrome_auto.models import AttachmentState, CommandKind, ProfileMode, SyncState, WorkerCommand
 from ik_chrome_auto.runner import MultiProfileRunner, ProfileWorker
 from ik_chrome_auto.windows import ProcessResourceUsage, WindowRect
 
@@ -75,6 +76,49 @@ def test_browser_running_is_distinct_from_tool_attachment() -> None:
     assert runner.is_browser_running("retained") is True
     assert runner.is_attached("retained") is False
     assert runner.has_open_session("retained") is False
+
+
+def test_duplicate_open_requests_are_coalesced_before_worker_starts() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker._lifecycle_lock = threading.Lock()
+    worker._attachment_state = AttachmentState.DETACHED
+    worker._open_requested = False
+    worker.commands = queue.Queue()
+    worker._ensure_thread = lambda: None
+
+    for _ in range(3):
+        worker.submit(WorkerCommand(CommandKind.OPEN))
+
+    assert worker.commands.qsize() == 1
+
+
+def test_running_managed_chrome_detected_without_cdp(monkeypatch) -> None:
+    runner = MultiProfileRunner.__new__(MultiProfileRunner)
+    path = Path("C:/profile-a")
+    runner.config = SimpleNamespace(profiles=[
+        SimpleNamespace(id="one", mode=ProfileMode.MANAGED, user_data_dir=path),
+        SimpleNamespace(id="two", mode=ProfileMode.MANAGED,
+                        user_data_dir=Path("C:/profile-b")),
+    ])
+    monkeypatch.setattr(
+        runner_module.browser_discovery,
+        "_chrome_process_command_lines",
+        lambda: ({123: "chrome process one"}, "ok"),
+    )
+    monkeypatch.setattr(
+        runner_module.browser_discovery,
+        "_command_line_user_data_dir",
+        lambda _command: path,
+    )
+
+    assert runner.detect_running_managed_profiles() == {"one"}
+
+    monkeypatch.setattr(
+        runner_module.browser_discovery,
+        "_chrome_process_command_lines",
+        lambda: ({}, "query_failed"),
+    )
+    assert runner.detect_running_managed_profiles() is None
 
 
 def test_duplicate_attach_requests_are_coalesced_before_worker_starts() -> None:

@@ -205,6 +205,7 @@ class ProfileRow:
     last_state: WorkerState | None = None
     last_roster: tuple[tuple[int, str], ...] = ()
     last_resource: str = ""
+    last_browser_running: bool = False
 
 
 class Dashboard(QWidget):
@@ -226,6 +227,11 @@ class Dashboard(QWidget):
         self._resource_alert_samples: queue.Queue[tuple[float, float | None]] = queue.Queue()
         self._resource_overview_results: queue.Queue[object] = queue.Queue(maxsize=1)
         self._resource_sample_in_flight = False
+        self._chrome_process_results: queue.Queue[set[str] | None] = queue.Queue(maxsize=1)
+        self._chrome_process_sample_in_flight = False
+        self._chrome_process_last_sample = 0.0
+        self._detected_open_profiles: set[str] = set()
+        self._chrome_process_probe_ok = False
         self._telegram_notifier: TelegramNotifier | None = None
         self._telegram_event_at: dict[str, float] = {}
         self._resource_high_counts = {"ram": 0, "gpu": 0}
@@ -709,11 +715,19 @@ class Dashboard(QWidget):
     def _open_profile(self, profile_id: str) -> None:
         """Open one closed profile while retaining its normal tool eligibility."""
         row = self.rows.get(profile_id)
-        if row is None or self.runner.has_open_session(profile_id):
+        if row is None:
             return
-        # Hide immediately so a double click cannot enqueue two OPEN commands
-        # while the worker is still creating Chrome.
-        self._set_profile_open_control(row, opened=True)
+        if self._profile_chrome_is_open(profile_id):
+            self._set_profile_open_control(row, opened=True)
+            return
+        if (
+            profile_id in getattr(self, "_individually_opening_profiles", set())
+            or profile_id in getattr(self, "_reattach_pending_profiles", set())
+        ):
+            self._set_profile_open_control(row, opened=False, opening=True)
+            return
+        # Disable immediately so a double click cannot enqueue two OPENs.
+        self._set_profile_open_control(row, opened=False, opening=True)
         individually_opening = getattr(self, "_individually_opening_profiles", None)
         if individually_opening is None:
             individually_opening = self._individually_opening_profiles = set()
@@ -777,6 +791,10 @@ class Dashboard(QWidget):
                 and (profile_ids is None or profile.id in profile_ids)
             }
         self._reattach_pending_profiles = pending
+        for profile_id in pending:
+            row = getattr(self, "rows", {}).get(profile_id)
+            if row is not None:
+                self._set_profile_open_control(row, opened=False, opening=True)
         self._reattach_queue = (
             deque(profile.id for profile in config.profiles if profile.id in pending)
             if not legacy_reattach else deque()
@@ -992,13 +1010,91 @@ class Dashboard(QWidget):
                 queued.append(profile_id)
             self._append_log(f"Đã thêm {profile_id} vào giám sát đang chạy")
 
+    def _profile_chrome_is_open(self, profile_id: str) -> bool:
+        """Detect live Chrome even when its CDP worker has not attached."""
+        runner = getattr(self, "runner", None)
+        if runner is not None and runner.has_open_session(profile_id):
+            return True
+        if profile_id in getattr(self, "_detected_open_profiles", set()):
+            return True
+        running = getattr(runner, "is_browser_running", None)
+        if callable(running) and running(profile_id):
+            return True
+        # A successful Windows process scan is authoritative for managed
+        # detached profiles. A failed scan cannot prove Chrome is closed.
+        if getattr(self, "_chrome_process_probe_ok", False):
+            config = getattr(self, "config", None)
+            if config is not None:
+                with contextlib.suppress(KeyError):
+                    if config.profile(profile_id).mode == ProfileMode.MANAGED:
+                        return False
+        return False
+
+    def _start_chrome_process_sample(self) -> None:
+        """Probe all managed Chrome processes once, outside the UI thread."""
+        if getattr(self, "_chrome_process_sample_in_flight", False):
+            return
+        detect = getattr(self.runner, "detect_running_managed_profiles", None)
+        if not callable(detect):
+            return
+        self._chrome_process_sample_in_flight = True
+        self._chrome_process_last_sample = time.monotonic()
+
+        def sample() -> None:
+            try:
+                profiles = detect()
+            except Exception:
+                profiles = None
+            with contextlib.suppress(queue.Full):
+                self._chrome_process_results.put_nowait(profiles)
+
+        threading.Thread(
+            target=sample, name="chrome-process-detection", daemon=True
+        ).start()
+
+    def _drain_chrome_process_sample(self) -> None:
+        result_queue = getattr(self, "_chrome_process_results", None)
+        if result_queue is None:
+            return
+        try:
+            profiles = result_queue.get_nowait()
+        except queue.Empty:
+            return
+        self._chrome_process_sample_in_flight = False
+        if profiles is None:
+            # Preserve the last confirmed running set when Windows process
+            # discovery fails. Never claim a running Chrome has closed.
+            self._chrome_process_probe_ok = False
+            return
+        self._chrome_process_probe_ok = True
+        self._detected_open_profiles = set(profiles)
+        for profile_id, row in getattr(self, "rows", {}).items():
+            opened = self._profile_chrome_is_open(profile_id)
+            opening = (
+                profile_id in getattr(self, "_reattach_pending_profiles", set())
+                or profile_id in getattr(self, "_individually_opening_profiles", set())
+            )
+            self._set_profile_open_control(
+                row, opened=opened, opening=opening and not opened
+            )
+
     @staticmethod
-    def _set_profile_open_control(row: ProfileRow, *, opened: bool) -> None:
-        """Show the per-card Open action only while its Chrome is closed."""
+    def _set_profile_open_control(
+        row: ProfileRow, *, opened: bool, opening: bool = False
+    ) -> None:
+        """Keep Open visible but disabled during launch or while Chrome is open."""
         if row.open_button is None:
             return
-        row.open_button.setVisible(not opened)
-        row.open_button.setEnabled(not opened)
+        row.open_button.setVisible(True)
+        row.open_button.setEnabled(not (opened or opening))
+        row.open_button.setText("Đã mở" if opened else "Đang mở…" if opening else "Mở")
+        set_tooltip = getattr(row.open_button, "setToolTip", None)
+        if callable(set_tooltip):
+            set_tooltip(
+                "Profile đã mở; không thể mở thêm cửa sổ trùng"
+                if opened else "Đang khởi động hoặc kết nối Chrome"
+                if opening else "Mở riêng Chrome của profile này"
+            )
 
     @staticmethod
     def _mask_username(username: str) -> str:
@@ -2098,25 +2194,45 @@ class Dashboard(QWidget):
         targets = self._farm_launch_profiles
         ready = {
             profile_id for profile_id, state in self._farm_open_states.items()
-            if state in {WorkerState.READY, WorkerState.COMPLETED}
+            if profile_id in targets
+            and state in {WorkerState.READY, WorkerState.COMPLETED}
+            and self.runner.has_open_session(profile_id)
         }
         failed = {
             profile_id for profile_id, state in self._farm_open_states.items()
-            if state == WorkerState.ERROR
+            if profile_id in targets
+            and state in {WorkerState.ERROR, WorkerState.STOPPED}
         }
-        if ready != targets and not failed:
+        # Never confuse a failed profile with an in-flight STARTING worker.
+        # Wait until every profile was attempted and reconciled.
+        unfinished = targets - ready - failed
+        if unfinished:
             return
-        if ready != targets:
-            missing = targets - ready
-            self._abort_farm_opening("Không mở đủ tab", f"Chưa sẵn sàng: {', '.join(sorted(missing))}")
+        if not ready:
+            self._abort_farm_opening(
+                "Không mở được tab nào",
+                f"{len(failed)} profile thất bại; Chrome và dữ liệu vẫn giữ nguyên",
+            )
             return
+        if failed:
+            self._append_log(
+                f"Đã mở {len(ready)}/{len(targets)} profile; "
+                f"{len(failed)} lỗi: {', '.join(sorted(failed))}. "
+                "Vẫn tiếp tục đăng nhập các profile thành công; "
+                "không xóa hay mở trùng Chrome."
+            )
+            self._log_monitor_scheduler(
+                "profile_open_partial",
+                ready_count=len(ready),
+                failed_count=len(failed),
+            )
         try:
             # Farm follows the user-selected layout setting. The runner keeps
             # profile order, therefore placement is left → right, top → down.
             columns = self._farm_arrange_columns
             count = self.runner.arrange_windows(
                 columns,
-                profile_ids=self._farm_launch_profiles,
+                profile_ids=ready,
                 layout_profile_ids=self._farm_launch_profiles,
             )
         except Exception as error:
@@ -2132,9 +2248,12 @@ class Dashboard(QWidget):
         self._set_labeled_action_icon(self.farm_launcher, FIF.PLAY)
         self.farm_all_button.setEnabled(False)
         self._append_log(
-            f"Đã mở và xếp {count} tab theo {columns} cột (trái → phải, trên → dưới)"
+            f"Đã xếp {count}/{len(targets)} tab theo {columns} cột (trái → phải, trên → dưới)"
         )
-        self._append_log(f"Đã mở xong toàn bộ tab; bắt đầu kiểm tra đăng nhập cho {len(ready)} profile")
+        self._append_log(
+            f"Đã xử lý đủ {len(targets)} profile; "
+            f"bắt đầu kiểm tra đăng nhập cho {len(ready)} profile đã kết nối"
+        )
         self._advance_farm_login()
 
     def _advance_farm_login(self) -> None:
@@ -2162,9 +2281,32 @@ class Dashboard(QWidget):
         now = time.monotonic()
         policy = self._farm_launch_policy
         if self._farm_batch_submitted >= self._farm_batch_limit:
-            terminal_states = {WorkerState.READY, WorkerState.COMPLETED, WorkerState.ERROR}
-            if any(self._farm_open_states.get(profile_id) not in terminal_states for profile_id in self._farm_batch_profiles):
-                return
+            # STOPPED is also terminal: a failed CDP/open attempt must not
+            # hold the remaining 43-profile queue indefinitely.
+            terminal_states = {
+                WorkerState.READY, WorkerState.COMPLETED,
+                WorkerState.ERROR, WorkerState.STOPPED,
+            }
+            pending = {
+                pid for pid in self._farm_batch_profiles
+                if self._farm_open_states.get(pid) not in terminal_states
+            }
+            if pending:
+                # A worker can stay STARTING indefinitely when Chrome or CDP
+                # becomes unresponsive. Record one bounded timeout, preserve
+                # any existing browser, and move to the next batch safely.
+                if now < max(self._farm_next_open_at, self._farm_batch_resume_at) + 180.0:
+                    return
+                for pid in sorted(pending):
+                    attached = self.runner.has_open_session(pid)
+                    self._farm_open_states[pid] = (
+                        WorkerState.READY if attached else WorkerState.ERROR
+                    )
+                    self._append_log(
+                        f"[{pid}] Mở profile quá 180 giây, "
+                        + ("Chrome đã kết nối" if attached else
+                           "đánh dấu thất bại và tiếp tục đợt tiếp theo")
+                    )
             if now < self._farm_batch_resume_at:
                 return
             self._append_log(f"Đợt {len(self._farm_batch_profiles)} tab đã ổn định; bắt đầu đợt tiếp theo")
@@ -2388,7 +2530,25 @@ class Dashboard(QWidget):
         if not profiles:
             self._warning("Chưa có profile", "Hãy thêm ít nhất một tài khoản game trước khi khởi động.")
             return set()
-        dialog = FarmProfileDialog(self, profiles, self._farm_launch_profiles or self.farm_profiles)
+        # The live Chrome process roster is distinct from CDP attachment.
+        # Probe once when opening the picker so detached retained windows are
+        # disabled even if the normal background refresh has not run yet.
+        detected = None
+        detect = getattr(self.runner, "detect_running_managed_profiles", None)
+        if callable(detect):
+            with contextlib.suppress(Exception):
+                detected = detect()
+        if detected is not None:
+            self._detected_open_profiles = set(detected)
+            self._chrome_process_probe_ok = True
+        opened = {
+            profile.id for profile in profiles
+            if self._profile_chrome_is_open(profile.id)
+        }
+        dialog = FarmProfileDialog(
+            self, profiles, (self._farm_launch_profiles or self.farm_profiles) - opened,
+            disabled_profile_ids=opened,
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return set()
         selected = dialog.selected_profile_ids()
@@ -2600,6 +2760,10 @@ class Dashboard(QWidget):
             pass
         with contextlib.suppress(Exception):
             self._drain_resource_overview()
+        with contextlib.suppress(Exception):
+            self._drain_chrome_process_sample()
+            if now - getattr(self, "_chrome_process_last_sample", 0.0) >= 8.0:
+                self._start_chrome_process_sample()
         try:
             rows = getattr(self, "rows", {})
             last_resources = float(getattr(self, "_last_resources", 0.0))
@@ -2640,19 +2804,25 @@ class Dashboard(QWidget):
         if row.last_message != snap.message:
             row.status.setText(snap.message)
             row.last_message = snap.message
-        if row.last_state != snap.state:
+        if row.last_state != snap.state or getattr(row, "last_browser_running", None) != snap.browser_running:
             text, bg, fg = self._state(snap.state)
+            if snap.browser_running and not self.runner.has_open_session(snap.profile_id):
+                text, bg, fg = "Chưa kết nối", "#fef3c7", "#92400e"
             row.badge.setText(text)
             row.badge.setStyleSheet(
                 f"background:{bg};color:{fg};border-radius:{_ui_px(10)}px;"
                 f"padding:{_ui_px(3)}px {_ui_px(8)}px;"
             )
             self._set_profile_card_state(row, snap.state)
-            if snap.state == WorkerState.STARTING:
-                self._set_profile_open_control(row, opened=True)
-            elif snap.state == WorkerState.STOPPED:
-                self._set_profile_open_control(row, opened=False)
             row.last_state = snap.state
+            row.last_browser_running = snap.browser_running
+        opened = snap.browser_running or self._profile_chrome_is_open(snap.profile_id)
+        opening = (
+            snap.state == WorkerState.STARTING
+            or snap.profile_id in getattr(self, "_individually_opening_profiles", set())
+            or snap.profile_id in getattr(self, "_reattach_pending_profiles", set())
+        )
+        self._set_profile_open_control(row, opened=opened, opening=opening and not opened)
         if row.last_roster != snap.farm_roster:
             self._set_roster_tooltip(row.card, snap.farm_roster)
             self._set_roster_dots(row.roster, snap.farm_roster)
@@ -2714,7 +2884,12 @@ class Dashboard(QWidget):
             row = self.rows.get(item.profile_id)
             if row is None:
                 continue
-            self._set_profile_open_control(row, opened=item.opened)
+            opened = item.opened or self._profile_chrome_is_open(item.profile_id)
+            opening = (
+                item.profile_id in getattr(self, "_individually_opening_profiles", set())
+                or item.profile_id in getattr(self, "_reattach_pending_profiles", set())
+            )
+            self._set_profile_open_control(row, opened=opened, opening=opening and not opened)
             value = "—" if not item.opened else f"{item.ram_bytes/1_048_576:.0f} MB | {item.cpu_percent:.1f}%"
             if row.last_resource != value:
                 row.resource.setText(value)
@@ -2997,6 +3172,7 @@ class FarmProfileDialog(QDialog):
         heading: str = "Khởi động",
         description: str = "Chọn các profile muốn mở. Profile đang chạy sẽ được giữ nguyên.",
         confirm_text: str = "Khởi động",
+        disabled_profile_ids: set[str] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(window_title)
@@ -3004,6 +3180,7 @@ class FarmProfileDialog(QDialog):
         self.setMinimumWidth(_ui_px(470 if column_count == 1 else 760))
         self.resize(_ui_px(500 if column_count == 1 else 820), _ui_px(430 if column_count == 1 else 520))
         self._checks: dict[str, CheckBox] = {}
+        self._disabled_profile_ids = set(disabled_profile_ids or ())
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(_ui_px(22), _ui_px(20), _ui_px(22), _ui_px(18))
@@ -3027,10 +3204,15 @@ class FarmProfileDialog(QDialog):
         rows.setContentsMargins(_ui_px(4), _ui_px(4), _ui_px(4), _ui_px(4))
         rows.setSpacing(_ui_px(7))
         for index, profile in enumerate(profiles):
-            check = FullRowCheckBox(profile.name)
-            check.setChecked(profile.id in selected)
-            check.setToolTip(profile.id)
-            check.setStyleSheet(f"CheckBox {{ background:#f7faff; border:1px solid #dce6f3; border-radius:{_ui_px(9)}px; padding:{_ui_px(10)}px {_ui_px(12)}px; font-weight:600; }} CheckBox:hover {{ background:#eef6ff; border-color:#9ec5fe; }}")
+            is_open = profile.id in self._disabled_profile_ids
+            check = FullRowCheckBox(profile.name + ("  · Đã mở" if is_open else ""))
+            check.setChecked(not is_open and profile.id in selected)
+            check.setEnabled(not is_open)
+            check.setToolTip(
+                "Chrome đang chạy; profile này không thể mở thêm"
+                if is_open else profile.id
+            )
+            check.setStyleSheet(f"CheckBox {{ background:#f7faff; border:1px solid #dce6f3; border-radius:{_ui_px(9)}px; padding:{_ui_px(10)}px {_ui_px(12)}px; font-weight:600; }} CheckBox:hover {{ background:#eef6ff; border-color:#9ec5fe; }} CheckBox:disabled {{ background:#edf2f7; color:#8492a6; border-color:#e2e8f0; }}")
             check.stateChanged.connect(self._refresh_selection_toggle)
             self._checks[profile.id] = check
             rows.addWidget(check, index // column_count, index % column_count)
@@ -3058,21 +3240,23 @@ class FarmProfileDialog(QDialog):
         return 2 if profile_count > 10 else 1
 
     def _toggle_all_profiles(self) -> None:
-        select_all = not self._checks or not all(
-            check.isChecked() for check in self._checks.values()
-        )
-        for check in self._checks.values():
+        available = [check for check in self._checks.values() if check.isEnabled()]
+        select_all = bool(available) and not all(check.isChecked() for check in available)
+        for check in available:
             check.setChecked(select_all)
         self._refresh_selection_toggle()
 
     def _refresh_selection_toggle(self, *_args: object) -> None:
-        all_selected = bool(self._checks) and all(
-            check.isChecked() for check in self._checks.values()
-        )
+        available = [check for check in self._checks.values() if check.isEnabled()]
+        all_selected = bool(available) and all(check.isChecked() for check in available)
         self.selection_toggle.setText("Bỏ chọn" if all_selected else "Chọn tất cả")
+        self.selection_toggle.setEnabled(bool(available))
 
     def selected_profile_ids(self) -> set[str]:
-        return {profile_id for profile_id, check in self._checks.items() if check.isChecked()}
+        return {
+            profile_id for profile_id, check in self._checks.items()
+            if check.isEnabled() and check.isChecked()
+        }
 
 
 class AccountManagerDialog(QDialog):

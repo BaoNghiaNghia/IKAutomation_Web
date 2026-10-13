@@ -12,6 +12,7 @@ from typing import Any
 
 from ik_chrome_auto.actions import ActionCancelled, AutomationFunctions
 from ik_chrome_auto.browser import ChromeProfileSession, SyncSourceStatus
+from ik_chrome_auto import browser as browser_discovery
 from ik_chrome_auto.build_info import release_diagnostic_screenshot_directory
 from ik_chrome_auto.event_log import JsonLineLog, migrate_legacy_profile_log, profile_log_path
 from ik_chrome_auto.farm_vision import (
@@ -40,6 +41,7 @@ from ik_chrome_auto.models import (
     AttachmentState,
     CommandKind,
     ProfileConfig,
+    ProfileMode,
     SyncState,
     WorkerCommand,
     WorkerSnapshot,
@@ -274,6 +276,7 @@ class ProfileWorker:
         self._browser_running = False
         self._attachment_state = AttachmentState.DETACHED
         self._attach_requested = False
+        self._open_requested = False
         self._sync_source_enabled = False
         self._pump_failure_signature = ""
         self._pump_failure_count = 0
@@ -339,6 +342,13 @@ class ProfileWorker:
         self._mail_monitor_cancelled = threading.Event()
 
     def submit(self, command: WorkerCommand) -> None:
+        if command.kind == CommandKind.OPEN:
+            # Lock the whole enqueue window: rapid UI clicks or the fleet
+            # launcher cannot queue two OPENs while Chrome is starting.
+            with self._lifecycle_lock:
+                if self._open_requested or self._attachment_state == AttachmentState.ATTACHED:
+                    return
+                self._open_requested = True
         if command.kind in {CommandKind.ATTACH, CommandKind.REPAIR_ATTACH}:
             # Several startup/UI callers may ask for the same reattach while
             # the worker is still booting.  Queue exactly one effective CDP
@@ -1528,6 +1538,9 @@ class ProfileWorker:
                     )
                     self._publish(WorkerState.ERROR, str(error), detail)
             finally:
+                if command.kind == CommandKind.OPEN:
+                    with self._lifecycle_lock:
+                        self._open_requested = False
                 self.commands.task_done()
 
     def _ensure_session(self, *, navigate: bool) -> ChromeProfileSession:
@@ -5254,6 +5267,29 @@ class MultiProfileRunner:
         if profile is None:
             return False
         return ChromeProfileSession(self.config, profile).window_handle is not None
+
+    def detect_running_managed_profiles(self) -> set[str] | None:
+        """Read one cached Windows process snapshot, independent of CDP.
+
+        None means discovery failed and must not be interpreted as all Chrome
+        profiles being closed. No browser windows are launched or modified.
+        """
+        commands, status = browser_discovery._chrome_process_command_lines()
+        if status != "ok":
+            return None
+        active_directories = {
+            browser_discovery._normalized_windows_path(user_data_dir)
+            for command_line in commands.values()
+            if (user_data_dir := browser_discovery._command_line_user_data_dir(command_line))
+            is not None
+        }
+        return {
+            profile.id for profile in self.config.profiles
+            if profile.mode == ProfileMode.MANAGED
+            and profile.user_data_dir is not None
+            and browser_discovery._normalized_windows_path(profile.user_data_dir.resolve())
+            in active_directories
+        }
 
     def is_browser_running(self, profile_id: str) -> bool:
         worker = self.workers.get(profile_id)
