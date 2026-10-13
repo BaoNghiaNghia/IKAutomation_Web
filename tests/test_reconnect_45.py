@@ -277,6 +277,32 @@ def test_reconnect_health_counts_live_attached_not_stale_job_counters() -> None:
     assert dashboard.reconnect_health.value == "CDP 43/45"
 
 
+def test_45_capacity_health_shows_missing_unique_accounts() -> None:
+    class Status:
+        value = ""
+        tooltip = ""
+        def setText(self, value: str) -> None:
+            self.value = value
+        def setToolTip(self, value: str) -> None:
+            self.tooltip = value
+
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.config = SimpleNamespace(
+        profiles=[SimpleNamespace(id=f"p-{i}", enabled=True) for i in range(43)]
+    )
+    dashboard.runner = SimpleNamespace(
+        has_open_session=lambda pid: int(pid.split("-")[1]) < 36
+    )
+    dashboard.reconnect_health = Status()
+    dashboard._reattach_pending_profiles = set()
+
+    dashboard._update_reconnect_health()
+
+    assert dashboard.reconnect_health.value == "CDP 36/43 · mục tiêu 45"
+    assert "2 tài khoản duy nhất" in dashboard.reconnect_health.tooltip
+    assert "90%" in dashboard.reconnect_health.tooltip
+
+
 def test_failed_windows_process_discovery_never_launches_duplicate_chrome(
     tmp_path, monkeypatch
 ) -> None:

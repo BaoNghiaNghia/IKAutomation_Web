@@ -809,8 +809,22 @@ class Dashboard(QWidget):
             pending = len(getattr(self, "_reattach_pending_profiles", ()))
             ready = total - pending - len(getattr(self, "_reattach_failed_profiles", ()))
         pending = len(getattr(self, "_reattach_pending_profiles", ()))
-        health.setText(f"CDP {ready}/{total}" + (f" · {pending} chờ" if pending else ""))
-        health.setToolTip("Số profile đã kết nối CDP trong lượt kiểm tra gần nhất")
+        target = 45
+        missing_accounts = max(0, target - total)
+        health.setText(
+            f"CDP {ready}/{total}"
+            + (f" · {pending} chờ" if pending else "")
+            + (f" · mục tiêu {target}" if missing_accounts else "")
+        )
+        health.setToolTip(
+            "Trạng thái CDP hiện tại. Mục tiêu: 45 profile độc lập. "
+            + (
+                f"Cần thêm {missing_accounts} tài khoản duy nhất trong Quản lý tài khoản. "
+                if missing_accounts else "Đã cấu hình đủ 45 tài khoản. "
+            )
+            + "Chỉ mở Chrome mới khi Windows Commit Memory dưới ngưỡng bảo vệ 90%; "
+            "không dùng lại thư mục hoặc thông tin đăng nhập của account khác."
+        )
 
     def _begin_profile_reattach(self, *, profile_ids: set[str] | None = None) -> None:
         """Reconnect retained Chrome only; never relaunch or terminate a window."""
