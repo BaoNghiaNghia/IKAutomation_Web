@@ -201,6 +201,8 @@ class ProfileRow:
     badge: QLabel
     card: CardWidget
     open_button: PushButton | None = None
+    close_button: PushButton | None = None
+    profile_id: str = ""
     last_message: str = ""
     last_state: WorkerState | None = None
     last_roster: tuple[tuple[int, str], ...] = ()
@@ -288,6 +290,9 @@ class Dashboard(QWidget):
         self._auto_arrange_states: dict[str, WorkerState] = {}
         self._auto_arrange_deadline = 0.0
         self._individually_opening_profiles: set[str] = set()
+        self._closing_profiles: set[str] = set()
+        self._profile_columns = 1
+        self._profile_reflow_scheduled = False
         self._reattach_pending_profiles: set[str] = set()
         self._reattach_queue: deque[str] = deque()
         self._reattach_in_flight: set[str] = set()
@@ -418,7 +423,52 @@ class Dashboard(QWidget):
         ll.insertWidget(2, automation)
         ll.addStretch()
         right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(_ui_px(8)); body.addWidget(right,1)
-        progress = self._card(); pl = QVBoxLayout(progress); ph = QHBoxLayout(); ph.addWidget(StrongBodyLabel("Tiến trình profile")); ph.addStretch(); ph.addWidget(self.farm_launcher); self.open_badge = QLabel("0 đang mở"); self.open_badge.setStyleSheet(f"background:#e2edff;color:#2767bd;border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;"); ph.addWidget(self.open_badge); self.reconnect_health = QLabel("CDP: —"); ph.addWidget(self.reconnect_health); self.reconnect_retry = PushButton("Retry CDP"); self.reconnect_retry.setVisible(False); self.reconnect_retry.clicked.connect(self._retry_profile_reattach); ph.addWidget(self.reconnect_retry); pl.addLayout(ph); self.table_layout = QGridLayout(); self.table_layout.setSpacing(_ui_px(8)); self.table_layout.setColumnStretch(0, 1); self.table_layout.setColumnStretch(1, 1); content=QWidget(); content.setLayout(self.table_layout); self.scroll=QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setWidget(content); pl.addWidget(self.scroll,1); rl.addWidget(progress,1)
+        progress = self._card()
+        pl = QVBoxLayout(progress)
+        ph = QHBoxLayout()
+        ph.addWidget(StrongBodyLabel("Tiến trình profile"))
+        ph.addStretch()
+        self.open_badge = QLabel("0 đang mở")
+        self.open_badge.setStyleSheet(
+            f"background:#e2edff;color:#2767bd;border-radius:{_ui_px(10)}px;"
+            f"padding:{_ui_px(3)}px {_ui_px(8)}px;"
+        )
+        ph.addWidget(self.open_badge)
+        self.reconnect_health = QLabel("CDP: —")
+        ph.addWidget(self.reconnect_health)
+        pl.addLayout(ph)
+        actions = QHBoxLayout()
+        actions.setSpacing(_ui_px(7))
+        actions.addWidget(self.farm_launcher, 1)
+        self.close_all_button = PushButton(FIF.CLOSE, "Đóng tất cả")
+        self.close_all_button.setFixedHeight(self._responsive_control_height)
+        self.close_all_button.setToolTip("Đóng lần lượt các profile đang kết nối, sau khi xác nhận")
+        self.close_all_button.setStyleSheet(
+            "QPushButton { color:#b91c1c; border:1px solid #fecaca; background:#fff7f7; }"
+            "QPushButton:hover { background:#fee2e2; border-color:#f87171; }"
+            "QPushButton:disabled { color:#94a3b8; border-color:#e2e8f0; background:#f8fafc; }"
+        )
+        self.close_all_button.setEnabled(False)
+        self.close_all_button.clicked.connect(self._close_all_profiles)
+        actions.addWidget(self.close_all_button)
+        self.reconnect_retry = PushButton("Retry CDP")
+        self.reconnect_retry.setVisible(False)
+        self.reconnect_retry.clicked.connect(self._retry_profile_reattach)
+        actions.addWidget(self.reconnect_retry)
+        pl.addLayout(actions)
+        self.table_layout = QGridLayout()
+        self.table_layout.setSpacing(_ui_px(8))
+        self.table_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.table_layout.setColumnStretch(0, 1)
+        content = QWidget()
+        content.setLayout(self.table_layout)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setWidget(content)
+        self.scroll.viewport().installEventFilter(self)
+        pl.addWidget(self.scroll, 1)
+        rl.addWidget(progress, 1)
         foot=QHBoxLayout(); coords=self._card(); cl=QVBoxLayout(coords); ch=QHBoxLayout(); ch.addWidget(StrongBodyLabel("Lấy tọa độ")); ch.addStretch(); bjson=PushButton("JSON"); bjson.clicked.connect(self._copy_json); bxy=PushButton("Copy x,y"); bxy.clicked.connect(self._copy_xy); ch.addWidget(bjson); ch.addWidget(bxy); cl.addLayout(ch); self.coordinate= self._muted("Chưa đo tọa độ"); cl.addWidget(self.coordinate); foot.addWidget(coords,2); logs=self._card(); logl=QVBoxLayout(logs); logl.addWidget(StrongBodyLabel("Nhật ký gần nhất")); self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setFixedHeight(_ui_px(86)); logl.addWidget(self.log); foot.addWidget(logs,3); coords.hide(); logs.hide(); rl.addLayout(foot)
         self._apply_responsive_style()
 
@@ -532,6 +582,8 @@ class Dashboard(QWidget):
             value.setStyleSheet(f"font-size:{self._responsive_value_font_pt}pt;font-weight:700;")
         self._manage_button.setFixedHeight(self._responsive_control_height)
         self.farm_launcher.setFixedHeight(self._responsive_control_height)
+        if hasattr(self, "close_all_button"):
+            self.close_all_button.setFixedHeight(self._responsive_control_height)
         self.farm_all_button.setFixedHeight(self._responsive_control_height)
         self.monitor_button.setFixedHeight(self._responsive_control_height)
         for button in self._responsive_icon_buttons:
@@ -543,6 +595,33 @@ class Dashboard(QWidget):
     def _on_screen_changed(self, screen) -> None:
         if screen is not None:
             self._apply_responsive_geometry(screen)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        scroll = getattr(self, "scroll", None)
+        if (
+            scroll is not None and watched is scroll.viewport()
+            and event.type() == QEvent.Type.Resize
+            and not getattr(self, "_profile_reflow_scheduled", False)
+        ):
+            self._profile_reflow_scheduled = True
+            QTimer.singleShot(70, self._layout_profile_cards)
+        return super().eventFilter(watched, event)
+
+    def _layout_profile_cards(self) -> None:
+        """Reflow cards into one column when the content pane is narrow."""
+        self._profile_reflow_scheduled = False
+        scroll = getattr(self, "scroll", None)
+        if scroll is None:
+            return
+        columns = 2 if scroll.viewport().width() >= _ui_px(830) else 1
+        if columns == getattr(self, "_profile_columns", 1) and self.table_layout.count() == len(self.rows):
+            return
+        self._profile_columns = columns
+        for col in range(2):
+            self.table_layout.setColumnStretch(col, 1 if col < columns else 0)
+        for index, row in enumerate(self.rows.values()):
+            self.table_layout.removeWidget(row.card)
+            self.table_layout.addWidget(row.card, index // columns, index % columns)
 
     @staticmethod
     def _card() -> CardWidget: return CardWidget()
@@ -620,7 +699,10 @@ class Dashboard(QWidget):
         layout = QVBoxLayout(card)
         top = QHBoxLayout()
         title = StrongBodyLabel(profile.name)
-        top.addWidget(title)
+        title.setMinimumWidth(0)
+        title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        title.setToolTip(profile.name)
+        top.addWidget(title, 1)
         self._username_labels[profile.id] = (title, profile.name, account_number)
         top.addStretch()
         badge = QLabel("Đã dừng")
@@ -635,6 +717,18 @@ class Dashboard(QWidget):
             lambda _checked=False, profile_id=profile.id: self._open_profile(profile_id)
         )
         top.addWidget(open_button)
+        close_button = self._compact_profile_button(PushButton(FIF.CLOSE, "Đóng"))
+        close_button.setToolTip("Đóng cửa sổ Chrome đang kết nối của profile này")
+        close_button.setStyleSheet(
+            "QPushButton { color:#b91c1c; border:1px solid #fecaca; background:#fff7f7; }"
+            "QPushButton:hover { background:#fee2e2; border-color:#f87171; }"
+            "QPushButton:disabled { color:#94a3b8; border-color:#e2e8f0; background:#f8fafc; }"
+        )
+        close_button.setEnabled(False)
+        close_button.clicked.connect(
+            lambda _checked=False, profile_id=profile.id: self._close_profile(profile_id)
+        )
+        top.addWidget(close_button)
         layout.addLayout(top)
         status = self._muted("Đã dừng")
         roster = QLabel()
@@ -651,13 +745,14 @@ class Dashboard(QWidget):
         details.addWidget(resource)
         layout.addLayout(details)
         index = len(self.rows)
-        self.table_layout.addWidget(card, index // 2, index % 2)
+        columns = getattr(self, "_profile_columns", 1)
+        self.table_layout.addWidget(card, index // columns, index % columns)
         self.rows[profile.id] = ProfileRow(
-            status, roster, resource, badge, card, open_button
+            status, roster, resource, badge, card, open_button, close_button, profile.id
         )
 
     def _finalize_profile_rows(self) -> None:
-        self.table_layout.setRowStretch((len(self.rows) + 1) // 2, 1)
+        self._layout_profile_cards()
         self._preload_usernames_async()
 
     def _draw_rows(self) -> None:
@@ -777,6 +872,104 @@ class Dashboard(QWidget):
             self._error("Không mở được profile", str(error))
             return
         self._append_log(f"Đang mở riêng profile {profile_id}")
+
+    def _close_profile(self, profile_id: str) -> None:
+        """Close only this attached Chrome session; never kill an unrelated PID."""
+        row = self.rows.get(profile_id)
+        if row is None:
+            return
+        if profile_id in getattr(self, "_closing_profiles", set()):
+            return
+        if getattr(self, "_farm_launcher_phase", "launch") in {"quiescing", "stopping", "opening"}:
+            self._warning("Đang chuyển trạng thái", "Chờ hàng đợi đang mở/đóng profile hoàn tất.")
+            return
+        if not self.runner.has_open_session(profile_id):
+            if self._profile_chrome_is_open(profile_id):
+                self._warning(
+                    "Chưa kết nối Chrome",
+                    "Profile vẫn đang mở nhưng chưa có CDP. Hãy dùng Retry CDP để kết nối trước khi đóng an toàn.",
+                )
+            return
+        if self.runner.sync_enabled:
+            self._set_sync_disabled_ui()
+            self._append_log("Đã tắt đồng bộ trước khi đóng profile")
+        # STOP clears the worker's Farm state and shuts down its Chrome
+        # session. Do not stop farming/monitoring on other profiles.
+        self._closing_profiles.add(profile_id)
+        self._set_profile_open_control(row, opened=True)
+        try:
+            self.runner.submit(profile_id, CommandKind.STOP)
+        except Exception as error:
+            self._closing_profiles.discard(profile_id)
+            self._set_profile_open_control(row, opened=True)
+            self._error("Không đóng được profile", str(error))
+            return
+        self.farm_profiles.discard(profile_id)
+        if hasattr(self, "_monitor_queue"):
+            self._monitor_queue = deque(pid for pid in self._monitor_queue if pid != profile_id)
+        if hasattr(self, "_monitor_batch_pending"):
+            self._monitor_batch_pending = deque(
+                pid for pid in self._monitor_batch_pending if pid != profile_id
+            )
+        self._farm_launch_profiles.discard(profile_id)
+        self._farm_open_queue = deque(
+            pid for pid in self._farm_open_queue if pid != profile_id
+        )
+        self._log_monitor_scheduler("profile_close_requested", profile_id=profile_id)
+        self._append_log(f"Đang đóng riêng profile {profile_id}")
+
+    def _refresh_close_all_control(self) -> None:
+        button = getattr(self, "close_all_button", None)
+        if button is None:
+            return
+        attached = len(self._opened_profile_ids())
+        phase = getattr(self, "_farm_launcher_phase", "launch")
+        button.setEnabled(
+            attached > 0 and phase in {"launch", "ready"}
+            and not getattr(self, "_closing_profiles", set())
+        )
+        button.setText("Đóng tất cả" if phase not in {"quiescing", "stopping"} else "Đang đóng…")
+        button.setToolTip(
+            f"Đóng tuần tự {attached} profile đã kết nối CDP; profile chưa kết nối sẽ được giữ nguyên."
+        )
+
+    def _close_all_profiles(self) -> None:
+        """Expose the existing serial, Farm-safe close pipeline independently of Start."""
+        if getattr(self, "_farm_launcher_phase", "launch") not in {"launch", "ready"}:
+            return
+        attached = self._opened_profile_ids()
+        if not attached:
+            self._warning(
+                "Không có kết nối CDP",
+                "Chrome có thể vẫn đang chạy; hãy Retry CDP trước khi đóng từ tool.",
+            )
+            return
+        detached = sum(
+            self._profile_chrome_is_open(profile.id) and profile.id not in attached
+            for profile in self.config.profiles
+        )
+        explanation = (
+            f"Đóng lần lượt {len(attached)} profile đang kết nối? "
+            "AutoFarm, Giám sát và Đồng bộ sẽ được dừng trước khi đóng. "
+            "Các profile và thông tin đăng nhập sẽ được giữ nguyên."
+        )
+        if detached:
+            explanation += (
+                f"\n\nCòn {detached} Chrome chưa kết nối CDP; "
+                "các cửa sổ này KHÔNG bị tắt. Hãy Retry CDP sau đó."
+            )
+        if QMessageBox.question(
+            self, "Xác nhận đóng profile", explanation,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        # The normal launcher starts in 'launch' even if 36 retained Chrome
+        # windows were connected at startup. Switch to the existing close
+        # branch without ever triggering the Open picker.
+        self._farm_launcher_phase = "ready"
+        self._farm_launcher_action()
+        self._refresh_close_all_control()
 
     def _retry_profile_reattach(self) -> None:
         """Retry only failed CDP sessions; never disturb healthy followers."""
@@ -1017,6 +1210,8 @@ class Dashboard(QWidget):
         Chrome session is ready, it must behave exactly like a tab opened by
         the bulk launcher: it joins live Sync, AutoFarms, and mail monitoring.
         """
+        if profile_id in getattr(self, "_closing_profiles", set()):
+            return
         if getattr(self.runner, "sync_enabled", False):
             master_id = getattr(self.runner, "sync_master_id", None)
             if master_id and profile_id != master_id:
@@ -1128,10 +1323,10 @@ class Dashboard(QWidget):
             self._set_profile_open_control(
                 row, opened=opened, opening=opening and not opened
             )
+        self._refresh_close_all_control()
 
-    @staticmethod
     def _set_profile_open_control(
-        row: ProfileRow, *, opened: bool, opening: bool = False
+        self, row: ProfileRow, *, opened: bool, opening: bool = False
     ) -> None:
         """Keep Open visible but disabled during launch or while Chrome is open."""
         if row.open_button is None:
@@ -1145,6 +1340,20 @@ class Dashboard(QWidget):
                 "Profile đã mở; không thể mở thêm cửa sổ trùng"
                 if opened else "Đang khởi động hoặc kết nối Chrome"
                 if opening else "Mở riêng Chrome của profile này"
+            )
+        close = getattr(row, "close_button", None)
+        if close is not None:
+            profile_id = getattr(row, "profile_id", "")
+            closing = profile_id in getattr(self, "_closing_profiles", set())
+            attached = bool(profile_id and self.runner.has_open_session(profile_id))
+            busy = getattr(self, "_farm_launcher_phase", "launch") in {"quiescing", "stopping"}
+            close.setEnabled(attached and not closing and not busy)
+            close.setText("Đang đóng…" if closing else "Đóng")
+            close.setToolTip(
+                "Đang chờ profile đóng; không gửi lệnh đóng trùng"
+                if closing else "Đóng riêng Chrome này, không ảnh hưởng những profile khác"
+                if attached else "Profile còn mở nhưng chưa kết nối CDP; dùng Retry CDP trước khi đóng"
+                if opened else "Profile hiện chưa mở"
             )
 
     @staticmethod
@@ -2638,13 +2847,15 @@ class Dashboard(QWidget):
         self.farm_launcher.setEnabled(True)
         self.farm_launcher.setText("Khởi động")
         self._set_labeled_action_icon(self.farm_launcher, FIF.PLAY)
+        self._closing_profiles.clear()
         self._farm_all_running = False
         self.farm_all_button.setText("AutoFarms")
         self._set_labeled_action_icon(self.farm_all_button, FIF.LEAF, "#64748b")
         self._set_labeled_action_style(self.farm_all_button)
         self.farm_all_button.setEnabled(False)
         self._set_farm_launcher_launch_style()
-        self._append_log("Đã đóng toàn bộ tab profile")
+        self._append_log(f"Đã xử lý đóng {closed_total} profile kết nối CDP")
+        self._refresh_close_all_control()
 
     def _set_farm_launcher_launch_style(self) -> None:
         self._set_labeled_action_style(self.farm_launcher, f"QPushButton {{ background:#2563eb; border:1px solid #2563eb; border-radius:{_ui_px(8)}px; color:#ffffff; font-weight:600; }} QPushButton:hover {{ background:#1d4ed8; border-color:#1d4ed8; }} QPushButton:disabled {{ background:#93c5fd; border-color:#93c5fd; color:#eff6ff; }}")
@@ -2800,6 +3011,15 @@ class Dashboard(QWidget):
                 self._schedule_next_tab_close(time.monotonic())
             row=self.rows.get(snap.profile_id)
             if row:
+                if snap.profile_id in getattr(self, "_closing_profiles", set()):
+                    if snap.state == WorkerState.ERROR or (
+                        snap.state == WorkerState.STOPPED
+                        and not self.runner.has_open_session(snap.profile_id)
+                    ):
+                        self._closing_profiles.discard(snap.profile_id)
+                        if snap.state == WorkerState.STOPPED:
+                            self._detected_open_profiles.discard(snap.profile_id)
+                        self._refresh_close_all_control()
                 self._apply_profile_snapshot(row, snap)
                 if snap.state == WorkerState.READY and self.runner.has_open_session(snap.profile_id):
                     if snap.profile_id in self._individually_opening_profiles:
@@ -3006,6 +3226,7 @@ class Dashboard(QWidget):
                 and overview.opened_profiles > 0
             )
         )
+        self._refresh_close_all_control()
         for item in overview.profiles:
             row = self.rows.get(item.profile_id)
             if row is None:

@@ -206,6 +206,153 @@ def test_detected_chrome_disables_open_even_without_cdp() -> None:
     assert button.text == "Đã mở"
 
 
+def test_profile_grid_reflows_to_one_column_on_narrow_window() -> None:
+    class FakeGrid:
+        def __init__(self) -> None:
+            self.positions = {}
+
+        def count(self) -> int:
+            return len(self.positions)
+
+        def setColumnStretch(self, _col: int, _factor: int) -> None:
+            pass
+
+        def removeWidget(self, card) -> None:
+            self.positions.pop(card, None)
+
+        def addWidget(self, card, row: int, col: int) -> None:
+            self.positions[card] = (row, col)
+
+    dashboard = Dashboard.__new__(Dashboard)
+    width = [720]
+    dashboard.scroll = SimpleNamespace(viewport=lambda: SimpleNamespace(width=lambda: width[0]))
+    dashboard.table_layout = FakeGrid()
+    dashboard.rows = {
+        name: SimpleNamespace(card=name)
+        for name in ("one", "two", "three", "four")
+    }
+    dashboard._profile_columns = 1
+    dashboard._profile_reflow_scheduled = True
+
+    dashboard._layout_profile_cards()
+    assert dashboard._profile_columns == 2
+    assert dashboard.table_layout.positions["two"] == (0, 1)
+    assert dashboard.table_layout.positions["three"] == (1, 0)
+
+    width[0] = 450
+    dashboard._layout_profile_cards()
+    assert dashboard._profile_columns == 1
+    assert dashboard.table_layout.positions["two"] == (1, 0)
+    assert dashboard.table_layout.positions["four"] == (3, 0)
+
+
+def test_profile_controls_show_close_only_for_attached_chrome() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard._closing_profiles = set()
+    dashboard._farm_launcher_phase = "launch"
+    dashboard.runner = SimpleNamespace(has_open_session=lambda pid: pid == "connected")
+    opened = FakeProfileOpenButton()
+    close = FakeProfileOpenButton()
+    row = SimpleNamespace(open_button=opened, close_button=close, profile_id="connected")
+
+    dashboard._set_profile_open_control(row, opened=True)
+    assert not opened.enabled
+    assert close.enabled
+    assert close.text == "Đóng"
+
+    row.profile_id = "detached"
+    dashboard._set_profile_open_control(row, opened=True)
+    assert not opened.enabled
+    assert not close.enabled
+    assert "Retry CDP" in close.tooltip
+
+
+def test_close_one_profile_submits_only_one_stop_and_disables_repeat() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    commands = []
+    button = FakeProfileOpenButton()
+    close = FakeProfileOpenButton()
+    dashboard.rows = {
+        "one": SimpleNamespace(open_button=button, close_button=close, profile_id="one")
+    }
+    dashboard.runner = SimpleNamespace(
+        has_open_session=lambda pid: pid in {"one", "two"},
+        sync_enabled=False,
+        submit=lambda pid, kind: commands.append((pid, kind)),
+    )
+    dashboard._farm_launcher_phase = "launch"
+    dashboard._closing_profiles = set()
+    dashboard.farm_profiles = {"one", "two"}
+    dashboard._farm_launch_profiles = {"one", "two"}
+    dashboard._farm_open_queue = deque()
+    dashboard._monitor_queue = deque(["one", "two"])
+    dashboard._monitor_batch_pending = deque(["one", "two"])
+    dashboard._append_log = lambda _msg: None
+    dashboard._log_monitor_scheduler = lambda *_args, **_kwargs: None
+    dashboard._close_profile("one")
+    dashboard._close_profile("one")
+
+    assert commands == [("one", CommandKind.STOP)]
+    assert not close.enabled
+    assert close.text == "Đang đóng…"
+    assert dashboard.farm_profiles == {"two"}
+    assert list(dashboard._monitor_queue) == ["two"]
+
+
+def test_close_detached_profile_never_pretends_to_terminate_chrome() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.rows = {"one": SimpleNamespace(open_button=FakeProfileOpenButton())}
+    dashboard.runner = SimpleNamespace(
+        has_open_session=lambda _pid: False,
+        is_browser_running=lambda _pid: True,
+        submit=lambda *_args: (_ for _ in ()).throw(AssertionError("must not STOP")),
+    )
+    dashboard._farm_launcher_phase = "launch"
+    dashboard._closing_profiles = set()
+    warnings = []
+    dashboard._warning = lambda title, description: warnings.append((title, description))
+
+    dashboard._close_profile("one")
+
+    assert len(warnings) == 1
+    assert "Retry CDP" in warnings[0][1]
+
+
+def test_close_all_retained_profiles_uses_existing_serial_shutdown_after_confirmation(monkeypatch) -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.config = SimpleNamespace(profiles=[SimpleNamespace(id="one"), SimpleNamespace(id="two")])
+    dashboard.runner = SimpleNamespace(
+        has_open_session=lambda pid: pid in {"one", "two"},
+        is_browser_running=lambda _pid: False,
+    )
+    dashboard._farm_launcher_phase = "launch"
+    calls = []
+    dashboard._farm_launcher_action = lambda: calls.append(dashboard._farm_launcher_phase)
+    dashboard._refresh_close_all_control = lambda: None
+    monkeypatch.setattr(
+        dashboard_module.QMessageBox, "question",
+        lambda *_args: dashboard_module.QMessageBox.StandardButton.Yes,
+    )
+
+    dashboard._close_all_profiles()
+
+    assert calls == ["ready"]
+
+
+def test_close_all_cancel_never_sends_stop(monkeypatch) -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.config = SimpleNamespace(profiles=[SimpleNamespace(id="one")])
+    dashboard.runner = SimpleNamespace(has_open_session=lambda _pid: True)
+    dashboard._farm_launcher_phase = "launch"
+    dashboard._farm_launcher_action = lambda: (_ for _ in ()).throw(AssertionError("must not close"))
+    monkeypatch.setattr(
+        dashboard_module.QMessageBox, "question",
+        lambda *_args: dashboard_module.QMessageBox.StandardButton.No,
+    )
+    dashboard._close_all_profiles()
+    assert dashboard._farm_launcher_phase == "launch"
+
+
 def test_profile_reattach_disables_launch_until_every_profile_settles() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     dashboard.runner = SimpleNamespace(
