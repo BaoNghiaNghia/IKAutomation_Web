@@ -459,21 +459,14 @@ class ProfileWorker:
             attached = self._attachment_state == AttachmentState.ATTACHED
         if not attached:
             return False
-        session = self.session
-        if session is None:
-            return False
-        try:
-            alive = bool(session.is_alive())
-        except Exception:
-            alive = False
-        if not alive:
-            # The lifecycle can lag one idle worker pulse behind a native
-            # Chrome close.  Never allow that short interval to satisfy the
-            # Sync readiness barrier.
-            self._set_lifecycle(
-                browser_running=False, attachment=AttachmentState.DETACHED
-            )
-        return alive
+        # Playwright's synchronous objects belong to the per-profile worker
+        # thread. Calling page.is_closed() from the Qt/UI thread (and from
+        # other workers) can deadlock or violate Playwright's greenlet ownership.
+        # The worker polls liveness and updates this cached lifecycle flag.
+        # No cross-thread Playwright invocation is permitted in this accessor.
+        return getattr(self, "session", None) is not None and not bool(
+            getattr(self.session, "_externally_closed", False)
+        )
 
     def attachment_state(self) -> AttachmentState:
         if not hasattr(self, "_lifecycle_lock"):

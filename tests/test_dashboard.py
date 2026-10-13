@@ -758,6 +758,33 @@ def test_profile_username_preview_is_limited_to_nine_characters() -> None:
     assert Dashboard._mask_username("nam139abc") == "nam139***"
 
 
+def test_startup_profile_rows_are_batched_before_cdp_reattach(monkeypatch) -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    profiles = [SimpleNamespace(id=f"account-{n}") for n in range(11)]
+    dashboard.config = SimpleNamespace(profiles=profiles, source=Path("config.json"))
+    dashboard._initial_profile_row_cursor = 0
+    created: list[int] = []
+    finalized: list[bool] = []
+    attached: list[bool] = []
+    callbacks: list[object] = []
+    dashboard._add_profile_row = lambda profile, number: created.append(number)
+    dashboard._finalize_profile_rows = lambda: finalized.append(True)
+    dashboard._begin_profile_reattach = lambda: attached.append(True)
+    monkeypatch.setattr(dashboard_module.QTimer, "singleShot", lambda ms, fn: callbacks.append(fn))
+    monkeypatch.setattr(dashboard_module, "record", lambda *_args, **_kwargs: None)
+
+    dashboard._append_initial_profile_row_batch()
+    assert created == [1, 2, 3, 4]
+    assert not finalized and not attached
+    callbacks.pop(0)()
+    assert created == list(range(1, 9))
+    callbacks.pop(0)()
+    assert created == list(range(1, 12))
+    assert finalized and not attached
+    callbacks.pop(0)()
+    assert attached == [True]
+
+
 def test_farm_profile_picker_uses_two_columns_only_above_ten_profiles() -> None:
     assert FarmProfileDialog._column_count(1) == 1
     assert FarmProfileDialog._column_count(10) == 1

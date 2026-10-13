@@ -308,13 +308,16 @@ class Dashboard(QWidget):
         # masked usernames in the background (DPAPI per row blocks UI).
         self._username_cache: dict[str, str] = {}
         self._username_labels: dict[str, tuple[QLabel, str, int]] = {}
+        # UI construction must finish before CDP reconnect work begins:
+        # spawning worker threads from the widget constructor prevents the
+        # first Qt paint on machines with 40+ retained Chrome profiles.
+        record(diagnostic_log(self.config.source), "dashboard_startup_phase", phase="build")
         self._build()
-        self._draw_rows()
-        # Chrome is deliberately detached from IK Auto during an update.  On
-        # the next tool launch, discover and attach those existing windows
-        # instead of asking the user to reopen every profile.
-        self._begin_profile_reattach()
-        self._load_telegram_notifier()
+        record(diagnostic_log(self.config.source), "dashboard_startup_phase", phase="shell_ready")
+        # Paint the visible shell first. Populate the profile grid in short
+        # Qt batches so 45 qfluent cards never block the first window paint.
+        QTimer.singleShot(100, self._start_initial_profile_rows)
+        QTimer.singleShot(200, self._load_telegram_notifier)
         self._resource_monitor = threading.Thread(
             target=self._monitor_resources,
             name="resource-alert-monitor",
@@ -593,60 +596,97 @@ class Dashboard(QWidget):
         """Store the profile ID as combo user data, not as a Fluent icon."""
         combo.addItem(label, userData=profile_id)
 
-    def _draw_rows(self) -> None:
+    def _reset_profile_rows(self) -> None:
         while self.table_layout.count():
-            item=self.table_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
-        self.rows.clear(); self.master.clear()
-        with contextlib.suppress(Exception):
-            self._username_labels.clear()
-        if not isinstance(getattr(self, "_username_labels", None), dict):
-            with contextlib.suppress(Exception):
-                self._username_labels = {}
+            item = self.table_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.rows.clear()
+        self.master.clear()
+        self._username_labels.clear()
         for profile in self.config.profiles:
-            # Fast initial paint: use profile name, refresh masked usernames
-            # in the background (DPAPI per row blocks the UI for 45 accs).
             self._add_master_profile_option(
-                self.master,
-                self._mask_username(profile.name),
-                profile.id,
+                self.master, self._mask_username(profile.name), profile.id
             )
-        for account_number, profile in enumerate(self.config.profiles, start=1):
-            card = self._card()
-            self._set_roster_tooltip(card, ())
-            layout = QVBoxLayout(card)
-            top = QHBoxLayout()
-            title = StrongBodyLabel(profile.name)
-            top.addWidget(title)
-            self._username_labels[profile.id] = (title, profile.name, account_number)
-            top.addStretch()
-            badge = QLabel("Đã dừng")
-            badge.setStyleSheet(f"background:#f1f5f9;color:#475569;border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;")
-            top.addWidget(badge)
-            open_button = self._compact_profile_button(PushButton("Mở"))
-            open_button.setToolTip("Mở riêng Chrome của profile này")
-            open_button.clicked.connect(lambda _checked=False, profile_id=profile.id: self._open_profile(profile_id))
-            top.addWidget(open_button)
-            layout.addLayout(top)
-            status = self._muted("Đã dừng")
-            roster = QLabel()
-            roster.setTextFormat(Qt.TextFormat.RichText)
-            roster.setVisible(False)
-            resource = self._muted("—")
-            details = QHBoxLayout()
-            status_column = QVBoxLayout()
-            status_column.setContentsMargins(0, 0, 0, 0)
-            status_column.setSpacing(_ui_px(1))
-            status_column.addWidget(status)
-            status_column.addWidget(roster)
-            details.addLayout(status_column, 1)
-            details.addWidget(resource)
-            layout.addLayout(details)
-            index = len(self.rows)
-            self.table_layout.addWidget(card, index // 2, index % 2)
-            self.rows[profile.id] = ProfileRow(status, roster, resource, badge, card, open_button)
+
+    def _add_profile_row(self, profile: ProfileConfig, account_number: int) -> None:
+        card = self._card()
+        self._set_roster_tooltip(card, ())
+        layout = QVBoxLayout(card)
+        top = QHBoxLayout()
+        title = StrongBodyLabel(profile.name)
+        top.addWidget(title)
+        self._username_labels[profile.id] = (title, profile.name, account_number)
+        top.addStretch()
+        badge = QLabel("Đã dừng")
+        badge.setStyleSheet(
+            f"background:#f1f5f9;color:#475569;border-radius:{_ui_px(10)}px;"
+            f"padding:{_ui_px(3)}px {_ui_px(8)}px;"
+        )
+        top.addWidget(badge)
+        open_button = self._compact_profile_button(PushButton("Mở"))
+        open_button.setToolTip("Mở riêng Chrome của profile này")
+        open_button.clicked.connect(
+            lambda _checked=False, profile_id=profile.id: self._open_profile(profile_id)
+        )
+        top.addWidget(open_button)
+        layout.addLayout(top)
+        status = self._muted("Đã dừng")
+        roster = QLabel()
+        roster.setTextFormat(Qt.TextFormat.RichText)
+        roster.setVisible(False)
+        resource = self._muted("—")
+        details = QHBoxLayout()
+        status_column = QVBoxLayout()
+        status_column.setContentsMargins(0, 0, 0, 0)
+        status_column.setSpacing(_ui_px(1))
+        status_column.addWidget(status)
+        status_column.addWidget(roster)
+        details.addLayout(status_column, 1)
+        details.addWidget(resource)
+        layout.addLayout(details)
+        index = len(self.rows)
+        self.table_layout.addWidget(card, index // 2, index % 2)
+        self.rows[profile.id] = ProfileRow(
+            status, roster, resource, badge, card, open_button
+        )
+
+    def _finalize_profile_rows(self) -> None:
         self.table_layout.setRowStretch((len(self.rows) + 1) // 2, 1)
         self._preload_usernames_async()
+
+    def _draw_rows(self) -> None:
+        """Recreate all profile cards after the user edits account settings."""
+        self._reset_profile_rows()
+        for account_number, profile in enumerate(self.config.profiles, start=1):
+            self._add_profile_row(profile, account_number)
+        self._finalize_profile_rows()
+
+    def _start_initial_profile_rows(self) -> None:
+        """Build just four cards per Qt tick, then reattach retained Chrome."""
+        record(diagnostic_log(self.config.source), "dashboard_startup_phase", phase="rows_start")
+        self._reset_profile_rows()
+        self._initial_profile_row_cursor = 0
+        QTimer.singleShot(0, self._append_initial_profile_row_batch)
+
+    def _append_initial_profile_row_batch(self) -> None:
+        profiles = self.config.profiles
+        first = self._initial_profile_row_cursor
+        last = min(len(profiles), first + 4)
+        for index in range(first, last):
+            self._add_profile_row(profiles[index], index + 1)
+        self._initial_profile_row_cursor = last
+        if last < len(profiles):
+            QTimer.singleShot(30, self._append_initial_profile_row_batch)
+            return
+        self._finalize_profile_rows()
+        record(
+            diagnostic_log(self.config.source), "dashboard_startup_phase",
+            phase="rows_ready", count=len(profiles)
+        )
+        # Never relaunch Chrome: reconnect only, after Qt has had a chance to
+        # paint all profile cards and process user input.
+        QTimer.singleShot(150, self._begin_profile_reattach)
 
     def _preload_usernames_async(self) -> None:
         """Load DPAPI usernames off the UI thread, then refresh labels once."""
@@ -3524,14 +3564,18 @@ def run_dashboard(config_path:Path)->None:
         app.setProperty("ikAutoCompactUiApplied", True)
     app.setApplicationName("IK Auto")
     app.setWindowIcon(QIcon(str(Path(__file__).with_name("assets") / "ik_auto.ico")))
+    record(diagnostic_log(config_path), "dashboard_startup_phase", phase="construct")
     dashboard = Dashboard(config_path)
+    record(diagnostic_log(config_path), "dashboard_startup_phase", phase="constructed")
     trace = _UiActionTrace(app, diagnostic_log(config_path))
     app.installEventFilter(trace)
     dashboard.show()
+    record(diagnostic_log(config_path), "dashboard_startup_phase", phase="shown")
     if dashboard.windowHandle() is not None:
         dashboard.windowHandle().screenChanged.connect(dashboard._on_screen_changed)
     QTimer.singleShot(500, minimize_launch_console)
     try:
+        record(diagnostic_log(config_path), "dashboard_startup_phase", phase="event_loop_enter")
         app.exec()
     finally:
         app.removeEventFilter(trace)

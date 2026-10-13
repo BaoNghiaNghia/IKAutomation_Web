@@ -64,6 +64,21 @@ def test_dead_cdp_session_is_not_treated_as_an_open_profile() -> None:
     assert runner.has_open_session("follower-open") is False
 
 
+def test_attached_state_never_calls_playwright_from_dashboard_thread() -> None:
+    worker = ProfileWorker.__new__(ProfileWorker)
+    worker._lifecycle_lock = threading.Lock()
+    worker._attachment_state = AttachmentState.ATTACHED
+    worker.session = SimpleNamespace(
+        _externally_closed=False,
+        is_alive=lambda: (_ for _ in ()).throw(AssertionError(
+            "Playwright must only be accessed on its worker thread"
+        )),
+    )
+    assert worker.is_attached() is True
+    worker.session._externally_closed = True
+    assert worker.is_attached() is False
+
+
 def test_browser_running_is_distinct_from_tool_attachment() -> None:
     worker = ProfileWorker.__new__(ProfileWorker)
     worker.session = None
