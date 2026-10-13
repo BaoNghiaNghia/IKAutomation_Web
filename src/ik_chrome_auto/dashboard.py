@@ -253,6 +253,10 @@ class Dashboard(QWidget):
         self._farm_arrange_columns = self.config.browser.windows_per_row
         self._farm_resource_pause_started = 0.0
         self._farm_resource_pause_reason: str | None = None
+        self._farm_commit_wait_alerted = False
+        self._farm_commit_wait_last_log_at = 0.0
+        self._farm_commit_snapshot_percent: float | None = None
+        self._farm_commit_snapshot_available_gib: float | None = None
         self._latest_profile_cpu_percent = 0.0
         self._farm_close_queue: deque[str] = deque()
         self._farm_close_in_flight: str | None = None
@@ -308,6 +312,7 @@ class Dashboard(QWidget):
         # masked usernames in the background (DPAPI per row blocks UI).
         self._username_cache: dict[str, str] = {}
         self._username_labels: dict[str, tuple[QLabel, str, int]] = {}
+        self._username_results: queue.Queue[dict[str, str]] = queue.Queue(maxsize=2)
         # UI construction must finish before CDP reconnect work begins:
         # spawning worker threads from the widget constructor prevents the
         # first Qt paint on machines with 40+ retained Chrome profiles.
@@ -714,43 +719,35 @@ class Dashboard(QWidget):
         def _apply() -> None:
             try:
                 loaded = _load()
+                if loaded:
+                    # Never access Qt labels or schedule QTimer from the worker
+                    # thread. Qt widgets must be updated by the main event loop.
+                    results = getattr(self, "_username_results", None)
+                    if results is not None:
+                        with contextlib.suppress(queue.Full):
+                            results.put_nowait(loaded)
             except Exception:
                 return
-            if not loaded:
-                return
-            try:
-                getattr(self, "_username_cache", {}).update(loaded)
-            except Exception:
-                try:
-                    self._username_cache = dict(loaded)
-                except Exception:
-                    return
-            try:
-                from PySide6.QtCore import QTimer
-
-                def _refresh() -> None:
-                    labels = getattr(self, "_username_labels", {})
-                    for profile_id, masked in loaded.items():
-                        try:
-                            entry = labels.get(profile_id)
-                        except Exception:
-                            continue
-                        if entry is None:
-                            continue
-                        label, _name, account_number = entry
-                        try:
-                            if masked == "Chưa có username":
-                                continue
-                            label.setText(f"Tài khoản {account_number:02d} · {masked}")
-                        except Exception:
-                            continue
-
-                QTimer.singleShot(0, _refresh)
-            except Exception:
-                pass
 
         with contextlib.suppress(Exception):
             threading.Thread(target=_apply, name="username-preload", daemon=True).start()
+
+    def _drain_username_results(self) -> None:
+        results = getattr(self, "_username_results", None)
+        if results is None:
+            return
+        for _ in range(2):
+            try:
+                loaded = results.get_nowait()
+            except queue.Empty:
+                break
+            self._username_cache.update(loaded)
+            for profile_id, masked in loaded.items():
+                entry = self._username_labels.get(profile_id)
+                if entry is None or masked == "Chưa có username":
+                    continue
+                label, _name, account_number = entry
+                label.setText(f"Tài khoản {account_number:02d} · {masked}")
 
     def _open_profile(self, profile_id: str) -> None:
         """Open one closed profile while retaining its normal tool eligibility."""
@@ -2092,6 +2089,10 @@ class Dashboard(QWidget):
             self._farm_arrange_columns = self._apply_windows_per_row()
             self._farm_resource_pause_started = 0.0
             self._farm_resource_pause_reason = None
+            self._farm_commit_wait_alerted = False
+            self._farm_commit_wait_last_log_at = 0.0
+            self._farm_commit_snapshot_percent = None
+            self._farm_commit_snapshot_available_gib = None
             try:
                 memory = get_system_memory_status()
                 self._farm_launch_policy = FarmLaunchPolicy.for_total_memory(memory.total_bytes)
@@ -2314,6 +2315,65 @@ class Dashboard(QWidget):
         self.farm_all_button.setEnabled(self._opened_profile_count() > 1)
         self._append_log("Đã hoàn tất lượt kiểm tra tự đăng nhập")
 
+    def _pause_farm_for_commit(self, commit: object, now: float) -> None:
+        """Hard-pause new Chrome launches, with visible ETA-free status.
+
+        Never dismisses the queue or uses a modal dialog: the existing Chrome
+        sessions remain attached and the next scheduler tick retries safely.
+        """
+        used_percent = float(commit.usage_ratio) * 100.0
+        free_gib = float(commit.available_bytes) / (1024**3)
+        remaining = len(self._farm_open_queue)
+        self._farm_commit_snapshot_percent = round(used_percent, 1)
+        self._farm_commit_snapshot_available_gib = round(free_gib, 2)
+        if self._farm_resource_pause_reason != "commit_critical":
+            self._farm_resource_pause_reason = "commit_critical"
+            self._farm_resource_pause_started = now
+            self._farm_commit_wait_alerted = False
+            self._farm_commit_wait_last_log_at = now
+            self._append_log(
+                f"TẠM DỪNG mở Chrome: commit {used_percent:.1f}%, còn "
+                f"{free_gib:.2f} GiB. Giữ nguyên {remaining} profile trong hàng đợi."
+            )
+            self._log_monitor_scheduler(
+                "farm_commit_pause_started", commit_percent=round(used_percent, 1),
+                commit_available_gib=round(free_gib, 2), queue_remaining=remaining,
+            )
+        elapsed = max(0.0, now - self._farm_resource_pause_started)
+        self.farm_launcher.setText(f"Chờ Commit {used_percent:.1f}% · {remaining} tab")
+        set_tooltip = getattr(self.farm_launcher, "setToolTip", None)
+        if callable(set_tooltip):
+            set_tooltip(
+                f"Windows Commit {used_percent:.1f}% · còn {free_gib:.2f} GiB\n"
+                f"Đã chờ {int(elapsed // 60)} phút {int(elapsed % 60)} giây; "
+                f"còn {remaining} tab. Tự tiếp tục khi commit hồi phục. "
+                "Không đóng Chrome, không bỏ giới hạn an toàn."
+            )
+        self._set_labeled_action_icon(self.farm_launcher, FIF.PAUSE)
+        if elapsed >= 300 and not self._farm_commit_wait_alerted:
+            self._farm_commit_wait_alerted = True
+            self._append_log(
+                f"CẢNH BÁO: đã chờ Commit {int(elapsed // 60)} phút; "
+                f"{remaining} tab còn trong hàng đợi, không mở thêm Chrome."
+            )
+            self._log_monitor_scheduler(
+                "farm_commit_pause_alert", elapsed_seconds=int(elapsed),
+                queue_remaining=remaining, commit_percent=round(used_percent, 1),
+            )
+            self._notify_telegram(
+                f"IK Auto chờ Commit Memory hơn 5 phút: {used_percent:.1f}% "
+                f"(còn {free_gib:.2f} GiB); {remaining} profile chờ mở. "
+                "Chrome đang chạy được giữ nguyên.",
+                event_key="farm-commit-wait-alert", cooldown_seconds=1800,
+            )
+        elif elapsed >= 60 and now - self._farm_commit_wait_last_log_at >= 60:
+            self._farm_commit_wait_last_log_at = now
+            self._log_monitor_scheduler(
+                "farm_commit_pause_heartbeat", elapsed_seconds=int(elapsed),
+                queue_remaining=remaining, commit_percent=round(used_percent, 1),
+                commit_available_gib=round(free_gib, 2),
+            )
+
     def _advance_farm_opening(self) -> None:
         """Open profiles in resource-guarded batches instead of one startup burst."""
         if self._farm_launcher_phase != "opening" or not self._farm_open_queue:
@@ -2361,27 +2421,35 @@ class Dashboard(QWidget):
         # browser windows and CDP sessions are never closed by this pause.
         try:
             commit = get_windows_commit_snapshot()
-            if commit is not None and commit.critical:
-                if self._farm_resource_pause_reason != "commit_critical":
-                    self._farm_resource_pause_reason = "commit_critical"
-                    self._farm_resource_pause_started = now
-                    self._append_log(
-                        "TẠM DỪNG mở Chrome: commit "
-                        f"{commit.usage_ratio * 100:.1f}%, còn "
-                        f"{commit.available_bytes / (1024**3):.2f} GiB. "
-                        "Giữ nguyên profile đã mở."
-                    )
-                self._farm_next_open_at = now + 10.0
-                self.farm_launcher.setText("Chờ Commit Memory")
-                self._set_labeled_action_icon(self.farm_launcher, FIF.PAUSE)
-                return
         except OSError as error:
-            self._append_log(
-                f"Không xác minh được commit memory: {type(error).__name__}; "
-                "tạm dừng mở Chrome mới"
+            self._log_monitor_scheduler(
+                "farm_commit_probe_failed", error_type=type(error).__name__,
+                queue_remaining=len(self._farm_open_queue),
             )
+            self.farm_launcher.setText("Chờ đo Commit Memory")
             self._farm_next_open_at = now + 10.0
             return
+        if commit is not None and commit.critical:
+            self._pause_farm_for_commit(commit, now)
+            self._farm_next_open_at = now + 10.0
+            return
+        if self._farm_resource_pause_reason == "commit_critical":
+            elapsed = max(0, int(now - self._farm_resource_pause_started))
+            self._append_log(
+                f"Commit Memory đã hồi phục sau {elapsed // 60} phút; "
+                f"tự tiếp tục {len(self._farm_open_queue)} profile đang chờ."
+            )
+            self._log_monitor_scheduler(
+                "farm_commit_recovered", elapsed_seconds=elapsed,
+                queue_remaining=len(self._farm_open_queue),
+            )
+            self._farm_resource_pause_started = 0.0
+            self._farm_resource_pause_reason = None
+            self._farm_commit_wait_alerted = False
+            self._farm_commit_wait_last_log_at = 0.0
+            self._farm_commit_snapshot_percent = None
+            self._farm_commit_snapshot_available_gib = None
+            self.farm_launcher.setText("Đang mở...")
         reason: str | None = None
         try:
             memory = get_system_memory_status()
@@ -2449,6 +2517,9 @@ class Dashboard(QWidget):
         self._farm_batch_resume_at = 0.0
         self._farm_resource_pause_started = 0.0
         self._farm_resource_pause_reason = None
+        self._farm_commit_wait_alerted = False
+        self._farm_commit_snapshot_percent = None
+        self._farm_commit_snapshot_available_gib = None
         self._farm_all_running = False
         self.farm_launcher.setEnabled(True)
         self.farm_launcher.setText("Khởi động")
@@ -2670,6 +2741,7 @@ class Dashboard(QWidget):
     def _copy_json(self) -> None:
         if self.last_coordinate: QApplication.clipboard().setText(json.dumps({"profile_id":self.last_coordinate[0],**self.last_coordinate[1]},ensure_ascii=False,indent=2,default=str))
     def _poll(self) -> None:
+        self._drain_username_results()
         # Keep each UI pulse bounded.  A burst from dozens of workers must not
         # monopolize Qt's event loop and make profile-list scrolling hang.
         for _ in range(PROFILE_UPDATE_BATCH_SIZE):

@@ -1038,6 +1038,25 @@ def test_close_tabs_adds_gpu_cooldown_and_long_pause_every_five_tabs() -> None:
     assert dashboard._farm_next_close_at == 200.0 + TAB_CLOSE_BATCH_PAUSE_SECONDS
 
 
+def test_username_results_update_qt_labels_on_main_poll_only() -> None:
+    from queue import Queue
+
+    dashboard = Dashboard.__new__(Dashboard)
+    result = Queue(maxsize=2)
+    dashboard._username_results = result
+    dashboard._username_cache = {}
+    updates = []
+    dashboard._username_labels = {
+        "account-2": (SimpleNamespace(setText=updates.append), "old", 2)
+    }
+    result.put({"account-2": "masked***", "removed": "x***"})
+
+    dashboard._drain_username_results()
+
+    assert dashboard._username_cache["account-2"] == "masked***"
+    assert updates == ["Tài khoản 02 · masked***"]
+
+
 def test_profile_launch_sends_an_open_command_even_when_memory_is_constrained(monkeypatch) -> None:
     """A full RAM guard must throttle opening, not leave every selection queued."""
     dashboard = Dashboard.__new__(Dashboard)
@@ -1063,7 +1082,6 @@ def test_profile_launch_sends_an_open_command_even_when_memory_is_constrained(mo
     dashboard.farm_launcher = FakeActionButton()
     dashboard._log_lines = deque(maxlen=10)
     dashboard.log = FakeLogWidget()
-    monkeypatch.setattr(dashboard_module, "get_windows_commit_snapshot", lambda: None)
     monkeypatch.setattr(
         dashboard_module,
         "get_system_memory_status",
@@ -1073,12 +1091,91 @@ def test_profile_launch_sends_an_open_command_even_when_memory_is_constrained(mo
         ),
     )
     monkeypatch.setattr(dashboard_module, "get_gpu_utilization_percent", lambda: 96.0)
+    # A resource-pressure test must not depend on the host's live commit.
+    monkeypatch.setattr(
+        dashboard_module, "get_windows_commit_snapshot",
+        lambda: SimpleNamespace(critical=False),
+    )
 
     dashboard._advance_farm_opening()
 
     assert dashboard.runner.commands == [("account-1", CommandKind.OPEN)]
     assert dashboard._farm_batch_limit == 1
     assert dashboard.farm_launcher.text == "Đang mở chậm"
+
+
+def test_commit_wait_reports_queue_and_alerts_only_once_after_five_minutes() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard._farm_open_queue = deque(["account-41", "account-42"])
+    dashboard._farm_resource_pause_started = 0.0
+    dashboard._farm_resource_pause_reason = None
+    dashboard._farm_commit_wait_alerted = False
+    dashboard._farm_commit_wait_last_log_at = 0.0
+    dashboard.farm_launcher = FakeActionButton()
+    dashboard.farm_launcher.setToolTip = lambda value: None
+    dashboard._set_labeled_action_icon = lambda *_args, **_kwargs: None
+    logs, events, notifications = [], [], []
+    dashboard._append_log = logs.append
+    dashboard._log_monitor_scheduler = lambda name, **payload: events.append((name, payload))
+    dashboard._notify_telegram = lambda message, **kwargs: notifications.append(message)
+    critical = SimpleNamespace(usage_ratio=0.923, available_bytes=12 * 1024**3)
+
+    dashboard._pause_farm_for_commit(critical, 1000.0)
+    assert "92.3%" in dashboard.farm_launcher.text
+    assert "2 tab" in dashboard.farm_launcher.text
+    assert dashboard._farm_resource_pause_reason == "commit_critical"
+    assert len(notifications) == 0
+    dashboard._pause_farm_for_commit(critical, 1301.0)
+    dashboard._pause_farm_for_commit(critical, 1361.0)
+    assert len(notifications) == 1
+    assert sum(name == "farm_commit_pause_alert" for name, _ in events) == 1
+    assert any(name == "farm_commit_pause_started" for name, _ in events)
+    assert any(name == "farm_commit_pause_heartbeat" for name, _ in events)
+
+
+def test_commit_recovery_resumes_queue_without_reopening_existing_profiles(monkeypatch) -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    policy = FarmLaunchPolicy.for_total_memory(32 * 1024**3)
+    dashboard.config = SimpleNamespace(profiles=[SimpleNamespace(id="account-42")])
+    dashboard.runner = FakeFarmRunner(set())
+    dashboard._farm_launcher_phase = "opening"
+    dashboard._farm_open_queue = deque(["account-42"])
+    dashboard._farm_launch_profiles = {"account-42"}
+    dashboard._farm_open_states = {}
+    dashboard._farm_launch_policy = policy
+    dashboard._farm_batch_profiles = set()
+    dashboard._farm_batch_submitted = 0
+    dashboard._farm_batch_limit = policy.batch_size
+    dashboard._farm_batch_resume_at = 0.0
+    dashboard._farm_next_open_at = 0.0
+    dashboard._farm_resource_pause_started = time.monotonic() - 330
+    dashboard._farm_resource_pause_reason = "commit_critical"
+    dashboard._farm_commit_wait_alerted = True
+    dashboard._farm_commit_wait_last_log_at = 0.0
+    dashboard._farm_commit_snapshot_percent = 91.2
+    dashboard._farm_commit_snapshot_available_gib = 15.6
+    dashboard._latest_profile_cpu_percent = 0.0
+    dashboard.farm_launcher = FakeActionButton()
+    dashboard._set_labeled_action_icon = lambda *_args, **_kwargs: None
+    dashboard._cached_gpu_percent = lambda: None
+    logs, events = [], []
+    dashboard._append_log = logs.append
+    dashboard._log_monitor_scheduler = lambda name, **payload: events.append(name)
+    monkeypatch.setattr(
+        dashboard_module, "get_windows_commit_snapshot",
+        lambda: SimpleNamespace(critical=False),
+    )
+    monkeypatch.setattr(
+        dashboard_module, "get_system_memory_status",
+        lambda: SimpleNamespace(available_bytes=16 * 1024**3, load_percent=42.0),
+    )
+
+    dashboard._advance_farm_opening()
+
+    assert dashboard.runner.commands == [("account-42", CommandKind.OPEN)]
+    assert "farm_commit_recovered" in events
+    assert dashboard._farm_commit_wait_alerted is False
+    assert dashboard._farm_commit_snapshot_percent is None
 
 
 def test_profile_launch_does_not_arrange_between_batches(monkeypatch) -> None:
@@ -1110,7 +1207,6 @@ def test_profile_launch_does_not_arrange_between_batches(monkeypatch) -> None:
     dashboard.farm_launcher = FakeActionButton()
     dashboard._log_lines = deque(maxlen=10)
     dashboard.log = FakeLogWidget()
-    monkeypatch.setattr(dashboard_module, "get_windows_commit_snapshot", lambda: None)
     monkeypatch.setattr(
         dashboard_module,
         "get_system_memory_status",
@@ -1120,6 +1216,10 @@ def test_profile_launch_does_not_arrange_between_batches(monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(dashboard_module, "get_gpu_utilization_percent", lambda: 20.0)
+    monkeypatch.setattr(
+        dashboard_module, "get_windows_commit_snapshot",
+        lambda: SimpleNamespace(critical=False),
+    )
 
     dashboard._advance_farm_opening()
 

@@ -6,6 +6,7 @@ import contextlib
 import os
 import sys
 import threading
+import time
 import traceback
 from functools import lru_cache
 from pathlib import Path
@@ -89,6 +90,32 @@ def fleet_health_payload(dashboard: Any) -> dict[str, Any]:
         "cdp_session_ready": ready,
         "error_count": len(error_profiles),
         "error_profile_ids": error_profiles[:50],
+        # A bulk launch can be stuck even while Chrome keeps generating
+        # heartbeat events. Include the scheduler's queue and exact worker
+        # states so one STOPPED/STARTING profile is immediately visible.
+        "bulk_open_phase": str(getattr(dashboard, "_farm_launcher_phase", "")),
+        "bulk_open_queue_remaining": len(getattr(dashboard, "_farm_open_queue", ())),
+        "commit_waiting": (
+            getattr(dashboard, "_farm_launcher_phase", "") == "opening"
+            and getattr(dashboard, "_farm_resource_pause_reason", None) == "commit_critical"
+        ),
+        "commit_wait_seconds": (
+            max(0, int(time.monotonic() - dashboard._farm_resource_pause_started))
+            if getattr(dashboard, "_farm_resource_pause_reason", None) == "commit_critical"
+            and getattr(dashboard, "_farm_resource_pause_started", 0.0) else 0
+        ),
+        "commit_usage_percent": getattr(dashboard, "_farm_commit_snapshot_percent", None),
+        "commit_available_gib": getattr(dashboard, "_farm_commit_snapshot_available_gib", None),
+        "bulk_open_batch_ids": sorted(
+            getattr(dashboard, "_farm_batch_profiles", ())
+        )[:50],
+        "bulk_open_batch_states": {
+            profile_id: str(getattr(
+                getattr(dashboard, "_farm_open_states", {}).get(profile_id),
+                "value", "missing"
+            ))
+            for profile_id in sorted(getattr(dashboard, "_farm_batch_profiles", ()))[:50]
+        },
         "reattach_pending_count": len(getattr(dashboard, "_reattach_pending_profiles", ())),
         "reattach_failed_count": len(getattr(dashboard, "_reattach_failed_profiles", ())),
         "farm_profile_count": len(getattr(dashboard, "farm_profiles", ())),
