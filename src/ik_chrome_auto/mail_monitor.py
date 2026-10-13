@@ -85,12 +85,33 @@ _READ_ALL_MAIL = _TemplateSpec(
 )
 
 
+def _expand_region(
+    region: tuple[float, float, float, float], pad: float = 0.02
+) -> tuple[float, float, float, float]:
+    """Expand an ROI slightly so CDP rounding cannot clip a badge edge."""
+    left, top, right, bottom = region
+    return (
+        max(0.0, left - pad),
+        max(0.0, top - pad),
+        min(1.0, right + pad),
+        min(1.0, bottom + pad),
+    )
+
+
+# Cropped CDP captures for badge pre-checks: ~30x fewer pixels than a full
+# 1280x720 screenshot with the same template thresholds.
+MAIL_BADGE_CAPTURE_REGION = _expand_region(_MAIL_UNREAD_ONE.region)
+COMBAT_BADGE_CAPTURE_REGION = _expand_region(_COMBAT_UNREAD_ONE.region)
+TERRITORY_CAPTURE_REGION = _expand_region(_TERRITORY_ATTACKED.region)
+
+
 class BrowserMailMonitor:
     """Recognize only controls and text needed by the mailbox state machine."""
 
     def __init__(self, asset_dir: Path | None = None) -> None:
         self.asset_dir = asset_dir or Path(__file__).with_name("assets") / "mail_monitor"
         self._templates: dict[str, object] = {}
+        self._scaled: dict[tuple[str, int, int, bool], object] = {}
 
     def find_close_button(self, screenshot_png: bytes) -> MailMatch | None:
         matches = [self._find(screenshot_png, spec) for spec in _MAIL_CLOSE_SPECS]
@@ -115,6 +136,112 @@ class BrowserMailMonitor:
     def is_territory_attacked(self, screenshot_png: bytes) -> bool:
         return self._find(screenshot_png, _TERRITORY_ATTACKED) is not None
 
+    def has_new_mail_in_region(
+        self,
+        region_png: bytes,
+        full_size: tuple[int, int],
+        region: tuple[float, float, float, float],
+        scale: float,
+    ) -> bool:
+        return (
+            self._find_in_region(region_png, _MAIL_UNREAD_ONE, full_size, region, scale)
+            is not None
+        )
+
+    def has_new_combat_mail_in_region(
+        self,
+        region_png: bytes,
+        full_size: tuple[int, int],
+        region: tuple[float, float, float, float],
+        scale: float,
+    ) -> bool:
+        return (
+            self._find_in_region(region_png, _COMBAT_UNREAD_ONE, full_size, region, scale)
+            is not None
+        )
+
+    def is_territory_attacked_in_region(
+        self,
+        region_png: bytes,
+        full_size: tuple[int, int],
+        region: tuple[float, float, float, float],
+        scale: float,
+    ) -> bool:
+        return (
+            self._find_in_region(region_png, _TERRITORY_ATTACKED, full_size, region, scale)
+            is not None
+        )
+
+    def _find_in_region(
+        self,
+        region_png: bytes,
+        spec: _TemplateSpec,
+        full_size: tuple[int, int],
+        region: tuple[float, float, float, float],
+        scale: float,
+    ) -> MailMatch | None:
+        """Match a cropped region capture with full-canvas thresholds.
+
+        ``region_png`` is a CDP clip of ``region`` at ``scale``; the expected
+        template size is derived from ``full_size`` so the same threshold
+        applies as the full-canvas path. Returned bounds are full-canvas
+        pixels for log compatibility.
+        """
+        import cv2
+
+        search = self._decode(region_png)
+        full_width, full_height = int(full_size[0]), int(full_size[1])
+        if full_width <= 0 or full_height <= 0:
+            return None
+        scale = max(0.2, min(1.0, float(scale)))
+        template = self._load(spec.filename)
+        base_width = max(8, round(template.shape[1] * full_width / spec.reference_size[0]))
+        base_height = max(8, round(template.shape[0] * full_height / spec.reference_size[1]))
+        if spec.edge:
+            match_search = cv2.Canny(cv2.cvtColor(search, cv2.COLOR_BGR2GRAY), 45, 145)
+        else:
+            match_search = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
+        best_score = 0.0
+        best_at: tuple[int, int] | None = None
+        best_size: tuple[int, int] | None = None
+        for variant in (0.86, 0.93, 1.0, 1.07, 1.14):
+            target_width = max(4, round(base_width * scale * variant))
+            target_height = max(4, round(base_height * scale * variant))
+            if target_width > search.shape[1] or target_height > search.shape[0]:
+                continue
+            cache_key = (spec.filename, target_width, target_height, spec.edge)
+            match_template = self._scaled.get(cache_key)
+            if match_template is None:
+                scaled = cv2.resize(
+                    template, (target_width, target_height), interpolation=cv2.INTER_AREA
+                )
+                if spec.edge:
+                    match_template = cv2.Canny(
+                        cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY), 45, 145
+                    )
+                else:
+                    match_template = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
+                self._scaled[cache_key] = match_template
+                if len(self._scaled) > 512:
+                    self._scaled.clear()
+                    self._scaled[cache_key] = match_template
+            result = cv2.matchTemplate(match_search, match_template, cv2.TM_CCOEFF_NORMED)
+            _minimum, maximum, _minimum_at, maximum_at = cv2.minMaxLoc(result)
+            if float(maximum) > best_score:
+                best_score = float(maximum)
+                best_at = (int(maximum_at[0]), int(maximum_at[1]))
+                best_size = (target_width, target_height)
+        if best_at is None or best_size is None or best_score < spec.threshold:
+            return None
+        left, top, _right, _bottom = region
+        origin_x = full_width * left
+        origin_y = full_height * top
+        full_x = int(round(origin_x + best_at[0] / scale))
+        full_y = int(round(origin_y + best_at[1] / scale))
+        full_w = int(round(best_size[0] / scale))
+        full_h = int(round(best_size[1] / scale))
+        return MailMatch((full_x, full_y, full_w, full_h), best_score)
+
     def _find(self, screenshot_png: bytes, spec: _TemplateSpec) -> MailMatch | None:
         import cv2
 
@@ -128,6 +255,7 @@ class BrowserMailMonitor:
         template = self._load(spec.filename)
         base_width = max(8, round(template.shape[1] * width / spec.reference_size[0]))
         base_height = max(8, round(template.shape[0] * height / spec.reference_size[1]))
+        # Convert the search patch once instead of per scale variant.
         if spec.edge:
             match_search = cv2.Canny(cv2.cvtColor(search, cv2.COLOR_BGR2GRAY), 45, 145)
         else:
@@ -139,11 +267,18 @@ class BrowserMailMonitor:
             target_height = max(8, round(base_height * variant))
             if target_width > search.shape[1] or target_height > search.shape[0]:
                 continue
-            scaled = cv2.resize(template, (target_width, target_height), interpolation=cv2.INTER_AREA)
-            if spec.edge:
-                match_template = cv2.Canny(cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY), 45, 145)
-            else:
-                match_template = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
+            cache_key = (spec.filename, target_width, target_height, spec.edge)
+            match_template = self._scaled.get(cache_key)
+            if match_template is None:
+                scaled = cv2.resize(template, (target_width, target_height), interpolation=cv2.INTER_AREA)
+                if spec.edge:
+                    match_template = cv2.Canny(cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY), 45, 145)
+                else:
+                    match_template = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
+                self._scaled[cache_key] = match_template
+                if len(self._scaled) > 512:
+                    self._scaled.clear()
+                    self._scaled[cache_key] = match_template
             result = cv2.matchTemplate(match_search, match_template, cv2.TM_CCOEFF_NORMED)
             _minimum, maximum, _minimum_at, maximum_at = cv2.minMaxLoc(result)
             if float(maximum) > best_score:

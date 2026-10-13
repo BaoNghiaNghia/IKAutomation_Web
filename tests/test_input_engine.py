@@ -114,3 +114,20 @@ def test_input_engine_rejects_unknown_pointer_and_click_kinds() -> None:
             ViewportPoint(1.0, 1.0),
             event_type="click",
         )
+
+def test_new_cdp_session_always_receives_initial_mouse_move() -> None:
+    first = RecordingCDP()
+    ProfileInputEngine.click(first, ViewportPoint(320.0, 540.0), kind="mouse")
+    ProfileInputEngine.click(first, ViewportPoint(320.0, 540.0), kind="mouse")
+    assert [row[1]["type"] for row in first.calls] == [
+        "mouseMoved", "mousePressed", "mouseReleased",
+        "mousePressed", "mouseReleased",
+    ]
+
+    # A different or newly allocated CDP object must not inherit prior state,
+    # even if Python eventually reuses the memory address of a retired one.
+    second = RecordingCDP()
+    ProfileInputEngine.click(second, ViewportPoint(320.0, 540.0), kind="mouse")
+    assert [row[1]["type"] for row in second.calls] == [
+        "mouseMoved", "mousePressed", "mouseReleased",
+    ]

@@ -68,6 +68,17 @@ def upscale_png_for_diagnostics(
     """
     if width < 1 or height < 1:
         raise ValueError("Kích thước ảnh debug phải lớn hơn 0")
+    # Fast path: read IHDR size without a full pixel decode. The leased
+    # 1280x720 renderer already matches, so most calls return as-is.
+    try:
+        import struct
+
+        if len(data) >= 24 and data.startswith(b"\x89PNG\r\n\x1a\n"):
+            png_w, png_h = struct.unpack(">II", data[16:24])
+            if (png_w, png_h) == (width, height) and scale is None:
+                return data
+    except Exception:
+        pass
     image = decode_png(data)
     if scale is not None:
         if scale < 1:

@@ -5,12 +5,44 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 # Keep the handles alive for the life of the process.  Closing an
 # ``add_dll_directory`` handle removes that directory from Windows' DLL search
 # path again.
 _dll_directory_handles: list[object] = []
+
+
+@contextmanager
+def _exclusive_desktop_instance() -> Iterator[bool]:
+    """Share the Dev CMD mutex, preventing competing Release CDP owners.
+
+    The mutex lifetime covers update discovery AND the running dashboard.
+    Only frozen Windows executables acquire it here: the development CMD
+    already holds this same named mutex around its Python child process.
+    """
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        yield True
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel.CreateMutexW
+    create.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    create.restype = wintypes.HANDLE
+    handle = create(None, True, "Local\\IKAutoBrowserDashboard")
+    if not handle:
+        raise OSError("Cannot acquire IK Auto singleton mutex")
+    already_running = ctypes.get_last_error() == 183  # ERROR_ALREADY_EXISTS
+    try:
+        yield not already_running
+    finally:
+        if not already_running:
+            kernel.ReleaseMutex(handle)
+        kernel.CloseHandle(handle)
 
 
 def _application_directory() -> Path:
@@ -73,7 +105,10 @@ def main() -> None:
         shutil.copyfile(example, config)
     from ik_chrome_auto.__main__ import main as run_application
 
-    run_application()
+    with _exclusive_desktop_instance() as first_instance:
+        if not first_instance:
+            return
+        run_application()
 
 
 if __name__ == "__main__":

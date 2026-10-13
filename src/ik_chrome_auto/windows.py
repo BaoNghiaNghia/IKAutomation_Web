@@ -13,6 +13,12 @@ from dataclasses import dataclass
 
 TASKBAR_APP_ID = "IKChromeAuto.Profiles"
 
+# Cache netstat port->pid for a few seconds: startup probes 45 profiles x
+# up to 4 candidate ports; each uncached call spawned netstat.
+_NETSTAT_CACHE_SECONDS = 4.0
+_netstat_cache_at = 0.0
+_netstat_cache: dict[int, int] = {}
+
 
 @dataclass(frozen=True, slots=True)
 class WindowRect:
@@ -468,8 +474,15 @@ def find_chrome_window(title: str) -> int | None:
 
 def find_tcp_listener_process(port: int) -> int | None:
     """Resolve a local TCP port owner without requiring admin privileges."""
+    import time
+
+    global _netstat_cache_at, _netstat_cache
     if sys.platform != "win32" or not 1 <= int(port) <= 65535:
         return None
+    wanted = int(port)
+    now = time.monotonic()
+    if now - _netstat_cache_at < _NETSTAT_CACHE_SECONDS and wanted in _netstat_cache:
+        return _netstat_cache[wanted]
     try:
         result = subprocess.run(
             ["netstat", "-ano", "-p", "tcp"],
@@ -481,7 +494,7 @@ def find_tcp_listener_process(port: int) -> int | None:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    wanted = int(port)
+    mapping: dict[int, int] = {}
     for line in result.stdout.splitlines():
         fields = line.split()
         if len(fields) < 4 or fields[0].upper() != "TCP":
@@ -492,9 +505,11 @@ def find_tcp_listener_process(port: int) -> int | None:
             process_id = int(fields[-1])
         except (IndexError, ValueError):
             continue
-        if local_port == wanted and process_id > 0:
-            return process_id
-    return None
+        if local_port > 0 and process_id > 0 and local_port not in mapping:
+            mapping[local_port] = process_id
+    _netstat_cache = mapping
+    _netstat_cache_at = now
+    return mapping.get(wanted)
 
 
 def get_process_command_line(process_id: int | None) -> str | None:

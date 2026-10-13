@@ -14,9 +14,13 @@ from ik_chrome_auto.actions import ActionCancelled, AutomationFunctions
 from ik_chrome_auto.browser import ChromeProfileSession, SyncSourceStatus
 from ik_chrome_auto.build_info import release_diagnostic_screenshot_directory
 from ik_chrome_auto.event_log import JsonLineLog, migrate_legacy_profile_log, profile_log_path
-from ik_chrome_auto.farm_vision import DetectedGameState, FarmTemplateId, TeamRosterRow
+from ik_chrome_auto.farm_vision import (
+    WORLD_MAP_ANCHOR_TEMPLATES,
+    DetectedGameState,
+    FarmTemplateId,
+    TeamRosterRow,
+)
 from ik_chrome_auto.farm_workflow import FarmGameState, FarmStep, FarmWorkflow
-from ik_chrome_auto.image_utils import decode_png
 from ik_chrome_auto.input_helpers import (
     GAME_REFERENCE_HEIGHT,
     GAME_REFERENCE_WIDTH,
@@ -45,6 +49,7 @@ from ik_chrome_auto.native_input import NativeInputCaptureService
 from ik_chrome_auto.reader import redact
 from ik_chrome_auto.resource_area_points import ResourceAreaPointSelector
 from ik_chrome_auto.storage import upscale_png_for_diagnostics, write_retained_png
+from ik_chrome_auto.sync_ack import SyncAckTracker
 from ik_chrome_auto.windows import (
     WindowRect,
     calculate_tiled_positions,
@@ -93,7 +98,7 @@ AUTOMATION_RENDERER_WAIT_SECONDS = 30.0
 # Closing the dashboard must never wait this amount once per profile.  The
 # workers are daemon threads and Chrome is intentionally retained, so this is
 # a single, small grace period for every worker to detach its CDP connection.
-RUNNER_SHUTDOWN_WAIT_SECONDS = 0.75
+RUNNER_SHUTDOWN_WAIT_SECONDS = 2.5
 FARM_RENDERER_YIELD_STEPS = frozenset(
     {FarmStep.PREFLIGHT, FarmStep.WAITING, FarmStep.STOPPED}
 )
@@ -195,7 +200,10 @@ READ_ALL_MAIL_POINT = (0.20703125, 0.9305555556)
 CLOSE_MAIL_POINT = (0.9437, 0.1142)
 # The top card only: never search down the Combat list for a historical match.
 FIRST_MAIL_ROW_POINT = (0.2516, 0.1736)
-MAIL_CONTROL_SETTLE_SECONDS = 0.9
+# Short settle keeps mailbox taps verified without the old 0.9s blind wait
+# after every control (~4-6s per scan). Game HUD settles well within this.
+MAIL_CONTROL_SETTLE_SECONDS = 0.6
+MAIL_CLOSE_SETTLE_SECONDS = 0.25
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +241,8 @@ class ProfileWorker:
         scrollbars_visible: bool = False,
         topmost: bool = False,
         automation_renderer_lock: threading.Lock | None = None,
+        on_sync_ack: Callable[[str, str, bool, float], None] | None = None,
+        attach_slot: threading.BoundedSemaphore | None = None,
     ) -> None:
         self.config = config
         self.profile = profile
@@ -242,6 +252,8 @@ class ProfileWorker:
         self.on_coordinate = on_coordinate
         self.on_detached = on_detached or (lambda _profile_id, _reason: None)
         self.on_sync_source = on_sync_source or (lambda _profile_id, _session_id, _status: None)
+        self.on_sync_ack = on_sync_ack
+        self._attach_slot = attach_slot
         logs_dir = config.data_dir / "logs"
         self.coordinate_log = JsonLineLog(logs_dir / f"coordinates-{profile.id}.jsonl")
         # Farm diagnostics stay separate from general dashboard events so a
@@ -263,6 +275,10 @@ class ProfileWorker:
         self._attachment_state = AttachmentState.DETACHED
         self._attach_requested = False
         self._sync_source_enabled = False
+        self._pump_failure_signature = ""
+        self._pump_failure_count = 0
+        self._pump_last_report_at = 0.0
+        self._pump_retry_at = 0.0
         self._sync_rearm_at = 0.0
         self._sync_last_health_log_at = 0.0
         self._sync_move_lock = threading.Lock()
@@ -344,12 +360,25 @@ class ProfileWorker:
 
     def shutdown(self) -> None:
         self.stop_event.set()
-        # Do not start an otherwise idle worker merely to make it consume a
-        # shutdown command.  That used to create one short-lived thread per
-        # closed profile while the dashboard itself was closing.
+        # Do not start an idle worker. Cancel stale pending Farm/Sync work
+        # first so the next command on a live worker is always SHUTDOWN.
         thread = self.thread
         if thread is not None and thread.is_alive():
+            discarded = 0
+            while True:
+                try:
+                    self.commands.get_nowait()
+                    discarded += 1
+                except queue.Empty:
+                    break
+            with self._sync_move_lock:
+                self._sync_pending_move = None
+                self._sync_move_command_queued = False
             self.commands.put(WorkerCommand(CommandKind.SHUTDOWN))
+            self.event_log.write(
+                "worker_shutdown_requested",
+                {"profile_id": self.profile.id, "discarded_commands": discarded},
+            )
 
     def enable_mail_monitor(self) -> None:
         self._mail_monitor_cancelled.clear()
@@ -560,15 +589,77 @@ class ProfileWorker:
     def _capture_mail_canvas(self) -> tuple[bytes, tuple[int, int]]:
         if self.session is None:
             raise RuntimeError("Profile chưa mở")
-        png, _surface = self.session.capture_game_surface_png()
-        image = decode_png(png)
-        image_size = (image.width, image.height)
+        png, surface = self.session.capture_game_surface_png()
+        # ``surface`` already carries the live canvas size; decoding the full
+        # PNG with the pure-Python fallback just to read w/h cost ~100ms per
+        # mail capture (3x per scan). Use the surface box directly.
+        try:
+            image_size = (int(round(float(surface["width"]))), int(round(float(surface["height"]))))
+        except Exception:
+            from ik_chrome_auto.image_utils import decode_png
+
+            image = decode_png(png)
+            image_size = (image.width, image.height)
         self._log_monitor(
             "mail_monitor_capture",
             capture_size=image_size,
             png_bytes=len(png),
         )
         return png, image_size
+
+    def _capture_mail_region(
+        self, region: tuple[float, float, float, float], *, scale: float = 0.8
+    ) -> tuple[bytes, tuple[int, int], tuple[float, float, float, float], float] | None:
+        """Cropped CDP capture for one mailbox ROI; None when unsupported."""
+        if self.session is None:
+            return None
+        capture = getattr(self.session, "capture_game_region_png", None)
+        if not callable(capture):
+            return None
+        try:
+            png, full_size, used_scale = capture(region, scale=scale)
+            return png, (int(full_size[0]), int(full_size[1])), region, float(used_scale)
+        except Exception:
+            return None
+
+    def _mail_badge_present(
+        self, kind: str, region: tuple[float, float, float, float]
+    ) -> tuple[bool, tuple[bytes, tuple[int, int]]]:
+        """Check one badge via cropped capture with full-canvas fallback.
+
+        Returns (present, (png, size)) where png/size is the evidence used.
+        Test doubles without region support fall back to the legacy path.
+        """
+        monitor = getattr(self, "_mail_monitor", None)
+        region_capture = self._capture_mail_region(region)
+        if region_capture is not None and monitor is not None:
+            region_png, full_size, used_region, used_scale = region_capture
+            checker = {
+                "mail": getattr(monitor, "has_new_mail_in_region", None),
+                "combat": getattr(monitor, "has_new_combat_mail_in_region", None),
+                "territory": getattr(monitor, "is_territory_attacked_in_region", None),
+            }.get(kind)
+            if callable(checker):
+                try:
+                    present = bool(checker(region_png, full_size, used_region, used_scale))
+                    self._log_monitor(
+                        "mail_monitor_capture",
+                        capture_size=full_size,
+                        png_bytes=len(region_png),
+                        region=True,
+                        kind=kind,
+                    )
+                    return present, (region_png, full_size)
+                except Exception:
+                    pass
+        # Legacy full-canvas path (also used by test doubles).
+        png, size = self._capture_mail_canvas()
+        assert monitor is not None
+        if kind == "mail":
+            return bool(monitor.has_new_mail(png)), (png, size)
+        if kind == "combat":
+            return bool(monitor.has_new_combat_mail(png)), (png, size)
+        return bool(monitor.is_territory_attacked(png)), (png, size)
 
     def _tap_monitor_point(
         self, normalized_x: float, normalized_y: float, image_size: tuple[int, int]
@@ -776,9 +867,13 @@ class ProfileWorker:
             # Lượt 2 starts with the closed Mail icon. Do not open anything
             # unless its own red ``1`` badge is present: most profiles can
             # then return immediately without changing their game state.
+            # Cropped region capture (~30x fewer pixels) with full fallback.
+            from ik_chrome_auto.mail_monitor import MAIL_BADGE_CAPTURE_REGION
+
             latest_size = AUTOMATION_RENDERER_SIZE
-            latest_png, latest_size = self._capture_mail_canvas()
-            has_mail_badge = monitor.has_new_mail(latest_png)
+            has_mail_badge, (latest_png, latest_size) = self._mail_badge_present(
+                "mail", MAIL_BADGE_CAPTURE_REGION
+            )
             self._log_monitor(
                 "mail_monitor_mail_badge",
                 found=has_mail_badge,
@@ -797,8 +892,11 @@ class ProfileWorker:
 
             # Open Mail only revealed the category badges.  Click Combat only
             # when its own exact red ``1`` badge is present.
-            latest_png, latest_size = self._capture_mail_canvas()
-            has_badge = monitor.has_new_combat_mail(latest_png)
+            from ik_chrome_auto.mail_monitor import COMBAT_BADGE_CAPTURE_REGION
+
+            has_badge, (latest_png, latest_size) = self._mail_badge_present(
+                "combat", COMBAT_BADGE_CAPTURE_REGION
+            )
             self._log_monitor(
                 "mail_monitor_combat_badge",
                 found=has_badge,
@@ -820,8 +918,11 @@ class ProfileWorker:
             self._monitor_pause(MAIL_CONTROL_SETTLE_SECONDS)
             if self._mail_monitor_is_cancelled():
                 return finish(SCAN_CANCELLED)
-            latest_png, latest_size = self._capture_mail_canvas()
-            attacked = monitor.is_territory_attacked(latest_png)
+            from ik_chrome_auto.mail_monitor import TERRITORY_CAPTURE_REGION
+
+            attacked, (latest_png, latest_size) = self._mail_badge_present(
+                "territory", TERRITORY_CAPTURE_REGION
+            )
             self._log_monitor("mail_monitor_alert_classified", territory_attacked=attacked)
             if attacked:
                 return finish(TERRITORY_ATTACKED)
@@ -843,13 +944,13 @@ class ProfileWorker:
                             self._tap_monitor_viewport_point(
                                 CLOSE_MAIL_POINT, AUTOMATION_RENDERER_SIZE
                             )
-                            self._monitor_pause(0.35)
+                            self._monitor_pause(MAIL_CLOSE_SETTLE_SECONDS)
                         else:
                             latest_png, latest_size = self._capture_mail_canvas()
                             close = monitor.find_close_button(latest_png)
                             if close is not None:
                                 self._tap_monitor_viewport_point(CLOSE_MAIL_POINT, latest_size)
-                                self._monitor_pause(0.35)
+                                self._monitor_pause(MAIL_CLOSE_SETTLE_SECONDS)
                     except Exception as close_error:
                         self.event_log.write(
                             "mail_monitor_close_error",
@@ -868,26 +969,87 @@ class ProfileWorker:
                 )
                 self._monitor_log_context = {}
 
+    def _record_pump_error(self, error: Exception) -> None:
+        """Coalesce transient CDP errors and detach a repeatedly crashed tab.
+
+        Keeping a crashed Playwright page attached once produced thousands of
+        identical error events per minute. Do not reload, kill or relaunch
+        Chrome automatically; the user can Retry a verified CDP session.
+        """
+        now = time.monotonic()
+        signature = f"{type(error).__name__}:{str(error)[:160]}"
+        previous = getattr(self, "_pump_failure_signature", "")
+        count = int(getattr(self, "_pump_failure_count", 0))
+        if signature != previous:
+            count = 0
+            self._pump_failure_signature = signature
+            self._pump_last_report_at = now
+        count += 1
+        self._pump_failure_count = count
+        self._pump_retry_at = now + min(5.0, 0.5 * count)
+        if count == 1:
+            self.event_log.write("worker_pump_error", {
+                "profile_id": self.profile.id,
+                "error_type": type(error).__name__,
+                "message": f"{type(error).__name__}: {error}",
+            })
+        elif now - getattr(self, "_pump_last_report_at", 0.0) >= 60:
+            self._pump_last_report_at = now
+            self.event_log.write("worker_pump_error_repeated", {
+                "profile_id": self.profile.id,
+                "error_type": type(error).__name__, "consecutive_count": count,
+            })
+        if (
+            count >= 3
+            and type(error).__name__ == "TargetClosedError"
+            and "page crashed" in str(error).lower()
+            and self.session is not None
+        ):
+            self.event_log.write("profile_renderer_crashed", {
+                "profile_id": self.profile.id,
+                "error_type": "TargetClosedError",
+                "consecutive_count": count, "chrome_will_be_closed": False,
+            })
+            # Browser.close(close_browser=False) only detaches CDP, including
+            # for managed Chrome processes created by IK Auto.
+            self._close_session(close_browser=False)
+            self.on_detached(self.profile.id, "page_crashed")
+            self._publish(
+                WorkerState.ERROR,
+                "Tab game đã crash. Chrome được giữ nguyên; kiểm tra tab rồi Retry CDP.",
+            )
+
+    def _clear_pump_error(self) -> None:
+        count = int(getattr(self, "_pump_failure_count", 0))
+        if count:
+            self.event_log.write("worker_pump_recovered", {
+                "profile_id": self.profile.id, "previous_consecutive_errors": count,
+            })
+        self._pump_failure_signature = ""
+        self._pump_failure_count = 0
+        self._pump_retry_at = 0.0
+
     def _loop(self) -> None:
         while True:
             try:
                 command = self.commands.get(timeout=0.04)
             except queue.Empty:
                 if self.session is not None:
-                    try:
-                        self.session.pump(5)
-                        self._poll_browser_events()
-                    except Exception as error:
-                        self.event_log.write(
-                            "worker_pump_error",
-                            {
-                                "profile_id": self.profile.id,
-                                "message": f"{type(error).__name__}: {error}",
-                            },
-                        )
+                    if time.monotonic() >= getattr(self, "_pump_retry_at", 0.0):
+                        try:
+                            self.session.pump(5)
+                            self._poll_browser_events()
+                        except Exception as error:
+                            self._record_pump_error(error)
+                        else:
+                            self._clear_pump_error()
                     if self.session is not None and not self.session.is_alive():
                         self._handle_external_close()
-                    elif self._farm is not None and time.monotonic() >= self._farm_next_at:
+                    elif (
+                        self._farm is not None
+                        and not getattr(self, "_pump_failure_count", 0)
+                        and time.monotonic() >= self._farm_next_at
+                    ):
                         self._run_farm_tick()
                 continue
             try:
@@ -1077,9 +1239,13 @@ class ProfileWorker:
                             continue
                     else:
                         sync_event = dict(command.payload["event"])
+                    delivery_id = str(sync_event.get("sync_delivery_id", ""))
                     if self.session is not None:
+                        ack_started = time.monotonic()
+                        ack_ok = False
                         try:
                             self._apply_synced_input_with_retry(sync_event)
+                            ack_ok = True
                             # Success telemetry is aggregated by the runner;
                             # never write one synchronous log row per follower.
                         except Exception as error:
@@ -1095,6 +1261,11 @@ class ProfileWorker:
                                     "message": f"{type(error).__name__}: {error}",
                                 },
                             )
+                        finally:
+                            ack_cb = getattr(self, "on_sync_ack", None)
+                            if delivery_id and callable(ack_cb):
+                                with contextlib.suppress(Exception):
+                                    ack_cb(self.profile.id, delivery_id, ack_ok, (time.monotonic() - ack_started) * 1000)
                     elif str(sync_event.get("type", "")) in {"pointerdown", "pointerup", "wheel", "keydown", "keyup"}:
                         self.event_log.write(
                             "sync_input_skipped",
@@ -1106,6 +1277,10 @@ class ProfileWorker:
                                 "sync_session_id": str(sync_event.get("sync_session_id", "")),
                             },
                         )
+                        ack_cb = getattr(self, "on_sync_ack", None)
+                        if delivery_id and callable(ack_cb):
+                            with contextlib.suppress(Exception):
+                                ack_cb(self.profile.id, delivery_id, False, 0.0)
                     continue
                 if command.kind == CommandKind.RESET_SYNC_INPUT:
                     if self.session is not None:
@@ -1150,151 +1325,163 @@ class ProfileWorker:
                 elif command.kind in {CommandKind.ATTACH, CommandKind.REPAIR_ATTACH}:
                     with self._lifecycle_lock:
                         self._attach_requested = False
-                    if not self.is_attached():
-                        attach_started_at = time.monotonic()
-                        probe = ChromeProfileSession(self.config, self.profile)
-                        # Report the profile being probed before any CDP
-                        # discovery work. A failed or slow external Chrome
-                        # must not leave every card looking idle while the
-                        # Dashboard correctly waits for its result.
-                        self._set_lifecycle(
-                            browser_running=False,
-                            attachment=AttachmentState.ATTACHING,
-                        )
-                        self._publish(
-                            WorkerState.STARTING,
-                            "Đang dò Chrome profile đang mở",
-                        )
-                        attached_endpoint_found = probe.can_attach_existing_browser()
-                        attach_diagnostics = probe.attach_diagnostics()
-                        selected_endpoint = attach_diagnostics.get("matched_endpoint")
-                        if selected_endpoint is not None:
-                            self.event_log.write(
-                                "profile_attach_candidate_selected",
-                                {
-                                    "profile_id": self.profile.id,
-                                    "port": int(selected_endpoint.rsplit(":", 1)[-1]),
-                                    "source": attach_diagnostics.get("selected_candidate_source"),
-                                },
+                    # Limit ACTUAL in-progress Playwright attach calls, not
+                    # merely the dashboard's advisory queue slots.
+                    slot = getattr(self, "_attach_slot", None)
+                    if slot is not None and not slot.acquire(timeout=90.0):
+                        self._set_lifecycle(browser_running=True, attachment=AttachmentState.DETACHED)
+                        self._publish(WorkerState.ERROR, "CDP attach chờ quá lâu; không đóng Chrome")
+                        self.event_log.write("profile_attach_slot_timeout", {"profile_id": self.profile.id})
+                        continue
+                    try:
+                        if not self.is_attached():
+                            attach_started_at = time.monotonic()
+                            probe = ChromeProfileSession(self.config, self.profile)
+                            # Report the profile being probed before any CDP
+                            # discovery work. A failed or slow external Chrome
+                            # must not leave every card looking idle while the
+                            # Dashboard correctly waits for its result.
+                            self._set_lifecycle(
+                                browser_running=False,
+                                attachment=AttachmentState.ATTACHING,
                             )
-                        else:
-                            self.event_log.write(
-                                "profile_attach_candidates_exhausted",
-                                {
-                                    "profile_id": self.profile.id,
-                                    "candidate_ports": attach_diagnostics.get("candidate_ports", []),
-                                    "native_window_found": attach_diagnostics.get("native_window_found", False),
-                                },
+                            self._publish(
+                                WorkerState.STARTING,
+                                "Đang dò Chrome profile đang mở",
                             )
-                        if not attached_endpoint_found:
-                            repair_requested = command.kind == CommandKind.REPAIR_ATTACH
-                            if repair_requested:
+                            attached_endpoint_found = probe.can_attach_existing_browser()
+                            attach_diagnostics = probe.attach_diagnostics()
+                            selected_endpoint = attach_diagnostics.get("matched_endpoint")
+                            if selected_endpoint is not None:
                                 self.event_log.write(
-                                    "profile_cdp_repair_discovered",
+                                    "profile_attach_candidate_selected",
                                     {
                                         "profile_id": self.profile.id,
-                                        "attach_diagnostics": probe.attach_diagnostics(),
+                                        "port": int(selected_endpoint.rsplit(":", 1)[-1]),
+                                        "source": attach_diagnostics.get("selected_candidate_source"),
                                     },
                                 )
-                                self._publish(
-                                    WorkerState.STARTING,
-                                    "Đang khôi phục Chrome profile thiếu cổng điều khiển",
+                            else:
+                                self.event_log.write(
+                                    "profile_attach_candidates_exhausted",
+                                    {
+                                        "profile_id": self.profile.id,
+                                        "candidate_ports": attach_diagnostics.get("candidate_ports", []),
+                                        "native_window_found": attach_diagnostics.get("native_window_found", False),
+                                    },
                                 )
-                                if probe.repair_existing_browser_without_cdp():
+                            if not attached_endpoint_found:
+                                repair_requested = command.kind == CommandKind.REPAIR_ATTACH
+                                if repair_requested:
                                     self.event_log.write(
-                                        "profile_cdp_repair_started",
+                                        "profile_cdp_repair_discovered",
                                         {
                                             "profile_id": self.profile.id,
                                             "attach_diagnostics": probe.attach_diagnostics(),
                                         },
                                     )
-                                    probe.start(navigate=False, resize=False)
-                                    self.session = probe
-                                    self._set_lifecycle(
-                                        browser_running=True,
-                                        attachment=AttachmentState.ATTACHED,
+                                    self._publish(
+                                        WorkerState.STARTING,
+                                        "Đang khôi phục Chrome profile thiếu cổng điều khiển",
                                     )
+                                    if probe.repair_existing_browser_without_cdp():
+                                        self.event_log.write(
+                                            "profile_cdp_repair_started",
+                                            {
+                                                "profile_id": self.profile.id,
+                                                "attach_diagnostics": probe.attach_diagnostics(),
+                                            },
+                                        )
+                                        probe.start(navigate=False, resize=False)
+                                        self.session = probe
+                                        self._set_lifecycle(
+                                            browser_running=True,
+                                            attachment=AttachmentState.ATTACHED,
+                                        )
+                                        self.event_log.write(
+                                            "profile_cdp_repair_succeeded",
+                                            {
+                                                "profile_id": self.profile.id,
+                                                "duration_ms": round(
+                                                    (time.monotonic() - attach_started_at) * 1000
+                                                ),
+                                            },
+                                        )
+                                        self._publish(
+                                            WorkerState.READY,
+                                            "Đã khôi phục và kết nối Chrome profile",
+                                        )
+                                        continue
                                     self.event_log.write(
-                                        "profile_cdp_repair_succeeded",
+                                        "profile_cdp_repair_skipped",
                                         {
                                             "profile_id": self.profile.id,
-                                            "duration_ms": round(
-                                                (time.monotonic() - attach_started_at) * 1000
-                                            ),
+                                            "attach_diagnostics": probe.attach_diagnostics(),
                                         },
                                     )
-                                    self._publish(
-                                        WorkerState.READY,
-                                        "Đã khôi phục và kết nối Chrome profile",
-                                    )
-                                    continue
+                                chrome_still_open = bool(
+                                    probe.attach_diagnostics().get("native_window_found")
+                                    or probe.attach_diagnostics().get("matching_profile_process_count")
+                                )
+                                self._set_lifecycle(
+                                    browser_running=chrome_still_open,
+                                    attachment=AttachmentState.DETACHED,
+                                )
                                 self.event_log.write(
-                                    "profile_cdp_repair_skipped",
+                                    "profile_browser_discovered",
                                     {
                                         "profile_id": self.profile.id,
+                                        "browser_running": chrome_still_open,
                                         "attach_diagnostics": probe.attach_diagnostics(),
                                     },
                                 )
-                            chrome_still_open = bool(
-                                probe.attach_diagnostics().get("native_window_found")
-                                or probe.attach_diagnostics().get("matching_profile_process_count")
-                            )
-                            self._set_lifecycle(
-                                browser_running=chrome_still_open,
-                                attachment=AttachmentState.DETACHED,
-                            )
+                                self._publish(
+                                    WorkerState.STOPPED,
+                                    "Chrome đang mở nhưng chưa kết nối được cổng điều khiển"
+                                    if chrome_still_open
+                                    else "Profile đang đóng",
+                                )
+                                continue
+                            self._set_lifecycle(browser_running=True, attachment=AttachmentState.ATTACHING)
                             self.event_log.write(
                                 "profile_browser_discovered",
                                 {
                                     "profile_id": self.profile.id,
-                                    "browser_running": chrome_still_open,
-                                    "attach_diagnostics": probe.attach_diagnostics(),
+                                    "browser_running": True,
+                                    "attach_diagnostics": attach_diagnostics,
                                 },
                             )
-                            self._publish(
-                                WorkerState.STOPPED,
-                                "Chrome đang mở nhưng chưa kết nối được cổng điều khiển"
-                                if chrome_still_open
-                                else "Profile đang đóng",
+                            self.event_log.write(
+                                "profile_attach_started", {"profile_id": self.profile.id}
                             )
-                            continue
-                        self._set_lifecycle(browser_running=True, attachment=AttachmentState.ATTACHING)
-                        self.event_log.write(
-                            "profile_browser_discovered",
-                            {
-                                "profile_id": self.profile.id,
-                                "browser_running": True,
-                                "attach_diagnostics": attach_diagnostics,
-                            },
-                        )
-                        self.event_log.write(
-                            "profile_attach_started", {"profile_id": self.profile.id}
-                        )
-                        self._publish(WorkerState.STARTING, "Đang kết nối Chrome profile đang mở")
-                        # Reattachment must preserve the exact retained grid:
-                        # no navigation and no resize/move is permitted here.
-                        probe.start(navigate=False, resize=False, reattach=True)
-                        self.session = probe
-                        self._set_lifecycle(browser_running=True, attachment=AttachmentState.ATTACHED)
-                        # Do not traverse every nested iframe merely to reset
-                        # a listener left by the previous Tool process.  That
-                        # process is detached and cannot dispatch input; the
-                        # master source command below re-arms the required
-                        # frame.  On a stale iframe this old reset could block
-                        # startup for one minute and consume the first Sync
-                        # clicks before the source was armed.
-                        self.event_log.write(
-                            "profile_reattached",
-                            {
-                                "profile_id": self.profile.id,
-                                "duration_ms": round((time.monotonic() - attach_started_at) * 1000),
-                            },
-                        )
-                        self.event_log.write(
-                            "profile_attach_succeeded",
-                            {"profile_id": self.profile.id, "duration_ms": round((time.monotonic() - attach_started_at) * 1000)},
-                        )
-                    self._publish(WorkerState.READY, "Đã kết nối profile Chrome đang mở")
+                            self._publish(WorkerState.STARTING, "Đang kết nối Chrome profile đang mở")
+                            # Reattachment must preserve the exact retained grid:
+                            # no navigation and no resize/move is permitted here.
+                            probe.start(navigate=False, resize=False, reattach=True)
+                            self.session = probe
+                            self._set_lifecycle(browser_running=True, attachment=AttachmentState.ATTACHED)
+                            # Do not traverse every nested iframe merely to reset
+                            # a listener left by the previous Tool process.  That
+                            # process is detached and cannot dispatch input; the
+                            # master source command below re-arms the required
+                            # frame.  On a stale iframe this old reset could block
+                            # startup for one minute and consume the first Sync
+                            # clicks before the source was armed.
+                            self.event_log.write(
+                                "profile_reattached",
+                                {
+                                    "profile_id": self.profile.id,
+                                    "duration_ms": round((time.monotonic() - attach_started_at) * 1000),
+                                },
+                            )
+                            self.event_log.write(
+                                "profile_attach_succeeded",
+                                {"profile_id": self.profile.id, "duration_ms": round((time.monotonic() - attach_started_at) * 1000)},
+                            )
+                        self._publish(WorkerState.READY, "Đã kết nối profile Chrome đang mở")
+                    finally:
+                        if slot is not None:
+                            slot.release()
                 elif command.kind == CommandKind.AUTO_LOGIN:
                     if self.session is None:
                         raise RuntimeError("Profile chưa mở để tự đăng nhập")
@@ -1701,8 +1888,18 @@ class ProfileWorker:
                     WorkerState.RUNNING,
                     f"Auto Farm: đã quét lại đội sau lượt; {self._roster_summary(roster)}",
                 )
-            self._log_farm(
-                "detection",
+            # Throttle per-tick detection logs: same state+roster within 5s
+            # only spams disk (JSONL fsync) without new information.
+            _detection_sig = (detected.state.value, tuple(ready_teams), state.value)
+            _now = time.monotonic()
+            _last_sig = getattr(self, "_farm_last_detection_sig", None)
+            _last_at = getattr(self, "_farm_last_detection_at", 0.0)
+            _should_log_detection = _detection_sig != _last_sig or (_now - _last_at) >= 5.0
+            if _should_log_detection:
+                self._farm_last_detection_sig = _detection_sig
+                self._farm_last_detection_at = _now
+                self._log_farm(
+                    "detection",
                 {
                     "state": detected.state.value,
                     "canvas": {"width": image_size[0], "height": image_size[1]},
@@ -1797,7 +1994,14 @@ class ProfileWorker:
                 storage_limit_dialog,
                 storage_limit_cancel,
             ):
-                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
+                # Re-verify on a fresh frame but only match the 2 dialog
+                # templates instead of a second full ~50-template scan.
+                fresh, _fresh_surface, fresh_size = self._detect_subset(
+                    (
+                        FarmTemplateId.STORAGE_LIMIT_DIALOG_ANCHOR,
+                        FarmTemplateId.STORAGE_LIMIT_CANCEL_BUTTON,
+                    )
+                )
                 fresh_dialog = fresh.evidence_for(FarmTemplateId.STORAGE_LIMIT_DIALOG_ANCHOR)
                 fresh_cancel = fresh.evidence_for(FarmTemplateId.STORAGE_LIMIT_CANCEL_BUTTON)
                 if self._should_cancel_storage_limit(fresh_dialog, fresh_cancel):
@@ -1980,7 +2184,12 @@ class ProfileWorker:
                 target_resource_expiry_toast,
                 target_resource_expiry_confirm,
             ):
-                fresh, _fresh_surface, fresh_size = self.session.detect_farm_state()
+                fresh, _fresh_surface, fresh_size = self._detect_subset(
+                    (
+                        FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_TOAST,
+                        FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_CONFIRM,
+                    )
+                )
                 fresh_toast = fresh.evidence_for(FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_TOAST)
                 fresh_confirm = fresh.evidence_for(FarmTemplateId.BROWSER_TARGET_RESOURCE_EXPIRY_CONFIRM)
                 if self._should_confirm_target_resource_expiry(
@@ -3671,6 +3880,7 @@ class ProfileWorker:
             prepared = self._wait_for_farm_detection(
                 lambda frame: frame.state == DetectedGameState.WORLD_MAP,
                 timeout_seconds=6.0,
+                template_ids=WORLD_MAP_ANCHOR_TEMPLATES,
             )
             if prepared is None:
                 self._log_farm(
@@ -3969,24 +4179,52 @@ class ProfileWorker:
         self._publish(WorkerState.RUNNING, f"Auto Farm: đã chuyển tới {point[0]},{point[1]}; mở lại tìm {resource} cấp {level}")
         return "moved"
 
+    def _detect_subset(
+        self, template_ids: tuple[Any, ...]
+    ) -> tuple[Any, dict[str, float], tuple[int, int]]:
+        """Fresh capture limited to ``template_ids`` with legacy fallback."""
+        assert self.session is not None
+        try:
+            return self.session.detect_farm_state(template_ids)  # type: ignore[arg-type]
+        except TypeError:
+            return self.session.detect_farm_state()
+
     def _wait_for_farm_detection(
         self,
         predicate: Callable[[Any], bool],
         *,
         timeout_seconds: float,
         poll_seconds: float = 0.45,
+        template_ids: tuple[Any, ...] | None = None,
     ) -> tuple[Any, dict[str, float], tuple[int, int]] | None:
-        """Wait for a verified game postcondition without issuing input."""
+        """Wait for a verified game postcondition without issuing input.
+
+        Poll interval backs off (0.45s -> 1.5s) so a slow 35s map load does
+        not issue ~70 full CDP captures + full template scans. Callers can
+        pass ``template_ids`` to match only anchor templates.
+        """
         if self.session is None:
             return None
         deadline = time.monotonic() + max(0.0, timeout_seconds)
+        attempt = 0
         while True:
-            result = self.session.detect_farm_state()
+            if template_ids is not None:
+                try:
+                    result = self.session.detect_farm_state(template_ids)
+                except TypeError:
+                    # Test doubles / legacy sessions only accept no args.
+                    result = self.session.detect_farm_state()
+            else:
+                result = self.session.detect_farm_state()
             if predicate(result[0]):
                 return result
             if time.monotonic() >= deadline or self.stop_event.is_set():
                 return None
-            time.sleep(max(0.05, poll_seconds))
+            # Exponential backoff capped at 1.5s; early polls stay fast for
+            # the common <2s transition, slow loads stop hammering CDP/GPU.
+            backoff = min(1.5, max(0.05, poll_seconds) * (1.25**attempt))
+            attempt += 1
+            time.sleep(backoff)
 
     @staticmethod
     def _coordinate_fields_from_pin(
@@ -4136,6 +4374,15 @@ class ProfileWorker:
     def _save_farm_debug_capture(self, reason: str) -> Path | None:
         if self.session is None:
             return None
+        # Throttle repeats: a stuck state can request the same diagnostic
+        # every tick; keep at most one capture per reason each 10s.
+        now = time.monotonic()
+        last = getattr(self, "_farm_debug_last_at", {}).get(reason, 0.0)
+        if now - last < 10.0:
+            return None
+        if not hasattr(self, "_farm_debug_last_at"):
+            self._farm_debug_last_at = {}
+        self._farm_debug_last_at[reason] = now
         png = self.session.last_farm_capture_png()
         if not png:
             return None
@@ -4172,7 +4419,9 @@ class ProfileWorker:
         self._farm_renderer_waiting = False
         # Closing does not need to redraw the compact tile, but it must free
         # the shared high-resolution lease for the next profile.
-        self._release_automation_renderer(restore=False)
+        # Return an active high-resolution Farm lease to the compact grid
+        # before disconnecting CDP. This never terminates Chrome.
+        self._release_automation_renderer(restore=not close_browser)
         if self.session is None:
             self._set_lifecycle(
                 browser_running=False if close_browser else self.is_browser_running(),
@@ -4215,7 +4464,10 @@ class MultiProfileRunner:
         self.config = config
         self.on_update = on_update
         self.on_coordinate = on_coordinate or (lambda _profile_id, _event: None)
-        self.event_log = JsonLineLog(config.data_dir / "logs" / "events.jsonl")
+        self.event_log = JsonLineLog(
+            config.data_dir / "logs" / "events.jsonl",
+            max_bytes=10_000_000, backups=12, retention_days=20,
+        )
         self.workers: dict[str, ProfileWorker] = {}
         self.sync_enabled = False
         self.sync_state = SyncState.OFF
@@ -4226,6 +4478,8 @@ class MultiProfileRunner:
         self._sync_targets_snapshot: tuple[tuple[str, ProfileWorker], ...] = ()
         self._native_input = NativeInputCaptureService.instance()
         self._sync_last_pointer_move_at = 0.0
+        self._sync_delivery_counter = 0
+        self._sync_ack = SyncAckTracker(self.event_log.write)
         self.drag_items_visible = False
         self.scrollbars_visible = False
         self.windows_topmost = False
@@ -4241,6 +4495,7 @@ class MultiProfileRunner:
         # WebGL surfaces. Workers lease this lock only while real pixels are
         # required for Farm or mail recognition.
         self._automation_renderer_lock = threading.Lock()
+        self._attach_slot = threading.BoundedSemaphore(4)
         self.sync_profiles()
 
     def sync_profiles(self) -> None:
@@ -4264,6 +4519,8 @@ class MultiProfileRunner:
                     scrollbars_visible=self.scrollbars_visible,
                     topmost=self.windows_topmost,
                     automation_renderer_lock=self._automation_renderer_lock,
+                    on_sync_ack=self._on_sync_delivery_ack,
+                    attach_slot=getattr(self, "_attach_slot", None),
                 )
 
     def _current_sync_state(self) -> SyncState:
@@ -4314,6 +4571,16 @@ class MultiProfileRunner:
                     "Đồng bộ chuột - bàn phím đang sở hữu quyền điều khiển profile"
                 )
         self.workers[profile_id].submit(WorkerCommand(kind, dict(payload)))
+        event_log = getattr(self, "event_log", None)
+        if event_log is not None and kind not in {CommandKind.RESET_SYNC_INPUT, CommandKind.SET_SYNC_SOURCE}:
+            event_log.write(
+                "command_submitted",
+                {
+                    "profile_id": profile_id,
+                    "command": kind.value,
+                    "payload_fields": sorted(payload),
+                },
+            )
 
     def enable_mail_monitor(self, profile_ids: set[str]) -> None:
         with self._sync_lock:
@@ -4601,6 +4868,9 @@ class MultiProfileRunner:
             self._sync_start_timer = None
         if timer is not None:
             timer.cancel()
+        tracker = getattr(self, "_sync_ack", None)
+        if tracker is not None:
+            tracker.flush()
         if was_enabled:
             self.event_log.write(
                 "sync_disabled",
@@ -4992,9 +5262,18 @@ class MultiProfileRunner:
         )
 
     def trim_all_profile_memory(self) -> int:
-        if self._current_sync_state() == SyncState.ACTIVE:
+        if self._current_sync_state() in {SyncState.ACTIVE, SyncState.STARTING}:
             # EmptyWorkingSet can stall Chrome renderers precisely while a
             # manual gesture is being mirrored.
+            return 0
+        if any(
+            getattr(worker, "_farm", None) is not None
+            or bool(getattr(worker, "_automation_renderer_locked", False))
+            or bool(getattr(worker, "_monitor_log_context", None))
+            for worker in self.workers.values()
+        ):
+            # Do not trim a process tree that can be capturing, resizing or
+            # interacting with WebGL as part of an active Farm/Monitor job.
             return 0
         trimmed = 0
         process_parents = snapshot_process_parents()
@@ -5004,6 +5283,11 @@ class MultiProfileRunner:
             if hwnd is not None:
                 trimmed += trim_window_process_tree(hwnd, process_parents)
         return trimmed
+
+    def _on_sync_delivery_ack(self, profile_id: str, delivery_id: str, success: bool, latency_ms: float) -> None:
+        tracker = getattr(self, "_sync_ack", None)
+        if tracker is not None:
+            tracker.ack(profile_id, delivery_id, success, latency_ms)
 
     def sync_metrics(self) -> dict[str, object]:
         """Low-overhead native capture snapshot for field diagnostics."""
@@ -5015,6 +5299,7 @@ class MultiProfileRunner:
                 "state": self._current_sync_state().value,
                 "target_count": len(getattr(self, "_sync_targets_snapshot", ())),
                 "sync_session_id": str(getattr(self, "_sync_session_id", "")),
+                **(self._sync_ack.snapshot() if hasattr(self, "_sync_ack") else {}),
             }
 
     def _on_input(self, source_profile_id: str, event: dict[str, object]) -> None:
@@ -5090,6 +5375,13 @@ class MultiProfileRunner:
             )
             self.disable_sync()
             return
+        ack_tracker = getattr(self, "_sync_ack", None)
+        if ack_tracker is not None and event_type in {"pointerdown", "pointerup", "keydown", "keyup"}:
+            with self._sync_lock:
+                self._sync_delivery_counter += 1
+                delivery_id = f"{sync_session_id}:{self._sync_delivery_counter}"
+            sync_event["sync_delivery_id"] = delivery_id
+            ack_tracker.start(delivery_id, event_type, target_ids)
         for profile_id, worker in target_workers:
             submit_synced_input = getattr(worker, "submit_synced_input", None)
             if callable(submit_synced_input):
@@ -5132,10 +5424,12 @@ class MultiProfileRunner:
             )
 
     def stop_all(self) -> None:
+        self.event_log.write("runner_stop_all", {"profile_count": len(self.workers)})
         for worker in self.workers.values():
             worker.stop()
 
     def shutdown(self, *, wait_seconds: float = RUNNER_SHUTDOWN_WAIT_SECONDS) -> None:
+        self.event_log.write("runner_shutdown", {"profile_count": len(self.workers)})
         # Chrome windows intentionally survive an IK Auto update/restart.
         # Detach the current master listener.  Sync is deliberately off on
         # every Tool start and can only be enabled by the user.
@@ -5150,8 +5444,23 @@ class MultiProfileRunner:
         # detaching is daemonised; process exit safely releases its CDP link
         # while leaving the user's Chrome window intact.
         deadline = time.monotonic() + max(0.0, wait_seconds)
-        for worker in workers:
+        for index, worker in enumerate(workers):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            worker.join(remaining)
+            # Fairly distribute the shared grace period across all profiles.
+            slots = max(1, len(workers) - index)
+            worker.join(min(remaining, max(0.01, remaining / slots)))
+        unfinished = [
+            str(getattr(getattr(w, "profile", None), "id", "unknown"))
+            for w in workers
+            if getattr(w, "thread", None) is not None and w.thread.is_alive()
+        ]
+        self.event_log.write(
+            "runner_shutdown_result",
+            {
+                "profile_count": len(workers),
+                "still_detaching_count": len(unfinished),
+                "still_detaching_profiles": unfinished,
+            },
+        )

@@ -128,3 +128,51 @@ def test_managed_profiles_receive_unique_stable_cdp_ports(tmp_path: Path) -> Non
     assert [profile.cdp_port for profile in first.profiles] == [
         profile.cdp_port for profile in second.profiles
     ]
+
+
+def test_duplicate_managed_data_directory_is_rejected_before_chrome_start(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "config.json"
+    source.write_text(
+        json.dumps({
+            "profiles": [
+                {"id": "p1", "user_data_dir": "data/profiles/shared"},
+                {"id": "p2", "user_data_dir": "data/profiles/shared/../shared"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="trùng user_data_dir"):
+        load_config(source)
+
+
+def test_duplicate_external_cdp_url_is_rejected_before_chrome_start(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "config.json"
+    source.write_text(
+        json.dumps({
+            "profiles": [
+                {"id": "p1", "mode": "cdp", "cdp_url": "http://127.0.0.1:23232"},
+                {"id": "p2", "mode": "cdp", "cdp_url": "HTTP://127.0.0.1:23232/"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="trùng cdp_url"):
+        load_config(source)
+
+
+def test_forty_five_runtime_identities_remain_unique(tmp_path: Path) -> None:
+    source = tmp_path / "config.json"
+    source.write_text(
+        json.dumps({
+            "profiles": [{"id": f"profile-{i:02d}"} for i in range(45)]
+        }),
+        encoding="utf-8",
+    )
+    cfg = load_config(source)
+    assert len(cfg.profiles) == 45
+    assert len({p.cdp_port for p in cfg.profiles}) == 45
+    assert len({p.user_data_dir for p in cfg.profiles}) == 45

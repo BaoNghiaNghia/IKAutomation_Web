@@ -404,15 +404,28 @@ class BrowserCanvasMatcher:
     def __init__(self, template_root: Path | None = None) -> None:
         self.template_root = template_root or Path(__file__).with_name("assets") / "farm_templates"
         self._templates: dict[str, object] = {}
-    def detect(self, screenshot_png: bytes) -> GameDetectionResult:
+        self._scaled: dict[tuple[str, int, int, str], object] = {}
+
+    def detect(
+        self,
+        screenshot_png: bytes,
+        template_ids: tuple[FarmTemplateId, ...] | None = None,
+    ) -> GameDetectionResult:
         import cv2
         import numpy as np
 
         image = cv2.imdecode(np.frombuffer(screenshot_png, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             raise ValueError("Canvas screenshot không phải PNG hợp lệ")
-        evidence = {template_id: self._match(image, template_id) for template_id in DETECTION_TEMPLATES}
-        result = BrowserGameStateDetector().detect(evidence)
+        wanted = template_ids if template_ids is not None else DETECTION_TEMPLATES
+        evidence = {template_id: self._match(image, template_id) for template_id in wanted}
+        # Missing templates are treated as not-found so subset scans stay
+        # compatible with the full-state classifier.
+        full_evidence = {
+            template_id: evidence.get(template_id, TemplateEvidence(template_id, False))
+            for template_id in DETECTION_TEMPLATES
+        }
+        result = BrowserGameStateDetector().detect(full_evidence)
         # The same compact team HUD is visible in both stable City and World
         # Map frames. Scanning only World Map left the dashboard with a stale
         # all-ready roster while the profile was visibly in City. Popup and
@@ -609,6 +622,17 @@ class BrowserCanvasMatcher:
         scale_y = scale_x if spec.uniform_width_scale else image_height / spec.reference_height
         x, y, width, height = self._region(spec.region, image_width, image_height)
         search = image[y : y + height, x : x + width]
+        # Convert the search patch once; the old code redid cvtColor/Canny
+        # for every scale variant (up to 5x per template).
+        if spec.edge:
+            match_search = cv2.Canny(cv2.cvtColor(search, cv2.COLOR_BGR2GRAY), 60, 150)
+            match_kind = "edge"
+        elif spec.grayscale:
+            match_search = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
+            match_kind = "gray"
+        else:
+            match_search = search
+            match_kind = "color"
         best_confidence = -1.0
         best_location: tuple[int, int] | None = None
         best_size: tuple[int, int] | None = None
@@ -617,16 +641,24 @@ class BrowserCanvasMatcher:
             scaled_height = max(1, round(template.shape[0] * scale_y * variant))
             if scaled_width > search.shape[1] or scaled_height > search.shape[0]:
                 continue
-            scaled = cv2.resize(template, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
-            if spec.edge:
-                match_search = cv2.Canny(cv2.cvtColor(search, cv2.COLOR_BGR2GRAY), 60, 150)
-                match_template = cv2.Canny(cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY), 60, 150)
-            elif spec.grayscale:
-                match_search = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
-                match_template = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
+            cache_key = (filename, scaled_width, scaled_height, match_kind)
+            cached = self._scaled.get(cache_key)
+            if cached is None:
+                scaled = cv2.resize(template, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
+                if spec.edge:
+                    match_template = cv2.Canny(cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY), 60, 150)
+                elif spec.grayscale:
+                    match_template = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
+                else:
+                    match_template = scaled
+                self._scaled[cache_key] = match_template
+                if len(self._scaled) > 1024:
+                    # Canvas sizes are bounded (compact tile vs 1280x720);
+                    # drop stale scales instead of growing without bound.
+                    self._scaled.clear()
+                    self._scaled[cache_key] = match_template
             else:
-                match_search = search
-                match_template = scaled
+                match_template = cached
             result = cv2.matchTemplate(match_search, match_template, cv2.TM_CCOEFF_NORMED)
             _, confidence, _, location = cv2.minMaxLoc(result)
             if confidence > best_confidence:

@@ -7,14 +7,25 @@ immutable point, without touching the native cursor or window focus.
 """
 from __future__ import annotations
 
+import contextlib
+import threading
 from dataclasses import dataclass
 from typing import Any
+from weakref import WeakKeyDictionary
 
 
 @dataclass(frozen=True, slots=True)
 class ViewportPoint:
     x: float
     y: float
+
+
+# Last mouse position per CDP session: repeated taps on the same control
+# (e.g. Read-All across 5 mailbox tabs) skip the redundant mouseMoved and
+# save 1/3 roundtrips. Keyed by session identity; first click stays complete.
+_last_mouse_pos: WeakKeyDictionary[Any, tuple[float, float]] = WeakKeyDictionary()
+_last_mouse_lock = threading.Lock()
+_last_mirrored_pos: dict[int, tuple[float, float]] = {}
 
 
 class ProfileInputEngine:
@@ -42,11 +53,25 @@ class ProfileInputEngine:
             return
         if kind != "mouse":
             raise ValueError(f"Game input kind không được hỗ trợ: {kind}")
-        for event_type, button in (
-            ("mouseMoved", "none"),
-            ("mousePressed", "left"),
-            ("mouseReleased", "left"),
-        ):
+        # Skip mouseMoved when already at this point (repeat taps on one
+        # control). First dispatch per session stays a full move+press+release.
+        events: tuple[tuple[str, str], ...]
+        with _last_mouse_lock:
+            try:
+                last = _last_mouse_pos.get(cdp)
+            except TypeError:
+                # Some third-party sessions are not weak-referenceable.
+                # For those, keep the safe full-gesture behavior.
+                last = None
+        if last is not None and last == (point.x, point.y):
+            events = (("mousePressed", "left"), ("mouseReleased", "left"))
+        else:
+            events = (
+                ("mouseMoved", "none"),
+                ("mousePressed", "left"),
+                ("mouseReleased", "left"),
+            )
+        for event_type, button in events:
             params: dict[str, object] = {
                 "type": event_type,
                 "x": point.x,
@@ -56,6 +81,8 @@ class ProfileInputEngine:
             if event_type != "mouseMoved":
                 params["clickCount"] = 1
             cdp.send("Input.dispatchMouseEvent", params)
+        with _last_mouse_lock, contextlib.suppress(TypeError):
+            _last_mouse_pos[cdp] = (point.x, point.y)
 
     @staticmethod
     def pointer(

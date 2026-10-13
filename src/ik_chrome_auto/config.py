@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -80,6 +81,33 @@ def _allocate_managed_cdp_ports(profiles: list[ProfileConfig]) -> None:
                 candidate = _PROFILE_CDP_PORT_MIN
         profile.cdp_port = candidate
         used.add(candidate)
+
+
+def _validate_profile_runtime_identities(profiles: list[ProfileConfig]) -> None:
+    """Avoid two account IDs driving the same Chrome directory/CDP session."""
+    managed_dirs: dict[str, str] = {}
+    external_endpoints: dict[str, str] = {}
+    for profile in profiles:
+        if profile.mode == ProfileMode.MANAGED and profile.user_data_dir is not None:
+            # Windows path equality ignores character case; resolve also
+            # collapses harmless .. segments before comparing identities.
+            directory = os.path.normcase(str(profile.user_data_dir.resolve()))
+            previous = managed_dirs.get(directory)
+            if previous is not None:
+                raise ValueError(
+                    f"Profiles {previous} và {profile.id} dùng trùng user_data_dir; "
+                    "mỗi account cần một Chrome profile riêng"
+                )
+            managed_dirs[directory] = profile.id
+        elif profile.mode == ProfileMode.CDP and profile.cdp_url:
+            endpoint = profile.cdp_url.strip().rstrip("/").lower()
+            previous = external_endpoints.get(endpoint)
+            if previous is not None:
+                raise ValueError(
+                    f"Profiles {previous} và {profile.id} dùng trùng cdp_url; "
+                    "mỗi account cần một phiên CDP riêng"
+                )
+            external_endpoints[endpoint] = profile.id
 
 
 def is_allowed_host(host: str, allowed_hosts: tuple[str, ...]) -> bool:
@@ -175,6 +203,7 @@ def load_config(path: Path) -> AppConfig:
         profiles.append(profile)
 
     _allocate_managed_cdp_ports(profiles)
+    _validate_profile_runtime_identities(profiles)
 
     return AppConfig(
         root=root,

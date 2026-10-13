@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import queue
@@ -13,9 +14,10 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QCursor, QGuiApplication, QIcon, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QApplication,
     QDialog,
     QFileDialog,
@@ -49,6 +51,7 @@ from qfluentwidgets import FluentIcon as FIF
 from ik_chrome_auto.build_info import release_build_label
 from ik_chrome_auto.config import ensure_data_dirs, load_config, save_config, unique_profile_id
 from ik_chrome_auto.credential_store import escape_account_export_field, parse_account_export_line
+from ik_chrome_auto.diagnostics import diagnostic_log, fleet_health_payload, record
 from ik_chrome_auto.farm_launch_policy import FarmLaunchPolicy
 from ik_chrome_auto.interaction import format_coordinate
 from ik_chrome_auto.mail_monitor import (
@@ -93,8 +96,50 @@ MONITOR_GROUP_SIZE = 5
 MONITOR_PROFILE_STAGGER_SECONDS = 0.25
 MONITOR_GROUP_PAUSE_SECONDS = 0.15
 MONITOR_PROFILE_RETRY_SECONDS = 2.0
+MONITOR_MAX_SCAN_ATTEMPTS = 3
+MONITOR_HARD_DEADLINE_SECONDS = 180.0
 MONITOR_CYCLE_SECONDS = 1.0
 PROFILE_UPDATE_BATCH_SIZE = 120
+
+
+class _UiActionTrace(QObject):
+    """Track button activations without recording typed values or arbitrary labels."""
+
+    _KNOWN_ACTIONS = frozenset({
+        "Khởi động", "AutoFarms", "Giám sát", "Dừng giám sát",
+        "Sắp xếp", "Quản lý", "Bật đồng bộ", "Tắt đồng bộ",
+        "Check for Updates", "Kiểm tra cập nhật", "Telegram",
+        "Chọn tất cả", "Bỏ chọn", "Lưu thay đổi", "Xác nhận",
+        "Hủy", "Gửi thử", "Copy x,y", "JSON",
+    })
+
+    def __init__(self, parent: QObject, log: object) -> None:
+        super().__init__(parent)
+        self._log = log
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        try:
+            kind = event.type()
+            if kind not in {QEvent.Type.MouseButtonRelease, QEvent.Type.KeyRelease}:
+                return False
+            if not isinstance(watched, QAbstractButton) or not watched.isEnabled():
+                return False
+            if kind == QEvent.Type.KeyRelease:
+                if event.key() not in {Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+                    return False
+            elif not watched.rect().contains(event.position().toPoint()):
+                return False
+            label = watched.text() if hasattr(watched, "text") else ""
+            action = label if label in self._KNOWN_ACTIONS else "custom_control"
+            record(
+                self._log, "ui_control_activated", action=action,
+                control_type=type(watched).__name__,
+                window_type=type(watched.window()).__name__,
+                label_fingerprint=hashlib.sha256(label.encode("utf-8")).hexdigest()[:12],
+            )
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+            pass
+        return False
 
 
 def _ui_px(value: int | float, minimum: int = 1) -> int:
@@ -213,6 +258,9 @@ class Dashboard(QWidget):
         self._monitoring_enabled = False
         self._monitor_queue: deque[str] = deque()
         self._monitor_in_flight: dict[str, float] = {}
+        self._monitor_started_at: dict[str, float] = {}
+        self._monitor_attempts: dict[str, int] = {}
+        self._monitor_quarantined_profiles: set[str] = set()
         self._monitor_batch_profiles: set[str] = set()
         self._monitor_batch_pending: deque[str] = deque()
         # A batch has two barriers during the initial setup: all members must
@@ -231,7 +279,9 @@ class Dashboard(QWidget):
         self._individually_opening_profiles: set[str] = set()
         self._reattach_pending_profiles: set[str] = set()
         self._reattach_queue: deque[str] = deque()
-        self._reattach_in_flight: str | None = None
+        self._reattach_in_flight: set[str] = set()
+        self._reattach_deadlines: dict[str, float] = {}
+        self._reattach_failed_profiles: set[str] = set()
         self._reattach_legacy_mode = False
         self._reattach_started_at = 0.0
         self._reattach_total = 0
@@ -241,7 +291,16 @@ class Dashboard(QWidget):
         self._responsive_profile_buttons: list[PushButton] = []
         self._overview_typography: list[tuple[QLabel, QLabel]] = []
         self._last_resources = self._last_trim = 0.0
+        self._last_health_snapshot_at = 0.0
         self._last_farm_window_restore = 0.0
+        # Cache nvidia-smi (spawns a subprocess, up to 5s) so the 150ms UI
+        # poll and farm-opening checks do not freeze Qt.
+        self._cached_gpu_at = 0.0
+        self._cached_gpu_value: float | None = None
+        # Async credential names: show profile names immediately, fill
+        # masked usernames in the background (DPAPI per row blocks UI).
+        self._username_cache: dict[str, str] = {}
+        self._username_labels: dict[str, tuple[QLabel, str, int]] = {}
         self._build()
         self._draw_rows()
         # Chrome is deliberately detached from IK Auto during an update.  On
@@ -261,6 +320,12 @@ class Dashboard(QWidget):
         # A 150 ms UI pulse is ample for state transitions and leaves more
         # time for Qt to paint/scroll large (45–50 card) profile lists.
         self.timer.start(150)
+        # Slow 2s pulse for win32/resource/trim work so the fast pulse stays
+        # cheap (state transitions + queue drains only).
+        with contextlib.suppress(Exception):
+            self.slow_timer = QTimer(self)
+            self.slow_timer.timeout.connect(self._poll_slow)
+            self.slow_timer.start(2000)
 
     def _build(self) -> None:
         self.setWindowTitle("IK Auto — Browser Control")
@@ -338,7 +403,7 @@ class Dashboard(QWidget):
         ll.insertWidget(2, automation)
         ll.addStretch()
         right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(_ui_px(8)); body.addWidget(right,1)
-        progress = self._card(); pl = QVBoxLayout(progress); ph = QHBoxLayout(); ph.addWidget(StrongBodyLabel("Tiến trình profile")); ph.addStretch(); ph.addWidget(self.farm_launcher); self.open_badge = QLabel("0 đang mở"); self.open_badge.setStyleSheet(f"background:#e2edff;color:#2767bd;border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;"); ph.addWidget(self.open_badge); pl.addLayout(ph); self.table_layout = QGridLayout(); self.table_layout.setSpacing(_ui_px(8)); self.table_layout.setColumnStretch(0, 1); self.table_layout.setColumnStretch(1, 1); content=QWidget(); content.setLayout(self.table_layout); self.scroll=QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setWidget(content); pl.addWidget(self.scroll,1); rl.addWidget(progress,1)
+        progress = self._card(); pl = QVBoxLayout(progress); ph = QHBoxLayout(); ph.addWidget(StrongBodyLabel("Tiến trình profile")); ph.addStretch(); ph.addWidget(self.farm_launcher); self.open_badge = QLabel("0 đang mở"); self.open_badge.setStyleSheet(f"background:#e2edff;color:#2767bd;border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;"); ph.addWidget(self.open_badge); self.reconnect_health = QLabel("CDP: —"); ph.addWidget(self.reconnect_health); self.reconnect_retry = PushButton("Retry CDP"); self.reconnect_retry.setVisible(False); self.reconnect_retry.clicked.connect(self._retry_profile_reattach); ph.addWidget(self.reconnect_retry); pl.addLayout(ph); self.table_layout = QGridLayout(); self.table_layout.setSpacing(_ui_px(8)); self.table_layout.setColumnStretch(0, 1); self.table_layout.setColumnStretch(1, 1); content=QWidget(); content.setLayout(self.table_layout); self.scroll=QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setWidget(content); pl.addWidget(self.scroll,1); rl.addWidget(progress,1)
         foot=QHBoxLayout(); coords=self._card(); cl=QVBoxLayout(coords); ch=QHBoxLayout(); ch.addWidget(StrongBodyLabel("Lấy tọa độ")); ch.addStretch(); bjson=PushButton("JSON"); bjson.clicked.connect(self._copy_json); bxy=PushButton("Copy x,y"); bxy.clicked.connect(self._copy_xy); ch.addWidget(bjson); ch.addWidget(bxy); cl.addLayout(ch); self.coordinate= self._muted("Chưa đo tọa độ"); cl.addWidget(self.coordinate); foot.addWidget(coords,2); logs=self._card(); logl=QVBoxLayout(logs); logl.addWidget(StrongBodyLabel("Nhật ký gần nhất")); self.log=QTextEdit(); self.log.setReadOnly(True); self.log.setFixedHeight(_ui_px(86)); logl.addWidget(self.log); foot.addWidget(logs,3); coords.hide(); logs.hide(); rl.addLayout(foot)
         self._apply_responsive_style()
 
@@ -526,10 +591,17 @@ class Dashboard(QWidget):
             item=self.table_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
         self.rows.clear(); self.master.clear()
+        with contextlib.suppress(Exception):
+            self._username_labels.clear()
+        if not isinstance(getattr(self, "_username_labels", None), dict):
+            with contextlib.suppress(Exception):
+                self._username_labels = {}
         for profile in self.config.profiles:
+            # Fast initial paint: use profile name, refresh masked usernames
+            # in the background (DPAPI per row blocks the UI for 45 accs).
             self._add_master_profile_option(
                 self.master,
-                self._masked_profile_username(profile),
+                self._mask_username(profile.name),
                 profile.id,
             )
         for account_number, profile in enumerate(self.config.profiles, start=1):
@@ -537,7 +609,9 @@ class Dashboard(QWidget):
             self._set_roster_tooltip(card, ())
             layout = QVBoxLayout(card)
             top = QHBoxLayout()
-            top.addWidget(StrongBodyLabel(self._profile_display_name(profile, account_number)))
+            title = StrongBodyLabel(profile.name)
+            top.addWidget(title)
+            self._username_labels[profile.id] = (title, profile.name, account_number)
             top.addStretch()
             badge = QLabel("Đã dừng")
             badge.setStyleSheet(f"background:#f1f5f9;color:#475569;border-radius:{_ui_px(10)}px;padding:{_ui_px(3)}px {_ui_px(8)}px;")
@@ -565,6 +639,71 @@ class Dashboard(QWidget):
             self.table_layout.addWidget(card, index // 2, index % 2)
             self.rows[profile.id] = ProfileRow(status, roster, resource, badge, card, open_button)
         self.table_layout.setRowStretch((len(self.rows) + 1) // 2, 1)
+        self._preload_usernames_async()
+
+    def _preload_usernames_async(self) -> None:
+        """Load DPAPI usernames off the UI thread, then refresh labels once."""
+        profiles = list(self.config.profiles)
+
+        def _load() -> dict[str, str]:
+            loaded: dict[str, str] = {}
+            try:
+                from ik_chrome_auto.credential_store import WindowsCredentialStore
+
+                store = WindowsCredentialStore()
+            except Exception:
+                return loaded
+            for profile in profiles:
+                try:
+                    credential = store.load(profile.id)
+                    if credential is not None:
+                        loaded[profile.id] = self._mask_username(credential.username)
+                    else:
+                        loaded[profile.id] = self._mask_username(profile.name)
+                except Exception:
+                    continue
+            return loaded
+
+        def _apply() -> None:
+            try:
+                loaded = _load()
+            except Exception:
+                return
+            if not loaded:
+                return
+            try:
+                getattr(self, "_username_cache", {}).update(loaded)
+            except Exception:
+                try:
+                    self._username_cache = dict(loaded)
+                except Exception:
+                    return
+            try:
+                from PySide6.QtCore import QTimer
+
+                def _refresh() -> None:
+                    labels = getattr(self, "_username_labels", {})
+                    for profile_id, masked in loaded.items():
+                        try:
+                            entry = labels.get(profile_id)
+                        except Exception:
+                            continue
+                        if entry is None:
+                            continue
+                        label, _name, account_number = entry
+                        try:
+                            if masked == "Chưa có username":
+                                continue
+                            label.setText(f"Tài khoản {account_number:02d} · {masked}")
+                        except Exception:
+                            continue
+
+                QTimer.singleShot(0, _refresh)
+            except Exception:
+                pass
+
+        with contextlib.suppress(Exception):
+            threading.Thread(target=_apply, name="username-preload", daemon=True).start()
 
     def _open_profile(self, profile_id: str) -> None:
         """Open one closed profile while retaining its normal tool eligibility."""
@@ -587,43 +726,69 @@ class Dashboard(QWidget):
             return
         self._append_log(f"Đang mở riêng profile {profile_id}")
 
-    def _begin_profile_reattach(self) -> None:
-        """Reconnect retained Chrome profiles one at a time for clear UI state."""
+    def _retry_profile_reattach(self) -> None:
+        """Retry only failed CDP sessions; never disturb healthy followers."""
+        if getattr(self, "_reattach_pending_profiles", set()):
+            return
+        failed = set(getattr(self, "_reattach_failed_profiles", ()))
+        retry_ids = {
+            pid for pid in failed if not self.runner.has_open_session(pid)
+        }
+        if retry_ids:
+            self._begin_profile_reattach(profile_ids=retry_ids)
+        else:
+            self._reattach_failed_profiles.clear()
+            retry = getattr(self, "reconnect_retry", None)
+            if retry is not None:
+                retry.setVisible(False)
+            self._update_reconnect_health()
+
+    def _update_reconnect_health(self) -> None:
+        health = getattr(self, "reconnect_health", None)
+        if health is None:
+            return
+        config = getattr(self, "config", None)
+        if config is not None:
+            ids = [p.id for p in config.profiles if p.enabled]
+            ready = sum(bool(self.runner.has_open_session(pid)) for pid in ids)
+            total = len(ids)
+        else:
+            total = getattr(self, "_reattach_total", 0)
+            pending = len(getattr(self, "_reattach_pending_profiles", ()))
+            ready = total - pending - len(getattr(self, "_reattach_failed_profiles", ()))
+        pending = len(getattr(self, "_reattach_pending_profiles", ()))
+        health.setText(f"CDP {ready}/{total}" + (f" · {pending} chờ" if pending else ""))
+        health.setToolTip("Số profile đã kết nối CDP trong lượt kiểm tra gần nhất")
+
+    def _begin_profile_reattach(self, *, profile_ids: set[str] | None = None) -> None:
+        """Reconnect retained Chrome only; never relaunch or terminate a window."""
         config = getattr(self, "config", None)
         legacy_reattach = config is None
         if legacy_reattach:
-            # Minimal Dashboard harnesses and older third-party integrations
-            # expose only the original batch API. Preserve that API rather
-            # than making a UI-only scheduler change a breaking change.
             pending = set(self.runner.reattach_existing_profiles())
         else:
-            has_profile_window = getattr(self.runner, "has_profile_window", None)
-            visible_profile_ids = (
-                {
-                    profile.id
-                    for profile in config.profiles
-                    if profile.enabled and callable(has_profile_window)
-                    and has_profile_window(profile.id)
-                }
-                if callable(has_profile_window)
-                else None
-            )
+            # Native window titles may be truncated/localized. Attempt a
+            # non-destructive attach for every enabled profile; the probe
+            # reports CLOSED immediately when no Chrome/CDP exists.
             pending = {
-                profile.id
-                for profile in config.profiles
-                if profile.enabled
-                and not self.runner.is_attached(profile.id)
-                and (visible_profile_ids is None or profile.id in visible_profile_ids)
+                profile.id for profile in config.profiles
+                if profile.enabled and not self.runner.is_attached(profile.id)
+                and (profile_ids is None or profile.id in profile_ids)
             }
         self._reattach_pending_profiles = pending
         self._reattach_queue = (
             deque(profile.id for profile in config.profiles if profile.id in pending)
-            if not legacy_reattach
-            else deque()
+            if not legacy_reattach else deque()
         )
-        self._reattach_in_flight = None
+        self._reattach_in_flight = set()
+        self._reattach_deadlines = {}
+        self._reattach_failed_profiles = set()
         self._reattach_legacy_mode = legacy_reattach
         self._reattach_total = len(pending)
+        retry = getattr(self, "reconnect_retry", None)
+        if retry is not None:
+            retry.setVisible(False)
+        self._update_reconnect_health()
         self._reattach_started_at = time.monotonic()
         if not pending:
             self._finish_profile_reattach()
@@ -631,38 +796,90 @@ class Dashboard(QWidget):
         self.farm_launcher.setEnabled(False)
         self.farm_launcher.setText("Đang kết nối…")
         self._append_log(
-            f"Đang kết nối lại {len(pending)} profile Chrome đang mở từ phiên trước, lần lượt từng thiết bị"
+            f"Đang dò {len(pending)} Chrome profile; tối đa 4 kết nối đồng thời, không đóng Chrome"
         )
         if not legacy_reattach:
             self._start_next_profile_reattach()
 
     def _start_next_profile_reattach(self) -> None:
-        if self._reattach_in_flight is not None:
+        """Bound CDP attach to four workers so no single failure blocks 45."""
+        in_flight = getattr(self, "_reattach_in_flight", set())
+        if not isinstance(in_flight, set):
             return
-        if not self._reattach_queue:
+        while len(in_flight) < 4 and self._reattach_queue:
+            profile_id = self._reattach_queue.popleft()
+            in_flight.add(profile_id)
+            # Allow the configured Playwright connect timeout plus a small
+            # discovery margin, but never stall the remaining 44 profiles.
+            timeout_ms = self.config.browser.startup_timeout_ms
+            self._reattach_deadlines[profile_id] = (
+                time.monotonic() + max(20.0, min(120.0, timeout_ms / 1000 + 10.0))
+            )
+            completed = self._reattach_total - len(self._reattach_pending_profiles)
+            self._append_log(
+                f"Đang kết nối {profile_id} ({completed + 1}/{self._reattach_total})"
+            )
+            try:
+                # ATTACH never uses Chrome repair's process-termination path.
+                self.runner.submit(profile_id, CommandKind.ATTACH)
+            except Exception as error:
+                in_flight.discard(profile_id)
+                self._reattach_deadlines.pop(profile_id, None)
+                self._reattach_pending_profiles.discard(profile_id)
+                self._reattach_failed_profiles.add(profile_id)
+                self._append_log(
+                    f"Không gửi được ATTACH cho {profile_id}: {type(error).__name__}"
+                )
+        self._update_reconnect_health()
+        if not self._reattach_queue and not in_flight:
             self._finish_profile_reattach()
+
+    def _expire_profile_reattach(self) -> None:
+        """Release scheduler slots on timeout; never kill/reopen Chrome."""
+        if getattr(self, "_reattach_legacy_mode", False):
             return
-        profile_id = self._reattach_queue.popleft()
-        self._reattach_in_flight = profile_id
-        completed = self._reattach_total - len(self._reattach_pending_profiles)
-        self._append_log(
-            f"Đang kết nối profile {completed + 1}/{self._reattach_total}: {profile_id}"
-        )
-        # Retained Chrome may have lost its DevTools switch while the tool was
-        # closed.  This command repairs only a process verified by its exact
-        # user-data-dir; a normal CDP profile attaches without a restart.
-        self.runner.submit(profile_id, CommandKind.REPAIR_ATTACH)
+        in_flight = getattr(self, "_reattach_in_flight", set())
+        if not in_flight:
+            return
+        now = time.monotonic()
+        expired = [
+            profile_id for profile_id in tuple(in_flight)
+            if now >= self._reattach_deadlines.get(profile_id, float("inf"))
+        ]
+        for profile_id in expired:
+            in_flight.discard(profile_id)
+            self._reattach_deadlines.pop(profile_id, None)
+            self._reattach_pending_profiles.discard(profile_id)
+            if not self.runner.has_open_session(profile_id):
+                self._reattach_failed_profiles.add(profile_id)
+                self._append_log(
+                    f"Reconnect timeout: {profile_id}; Chrome được giữ nguyên, có thể Retry sau"
+                )
+            else:
+                self._append_log(
+                    f"CDP {profile_id} đã Ready trước khi hết thời gian chờ UI"
+                )
+        if expired:
+            self._update_reconnect_health()
+            self._start_next_profile_reattach()
 
     def _finish_profile_reattach(self) -> None:
-        if self._reattach_pending_profiles or self._reattach_in_flight is not None:
+        if self._reattach_pending_profiles or self._reattach_in_flight:
             return
         elapsed = round((time.monotonic() - self._reattach_started_at) * 1000)
         if self._farm_launcher_phase == "launch":
             self.farm_launcher.setEnabled(True)
             self.farm_launcher.setText("Khởi động")
-        self._append_log(f"Đã kiểm tra {self._reattach_total} profile trong {elapsed} ms")
-        # Sync stays disabled until every retained profile has a final
-        # lifecycle result, avoiding a partial target chooser mid-reconnect.
+        failures = len(getattr(self, "_reattach_failed_profiles", ()))
+        attached = self._reattach_total - failures
+        retry = getattr(self, "reconnect_retry", None)
+        if retry is not None:
+            retry.setVisible(bool(failures))
+        self._update_reconnect_health()
+        self._append_log(
+            f"Reconnect hoàn tất: {attached}/{self._reattach_total} Ready, "
+            f"{failures} cần kiểm tra; {elapsed} ms"
+        )
         self._refresh_sync_control()
 
     def _settle_profile_reattach(self, snapshot: WorkerSnapshot) -> None:
@@ -680,13 +897,35 @@ class Dashboard(QWidget):
             if not pending:
                 self._finish_profile_reattach()
             return
-        if snapshot.profile_id != self._reattach_in_flight:
+        in_flight = getattr(self, "_reattach_in_flight", set())
+        if snapshot.profile_id not in in_flight:
+            # A timed-out Playwright attach can finish after its dashboard
+            # deadline. Reconcile that late success instead of leaving a
+            # false red Retry badge for an already-attached Chrome.
+            failed = getattr(self, "_reattach_failed_profiles", set())
+            if (
+                snapshot.profile_id in failed
+                and snapshot.state == WorkerState.READY
+                and self.runner.has_open_session(snapshot.profile_id)
+            ):
+                failed.discard(snapshot.profile_id)
+                retry = getattr(self, "reconnect_retry", None)
+                if retry is not None:
+                    retry.setVisible(bool(failed))
+                self._append_log(
+                    f"CDP {snapshot.profile_id} kết nối thành công sau timeout"
+                )
+                self._update_reconnect_health()
             return
+        in_flight.discard(snapshot.profile_id)
+        self._reattach_deadlines.pop(snapshot.profile_id, None)
         pending.discard(snapshot.profile_id)
+        if snapshot.state != WorkerState.READY or not self.runner.has_open_session(snapshot.profile_id):
+            self._reattach_failed_profiles.add(snapshot.profile_id)
         self._append_log(
-            f"Đã kiểm tra profile {snapshot.profile_id}: {snapshot.message}"
+            f"Đã kiểm tra {snapshot.profile_id}: {snapshot.message}"
         )
-        self._reattach_in_flight = None
+        self._update_reconnect_health()
         self._start_next_profile_reattach()
 
     def _place_individually_opened_profile(self, profile_id: str) -> None:
@@ -771,14 +1010,41 @@ class Dashboard(QWidget):
 
     def _masked_profile_username(self, profile: ProfileConfig) -> str:
         try:
+            cached = getattr(self, "_username_cache", {}).get(profile.id)
+        except Exception:
+            cached = None
+        if cached is not None:
+            return cached
+        try:
             from ik_chrome_auto.credential_store import WindowsCredentialStore
 
             credential = WindowsCredentialStore().load(profile.id)
             if credential is not None:
-                return self._mask_username(credential.username)
+                masked = self._mask_username(credential.username)
+                with contextlib.suppress(Exception):
+                    self._username_cache[profile.id] = masked
+                return masked
         except Exception:
             pass
         return self._mask_username(profile.name)
+
+    def _cached_gpu_percent(self) -> float | None:
+        """Return cached GPU utilisation (8s TTL) to avoid nvidia-smi churn."""
+        now = time.monotonic()
+        cached_at = getattr(self, "_cached_gpu_at", 0.0)
+        cached_value = getattr(self, "_cached_gpu_value", None)
+        if now - cached_at < 8.0 and cached_value is not None:
+            return cached_value
+        try:
+            value = get_gpu_utilization_percent()
+        except Exception:
+            return cached_value
+        try:
+            self._cached_gpu_at = now
+            self._cached_gpu_value = value
+        except Exception:
+            pass
+        return value
 
     def _profile_display_name(self, profile: ProfileConfig, account_number: int) -> str:
         masked_username = self._masked_profile_username(profile)
@@ -1111,17 +1377,13 @@ class Dashboard(QWidget):
         if not result.update_available:
             QMessageBox.information(self, "Không có cập nhật", "Không có bản cập nhật mới.")
             return
-        answer = QMessageBox.question(
+        QMessageBox.information(
             self,
             "Có bản cập nhật mới",
             f"Git có {result.commits_behind} commit mới trên {result.branch}.\n"
-            "Bạn có muốn tải code mới và build lại tool không?\n\n"
-            "Các profile Chrome vẫn mở; AutoFarm không tự chạy lại.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
+            "Hãy đóng và mở lại IK Auto để cập nhật tự động.\n"
+            "Nếu source đang có thay đổi chưa commit, updater sẽ bỏ qua để bảo vệ code.",
         )
-        if answer == QMessageBox.StandardButton.Yes:
-            self._start_update_build(result.workspace)
 
     def _start_update_build(self, root: Path) -> None:
         """Build, replace and restart the tool without closing Chrome profiles.
@@ -1243,6 +1505,9 @@ class Dashboard(QWidget):
         self._monitoring_enabled = True
         self._monitor_queue.clear()
         self._monitor_in_flight.clear()
+        self._monitor_started_at = {}
+        self._monitor_attempts = {}
+        self._monitor_quarantined_profiles = set()
         self._monitor_batch_profiles = set()
         self._monitor_batch_pending = deque()
         self._monitor_batch_members = ()
@@ -1314,6 +1579,7 @@ class Dashboard(QWidget):
             return
         events = set(snapshot.monitor_events or ())
         self._monitor_in_flight.pop(profile_id, None)
+        getattr(self, "_monitor_started_at", {}).pop(profile_id, None)
         self._log_monitor_scheduler(
             "monitor_scheduler_result",
             profile_id=profile_id,
@@ -1334,21 +1600,47 @@ class Dashboard(QWidget):
             if pending is None:
                 pending = deque()
                 self._monitor_batch_pending = pending
-            pending.appendleft(profile_id)
-            getattr(self, "_monitor_batch_profiles", set()).add(profile_id)
-            self._monitor_next_profile_at = (
-                time.monotonic() + MONITOR_PROFILE_RETRY_SECONDS
-            )
-            self._append_log(
-                f"[{profile_id}] Giám sát chưa hoàn tất; giữ profile này và thử lại"
-            )
-            self._log_monitor_scheduler(
-                "monitor_scheduler_requeued",
-                profile_id=profile_id,
-                reason="scan_error",
-                retry_seconds=MONITOR_PROFILE_RETRY_SECONDS,
-            )
-            return
+            attempts = getattr(self, "_monitor_attempts", {}).get(profile_id, 1)
+            if attempts >= MONITOR_MAX_SCAN_ATTEMPTS:
+                quarantined = getattr(self, "_monitor_quarantined_profiles", None)
+                if quarantined is None:
+                    quarantined = self._monitor_quarantined_profiles = set()
+                quarantined.add(profile_id)
+                self._monitor_initialized_profiles.discard(profile_id)
+                # This finished scan already released its renderer. Never
+                # let a permanently bad profile block all later profiles.
+                self._monitor_batch_profiles.discard(profile_id)
+                self._append_log(f"[{profile_id}] Giám sát lỗi {attempts} lần; tạm cách ly, không chặn nhóm")
+                self._log_monitor_scheduler(
+                    "monitor_scheduler_quarantined", profile_id=profile_id,
+                    attempts=attempts, reason="repeated_scan_error",
+                )
+                notifier = getattr(self, "_notify_telegram", None)
+                if callable(notifier):
+                    notifier(
+                        f"⚠️ IK Auto: giám sát {profile_id} lỗi {attempts} lần, đã tạm cách ly. Các profile khác tiếp tục.",
+                        event_key=f"monitor-quarantined:{profile_id}", cooldown_seconds=600,
+                    )
+                events.discard(SCAN_ERROR)
+            else:
+                pending.appendleft(profile_id)
+                getattr(self, "_monitor_batch_profiles", set()).add(profile_id)
+            if SCAN_ERROR in events:
+                self._monitor_next_profile_at = (
+                    time.monotonic() + MONITOR_PROFILE_RETRY_SECONDS
+                )
+                self._append_log(
+                    f"[{profile_id}] Giám sát chưa hoàn tất; giữ profile này và thử lại"
+                )
+                self._log_monitor_scheduler(
+                    "monitor_scheduler_requeued",
+                    profile_id=profile_id,
+                    reason="scan_error",
+                    retry_seconds=MONITOR_PROFILE_RETRY_SECONDS,
+                )
+                return
+        if SCAN_ERROR not in events:
+            getattr(self, "_monitor_attempts", {}).pop(profile_id, None)
         # Record a successful baseline before evaluating the batch barrier so
         # the final profile in a five-member group is included in pass 2.
         if MAIL_BASELINE in events:
@@ -1366,6 +1658,7 @@ class Dashboard(QWidget):
                 remaining_baseline = any(
                     profile.id not in self._monitor_initialized_profiles
                     and self.runner.has_open_session(profile.id)
+                    and profile.id not in getattr(self, "_monitor_quarantined_profiles", set())
                     for profile in self.config.profiles
                 )
                 if remaining_baseline:
@@ -1459,6 +1752,27 @@ class Dashboard(QWidget):
             if now > deadline
         ]
         for profile_id in expired:
+            started_at = getattr(self, "_monitor_started_at", {}).get(profile_id)
+            if started_at is not None and now - started_at >= MONITOR_HARD_DEADLINE_SECONDS:
+                # Python/Playwright worker calls are not safely preemptible.
+                # Stop dispatching and request cooperative cancellation;
+                # NEVER free a renderer lease that a stuck worker may own.
+                self._log_monitor_scheduler(
+                    "monitor_scheduler_hard_timeout", profile_id=profile_id,
+                    elapsed_seconds=round(now - started_at, 1),
+                )
+                self._append_log(f"[{profile_id}] Monitor quá hạn {MONITOR_HARD_DEADLINE_SECONDS:.0f}s; dừng giám sát an toàn")
+                notifier = getattr(self, "_notify_telegram", None)
+                if callable(notifier):
+                    notifier(
+                        f"🚨 IK Auto: monitor {profile_id} quá hạn, đã dừng giám sát an toàn; Chrome vẫn mở.",
+                        event_key=f"monitor-hard-timeout:{profile_id}", cooldown_seconds=600,
+                    )
+                cancel = getattr(self.runner, "cancel_mail_monitor", None)
+                if callable(cancel):
+                    cancel({profile_id})
+                self._stop_monitoring()
+                return
             # A worker can still be completing a full mailbox flow after the
             # advisory deadline, especially while Chrome is busy rendering.
             # Never treat that deadline as a completed result: doing so freed
@@ -1488,6 +1802,7 @@ class Dashboard(QWidget):
                 profile.id
                 for profile in self.config.profiles
                 if self.runner.has_open_session(profile.id)
+                and profile.id not in getattr(self, "_monitor_quarantined_profiles", set())
             ]
             if not ordered_open:
                 self._stop_monitoring()
@@ -1566,6 +1881,14 @@ class Dashboard(QWidget):
                 CommandKind.MONITOR_MAIL,
                 initial_scan=self._monitor_batch_phase == "baseline",
             )
+            attempts = getattr(self, "_monitor_attempts", None)
+            if attempts is None:
+                attempts = self._monitor_attempts = {}
+            attempts[profile_id] = attempts.get(profile_id, 0) + 1
+            started = getattr(self, "_monitor_started_at", None)
+            if started is None:
+                started = self._monitor_started_at = {}
+            started[profile_id] = now
             self._monitor_in_flight[profile_id] = now + 30.0
             self._log_monitor_scheduler(
                 "monitor_scheduler_dispatched",
@@ -1853,7 +2176,7 @@ class Dashboard(QWidget):
         reason: str | None = None
         try:
             memory = get_system_memory_status()
-            gpu_percent = get_gpu_utilization_percent()
+            gpu_percent = self._cached_gpu_percent()
             reason = policy.resource_block_reason(
                 available_memory_bytes=memory.available_bytes,
                 memory_load_percent=memory.load_percent,
@@ -2187,31 +2510,42 @@ class Dashboard(QWidget):
                     cooldown_seconds=300.0,
                 )
             self._append_log(f"[{snap.profile_id}] {snap.message}")
-        try:
-            while True:
+        # Never drain an unbounded event stream on one Qt pulse: with 45
+        # profiles the dashboard must paint and accept Stop/Retry promptly.
+        for _ in range(40):
+            try:
                 ok, message = self._telegram_results.get_nowait()
-                if not ok:
-                    self._set_telegram_status("Lỗi gửi tin")
-                    self._append_log(f"Telegram: {message}")
-                elif self._telegram_notifier is not None:
-                    self._set_telegram_status("Đã bật")
-        except queue.Empty:
-            pass
-        try:
-            while True:
-                self._handle_update_check_result(self._update_check_results.get_nowait())
-        except queue.Empty:
-            pass
-        try:
-            while True:
+            except queue.Empty:
+                break
+            if not ok:
+                self._set_telegram_status("Lỗi gửi tin")
+                self._append_log(f"Telegram: {message}")
+            elif self._telegram_notifier is not None:
+                self._set_telegram_status("Đã bật")
+        for _ in range(10):
+            try:
+                result = self._update_check_results.get_nowait()
+            except queue.Empty:
+                break
+            self._handle_update_check_result(result)
+        for _ in range(40):
+            try:
                 ram_percent, gpu_percent = self._resource_alert_samples.get_nowait()
-                self._handle_resource_alert(ram_percent, gpu_percent)
-        except queue.Empty:
-            pass
-        try:
-            while True:
-                pid,event=self.coordinate_updates.get_nowait(); self.last_coordinate=(pid,event); self.coordinate.setText(format_coordinate(pid,event))
-        except queue.Empty: pass
+            except queue.Empty:
+                break
+            self._handle_resource_alert(ram_percent, gpu_percent)
+        # The inspector only needs the most recent mouse position.
+        recent_coordinate = None
+        for _ in range(PROFILE_UPDATE_BATCH_SIZE):
+            try:
+                recent_coordinate = self.coordinate_updates.get_nowait()
+            except queue.Empty:
+                break
+        if recent_coordinate is not None:
+            pid, event = recent_coordinate
+            self.last_coordinate = (pid, event)
+            self.coordinate.setText(format_coordinate(pid, event))
+        self._expire_profile_reattach()
         self._finish_auto_arrange_if_ready()
         self._advance_farm_opening()
         self._finish_farm_opening_if_ready()
@@ -2219,27 +2553,61 @@ class Dashboard(QWidget):
         self._advance_farm_quiescing()
         self._advance_farm_stopping()
         self._advance_monitoring()
-        now=time.monotonic()
-        if self.farm_profiles and now-self._last_farm_window_restore >= 1.0:
-            restored = self.runner.restore_profile_windows(set(self.farm_profiles))
-            self._last_farm_window_restore = now
-            if restored and hasattr(self, "window_visibility"):
-                self.window_visibility.setIcon(FIF.MINIMIZE)
-                self.window_visibility.setToolTip("Thu gọn tất cả cửa sổ xuống taskbar")
-        self._drain_resource_overview()
-        # Sampling every five seconds for large installations avoids process
-        # enumeration churn. It runs off the Qt thread in all cases.
-        resource_interval = 5.0 if len(self.rows) >= 40 else 2.0
-        if now-self._last_resources >= resource_interval:
-            self._start_resource_overview_sample()
-            self._last_resources=now
-        if now-self._last_trim>=60:
-            threading.Thread(
-                target=self._trim_profile_memory_safely,
-                name="profile-memory-trim",
-                daemon=True,
-            ).start()
-            self._last_trim=now
+
+    def _poll_slow(self) -> None:
+        """2s pulse for win32/resource/trim work; safe on bare test doubles."""
+        try:
+            now = time.monotonic()
+        except Exception:
+            return
+        try:
+            farm_profiles = set(getattr(self, "farm_profiles", set()))
+            last_restore = float(getattr(self, "_last_farm_window_restore", 0.0))
+            if farm_profiles and now - last_restore >= 2.0:
+                with contextlib.suppress(Exception):
+                    restored = self.runner.restore_profile_windows(set(farm_profiles))
+                    self._last_farm_window_restore = now
+                    if restored and hasattr(self, "window_visibility"):
+                        self.window_visibility.setIcon(FIF.MINIMIZE)
+                        self.window_visibility.setToolTip("Thu gọn tất cả cửa sổ xuống taskbar")
+        except Exception:
+            pass
+        with contextlib.suppress(Exception):
+            self._drain_resource_overview()
+        try:
+            rows = getattr(self, "rows", {})
+            last_resources = float(getattr(self, "_last_resources", 0.0))
+            resource_interval = 5.0 if len(rows) >= 40 else 2.0
+            if now - last_resources >= resource_interval:
+                with contextlib.suppress(Exception):
+                    self._start_resource_overview_sample()
+                with contextlib.suppress(Exception):
+                    self._last_resources = now
+        except Exception:
+            pass
+        # Persist one compact fleet heartbeat per minute for postmortem
+        # analysis even when nobody is watching the dashboard or CodeLocal.
+        try:
+            if now - float(getattr(self, "_last_health_snapshot_at", 0.0)) >= 60.0:
+                self._last_health_snapshot_at = now
+                self.runner.event_log.write("fleet_health_heartbeat", fleet_health_payload(self))
+        except (AttributeError, OSError, RuntimeError, ValueError) as error:
+            with contextlib.suppress(OSError, AttributeError):
+                record(diagnostic_log(self.config.source), "fleet_heartbeat_failed",
+                       error_type=type(error).__name__)
+        try:
+            last_trim = float(getattr(self, "_last_trim", 0.0))
+            if now - last_trim >= 60:
+                with contextlib.suppress(Exception):
+                    threading.Thread(
+                        target=self._trim_profile_memory_safely,
+                        name="profile-memory-trim",
+                        daemon=True,
+                    ).start()
+                with contextlib.suppress(Exception):
+                    self._last_trim = now
+        except Exception:
+            pass
 
     def _apply_profile_snapshot(self, row: ProfileRow, snap: WorkerSnapshot) -> None:
         """Update only changed widgets so scrolling does not trigger repaints."""
@@ -2327,8 +2695,15 @@ class Dashboard(QWidget):
                 row.last_resource = value
 
     def _trim_profile_memory_safely(self) -> None:
-        with contextlib.suppress(Exception):
+        # Trimming Chrome's working set when physical RAM is healthy only
+        # increases page faults and makes WebGL/CDP input less responsive.
+        try:
+            memory = get_system_memory_status()
+            if memory.load_percent < 85.0:
+                return
             self.runner.trim_all_profile_memory()
+        except Exception as error:
+            self._log_monitor_scheduler("profile_memory_trim_error", error_type=type(error).__name__)
     @staticmethod
     def _state(state:WorkerState)->tuple[str,str,str]:
         if state in {WorkerState.READY,WorkerState.COMPLETED}:return "Sẵn sàng","#dcfce7","#15803d"
@@ -2337,6 +2712,7 @@ class Dashboard(QWidget):
         return "Đã dừng","#f1f5f9","#475569"
     def _append_log(self,message:str)->None:
         self._log_lines.append(message)
+        self._log_monitor_scheduler("dashboard_message", message=message)
         # The action log is intentionally hidden in the current dashboard.
         # Retain its small history, but avoid rebuilding QTextEdit for every
         # worker update while 45-50 profiles are active.
@@ -2394,9 +2770,14 @@ class Dashboard(QWidget):
     def _set_roster_dots(cls, label: QLabel, roster: tuple[tuple[int, str], ...]) -> None:
         label.setText(cls._roster_dot_html(roster))
         label.setVisible(bool(roster))
-    def _warning(self,title:str,message:str)->None: QMessageBox.warning(self,title,message)
-    def _error(self,title:str,message:str)->None: QMessageBox.critical(self,title,message)
+    def _warning(self,title:str,message:str)->None:
+        self._log_monitor_scheduler("dashboard_warning", title=title)
+        QMessageBox.warning(self,title,message)
+    def _error(self,title:str,message:str)->None:
+        self._log_monitor_scheduler("dashboard_error", title=title)
+        QMessageBox.critical(self,title,message)
     def closeEvent(self,event:QCloseEvent)->None:
+        self._log_monitor_scheduler("dashboard_closing")
         self.timer.stop(); self._resource_monitor_stop.set()
         if self._telegram_notifier is not None: self._telegram_notifier.close()
         self.runner.shutdown(); event.accept()
@@ -2934,8 +3315,13 @@ def run_dashboard(config_path:Path)->None:
     app.setApplicationName("IK Auto")
     app.setWindowIcon(QIcon(str(Path(__file__).with_name("assets") / "ik_auto.ico")))
     dashboard = Dashboard(config_path)
+    trace = _UiActionTrace(app, diagnostic_log(config_path))
+    app.installEventFilter(trace)
     dashboard.show()
     if dashboard.windowHandle() is not None:
         dashboard.windowHandle().screenChanged.connect(dashboard._on_screen_changed)
     QTimer.singleShot(500, minimize_launch_console)
-    app.exec()
+    try:
+        app.exec()
+    finally:
+        app.removeEventFilter(trace)

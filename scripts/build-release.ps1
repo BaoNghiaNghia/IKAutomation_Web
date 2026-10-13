@@ -254,18 +254,87 @@ function Update-ReleaseApplication {
         [string]$Destination
     )
 
-    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-    Get-ChildItem -LiteralPath $PackageDirectory -File | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination $Destination -Force
+    # Stage the complete APPLICATION separately from persistent Chrome data.
+    # Never use robocopy /MIR against a live release directory: it also holds
+    # config.json and data/profiles, which must survive every code update.
+    $releaseRoot = Split-Path -Parent $Destination
+    $stage = Join-Path $releaseRoot '.ik-auto-app-staging'
+    $previous = Join-Path $releaseRoot '.ik-auto-app-previous'
+    $exeName = "$applicationName.exe"
+    $sourceExe = Join-Path $PackageDirectory $exeName
+    $sourceInternal = Join-Path $PackageDirectory '_internal'
+    $stageExe = Join-Path $stage $exeName
+    $stageInternal = Join-Path $stage '_internal'
+    $targetExe = Join-Path $Destination $exeName
+    $targetInternal = Join-Path $Destination '_internal'
+    $previousExe = Join-Path $previous $exeName
+    $previousInternal = Join-Path $previous '_internal'
+    if (-not (Test-Path -LiteralPath $sourceExe) -or -not (Test-Path -LiteralPath $sourceInternal)) {
+        throw 'Package incomplete: exe or _internal missing'
     }
-    $packageInternal = Join-Path $PackageDirectory '_internal'
-    if (-not (Test-Path -LiteralPath $packageInternal)) {
-        throw "Build folder is missing _internal: $PackageDirectory"
+
+    # Staging and rollback folders contain application binaries ONLY.
+    # Neither step touches release/data, Chrome profiles or config.
+    if (Test-Path -LiteralPath $stage) {
+        Remove-Item -LiteralPath $stage -Recurse -Force
     }
-    $releaseInternal = Join-Path $Destination '_internal'
-    & robocopy $packageInternal $releaseInternal '/MIR' '/COPY:DAT' '/DCOPY:DAT' '/R:2' '/W:1' '/XJ' | Out-Host
-    if ($LASTEXITCODE -gt 7) {
-        throw "Could not update release application files (robocopy exit code $LASTEXITCODE)."
+    New-Item -ItemType Directory -Path $stage -Force | Out-Null
+    try {
+        Copy-Item -LiteralPath $sourceExe -Destination $stageExe -Force
+        & robocopy $sourceInternal $stageInternal '/MIR' '/COPY:DAT' '/DCOPY:DAT' '/R:2' '/W:1' '/XJ' | Out-Host
+        if ($LASTEXITCODE -gt 7) {
+            throw "Could not stage application _internal (robocopy $LASTEXITCODE)"
+        }
+        if (-not (Test-Path -LiteralPath $stageExe) -or -not (Test-Path -LiteralPath $stageInternal)) {
+            throw 'Staged application integrity check failed'
+        }
+
+        # Keep one last-known-good set of binaries for manual/automatic
+        # recovery. Discard the prior backup only AFTER staging passed.
+        if (Test-Path -LiteralPath $previous) {
+            Remove-Item -LiteralPath $previous -Recurse -Force
+        }
+        New-Item -ItemType Directory -Path $previous -Force | Out-Null
+        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+        $exeBackedUp = $false
+        $internalBackedUp = $false
+        $exeActivated = $false
+        $internalActivated = $false
+        try {
+            if (Test-Path -LiteralPath $targetExe) {
+                Move-Item -LiteralPath $targetExe -Destination $previousExe
+                $exeBackedUp = $true
+            }
+            if (Test-Path -LiteralPath $targetInternal) {
+                Move-Item -LiteralPath $targetInternal -Destination $previousInternal
+                $internalBackedUp = $true
+            }
+            Move-Item -LiteralPath $stageInternal -Destination $targetInternal
+            $internalActivated = $true
+            Move-Item -LiteralPath $stageExe -Destination $targetExe
+            $exeActivated = $true
+        } catch {
+            # Only delete NEWLY ACTIVATED files. If moving the old DLL tree
+            # failed because Windows still holds it open, that original DLL
+            # tree must never be deleted by rollback cleanup.
+            if ($exeActivated -and (Test-Path -LiteralPath $targetExe)) {
+                Remove-Item -LiteralPath $targetExe -Force
+            }
+            if ($internalActivated -and (Test-Path -LiteralPath $targetInternal)) {
+                Remove-Item -LiteralPath $targetInternal -Recurse -Force
+            }
+            if ($exeBackedUp -and (Test-Path -LiteralPath $previousExe)) {
+                Move-Item -LiteralPath $previousExe -Destination $targetExe
+            }
+            if ($internalBackedUp -and (Test-Path -LiteralPath $previousInternal)) {
+                Move-Item -LiteralPath $previousInternal -Destination $targetInternal
+            }
+            throw
+        }
+    } finally {
+        if (Test-Path -LiteralPath $stage) {
+            Remove-Item -LiteralPath $stage -Recurse -Force
+        }
     }
 }
 

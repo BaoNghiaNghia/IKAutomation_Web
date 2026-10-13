@@ -34,6 +34,18 @@ from ik_chrome_auto.interaction import (
 )
 from ik_chrome_auto.models import AppConfig, ProfileConfig, ProfileMode
 from ik_chrome_auto.reader import GameDataReader, redact_url
+from ik_chrome_auto.surface import (
+    GAME_SURFACE_HEIGHT as _GAME_SURFACE_HEIGHT,
+)
+from ik_chrome_auto.surface import (
+    GAME_SURFACE_WIDTH as _GAME_SURFACE_WIDTH,
+)
+from ik_chrome_auto.surface import (
+    fixed_game_surface_box as _fixed_game_surface_box,
+)
+from ik_chrome_auto.surface import (
+    origin_surface_box as _origin_surface_box,
+)
 from ik_chrome_auto.windows import (
     WindowRect,
     capture_screen_region_png,
@@ -104,8 +116,6 @@ _CDP_PROCESS_DISCOVERY_DETAILS: dict[str, int | str] = {}
 _CDP_PROCESS_DISCOVERY_CACHE_SECONDS = 10.0
 _CHROME_COMMAND_CACHE: tuple[float, dict[int, str], str] = (0.0, {}, "not_queried")
 _CHROME_COMMAND_CACHE_LOCK = threading.Lock()
-_GAME_SURFACE_WIDTH = 1280.0
-_GAME_SURFACE_HEIGHT = 720.0
 _FARM_INPUT_FOCUS_DELAY_SECONDS = 0.25
 _FARM_INPUT_ACTION_DELAY_SECONDS = 0.12
 _FARM_INPUT_VERIFY_TIMEOUT_SECONDS = 0.8
@@ -121,26 +131,15 @@ def _normalized_windows_path(value: str | Path) -> str:
 
 def _command_line_user_data_dir(command_line: str) -> str | None:
     """Extract ``--user-data-dir`` without relying on argument ordering."""
-    match = re.search(
-        r"--user-data-dir(?:=|\s+)(?:\"([^\"]+)\"|'([^']+)'|(\S+))",
-        command_line,
-        flags=re.IGNORECASE,
-    )
-    if match is None:
-        return None
-    return next((value for value in match.groups() if value is not None), None)
+    from ik_chrome_auto.cdp_ports import command_line_user_data_dir
+
+    return command_line_user_data_dir(command_line)
 
 
 def _command_line_remote_debugging_port(command_line: str) -> int | None:
-    match = re.search(
-        r"--remote-debugging-port(?:=|\s+)(\d+)",
-        command_line,
-        flags=re.IGNORECASE,
-    )
-    if match is None:
-        return None
-    port = int(match.group(1))
-    return port if 1 <= port <= 65535 else None
+    from ik_chrome_auto.cdp_ports import command_line_remote_debugging_port
+
+    return command_line_remote_debugging_port(command_line)
 
 
 def _live_managed_cdp_ports() -> dict[str, int]:
@@ -280,35 +279,12 @@ def _query_chrome_process_command_lines(now: float) -> tuple[dict[int, str], str
     return commands, "ok"
 
 
-def _fixed_game_surface_box() -> dict[str, float]:
-    """Return the coordinate system used while automation rerenders at 720p."""
-    return {
-        "x": 0.0,
-        "y": 0.0,
-        "width": _GAME_SURFACE_WIDTH,
-        "height": _GAME_SURFACE_HEIGHT,
-    }
-
-
-def _origin_surface_box(box: dict[str, float]) -> dict[str, float]:
-    """Keep live surface dimensions while deliberately discarding iframe offsets."""
-    return {
-        "x": 0.0,
-        "y": 0.0,
-        "width": max(1.0, float(box["width"])),
-        "height": max(1.0, float(box["height"])),
-    }
-
-
 def _profile_cdp_port(profile_id: str) -> int:
     """Return a stable local DevTools port without persisting runtime state."""
-    # ``hash()`` is intentionally randomised between Python processes.  A
-    # stable digest lets a newly updated tool reconnect to Chrome launched by
-    # the previous version.
-    import hashlib
+    # Single source of truth lives in cdp_ports.stable_profile_cdp_port.
+    from ik_chrome_auto.cdp_ports import stable_profile_cdp_port
 
-    digest = hashlib.sha256(profile_id.encode("utf-8")).digest()
-    return _PROFILE_CDP_PORT_MIN + int.from_bytes(digest[:4], "big") % _PROFILE_CDP_PORT_SPAN
+    return stable_profile_cdp_port(profile_id)
 
 
 def _cdp_endpoint_is_ready(endpoint: str) -> bool:
@@ -597,6 +573,12 @@ class ChromeProfileSession:
         # Normal profile windows retain their responsive iframe dimensions.
         # Only an active automation renderer lease forces the game to 1280x720.
         self._automation_game_frame_fixed = False
+        # Hot-path cache: capture->click did 2x frame-walk + bounding_box per
+        # input event. Reuse the transform for 0.4s (invalidated on renderer
+        # begin/restore).
+        self._surface_transform_at = 0.0
+        self._surface_transform_fixed: bool | None = None
+        self._surface_transform_cached: Any | None = None
 
     @property
     def context(self) -> BrowserContext:
@@ -813,12 +795,18 @@ class ChromeProfileSession:
         ]
         return matching, roots, status
 
-    def repair_existing_browser_without_cdp(self) -> bool:
-        """Restart exactly one retained managed Chrome with its CDP flag.
+    def repair_existing_browser_without_cdp(self, *, allow_restart: bool = False) -> bool:
+        """Explicit recovery only: never terminate a retained Chrome on startup.
 
-        This is opt-in through ``REPAIR_ATTACH``. A title match alone is never
-        enough: the exact ``--user-data-dir`` check is the safety boundary.
+        A missing CDP endpoint must leave the existing window and its session
+        intact. Forced restart is reserved for a separate, explicit user action.
         """
+        if not allow_restart:
+            self._last_attach_probe = {
+                **getattr(self, "_last_attach_probe", {}),
+                "repair_result": "restart_not_authorized",
+            }
+            return False
         process_ids, root_process_ids, query_status = self._matching_profile_chrome_processes()
         diagnostics = dict(getattr(self, "_last_attach_probe", {}))
         diagnostics.update(
@@ -943,22 +931,47 @@ class ChromeProfileSession:
                 continue
             pid = find_tcp_listener_process(port)
             commands, command_query = _chrome_process_command_lines()
-            command_line = commands.get(pid) if pid is not None else None
-            if expected_dir is not None:
-                actual_dir = _command_line_user_data_dir(command_line) if command_line else None
-                if actual_dir is not None and _normalized_windows_path(actual_dir) != expected_dir:
-                    results.append(
-                        {"port": port, "source": source, "ready": True, "identity": "foreign", "reason": "listener_user_data_dir_mismatch"}
+            identity = "unknown"
+            matched_chrome_pid: int | None = None
+            reason = "listener_pid_unavailable" if pid is None else f"listener_command_unavailable:{command_query}"
+            if expected_dir is not None and pid is not None:
+                # Match the TCP listener itself, or a known Chrome ancestor.
+                # Never attach a live endpoint merely because its port is
+                # configured: with 45 browsers, a stale/reused port might
+                # control an entirely different account.
+                current_pid: int | None = pid
+                parents: dict[int, int] | None = None
+                seen_pids: set[int] = set()
+                for _depth in range(16):
+                    if current_pid is None or current_pid in seen_pids:
+                        break
+                    seen_pids.add(current_pid)
+                    command_line = commands.get(current_pid)
+                    actual_dir = (
+                        _command_line_user_data_dir(command_line)
+                        if command_line else None
                     )
-                    continue
-                identity = "match" if actual_dir is not None else "unknown"
-                reason = "listener_user_data_dir_match" if actual_dir is not None else f"listener_command_unavailable:{command_query}"
-            else:
-                identity, reason = "unknown", "profile_has_no_user_data_dir"
+                    if actual_dir is not None:
+                        if _normalized_windows_path(actual_dir) == expected_dir:
+                            identity = "match"
+                            matched_chrome_pid = current_pid
+                            reason = "verified_profile_process_ancestor"
+                        else:
+                            identity = "foreign"
+                            reason = "listener_user_data_dir_mismatch"
+                        break
+                    if parents is None:
+                        parents = snapshot_process_parents()
+                    current_pid = parents.get(current_pid)
             results.append(
                 {"port": port, "source": source, "ready": True, "identity": identity, "reason": reason}
             )
-            self._managed_browser_pid = pid
+            # Unknown identity is NOT permission to send automation input.
+            if identity != "match":
+                continue
+            # Use the verified Chrome parent for native HWND lookup; the
+            # TCP listener may belong to one of its renderer subprocesses.
+            self._managed_browser_pid = matched_chrome_pid or pid
             return endpoint, results, source
         return None, results, None
 
@@ -973,6 +986,22 @@ class ChromeProfileSession:
         if self._managed_cdp_endpoint is not None:
             self._connect_cdp(self._managed_cdp_endpoint)
             return
+        existing_endpoint = self._discover_managed_cdp_endpoint()
+        if existing_endpoint is not None:
+            self._connect_cdp(existing_endpoint)
+            return
+        # Existing Chrome without a verified CDP link must never receive an
+        # implicit second launch. Chrome would redirect this launch to its
+        # running user-data-dir, possibly creating an unmanageable extra tab.
+        existing_processes, _roots, query_status = self._matching_profile_chrome_processes()
+        # If Windows process discovery fails, an apparently empty result is
+        # NOT proof that Chrome is closed. Fail closed rather than risk
+        # opening a second process against the same Chrome user-data-dir.
+        if existing_processes or self.window_handle is not None or query_status != "ok":
+            raise RuntimeError(
+                "Chrome profile có thể đang mở; không xác minh được trạng thái CDP. "
+                "Giữ nguyên cửa sổ; kiểm tra cổng điều khiển/quyền truy vấn tiến trình và Retry."
+            )
         self.profile.user_data_dir.mkdir(parents=True, exist_ok=True)
         suppress_browser_prompts(self.profile.user_data_dir)
         chrome = find_chrome(self.config.browser.chrome_executable)
@@ -1024,10 +1053,6 @@ class ChromeProfileSession:
                 f"--window-size={self.config.browser.viewport_width},"
                 f"{self.config.browser.viewport_height}"
             )
-        existing_endpoint = self._discover_managed_cdp_endpoint()
-        if existing_endpoint is not None:
-            self._connect_cdp(existing_endpoint)
-            return
         if not _cdp_endpoint_is_ready(endpoint):
             # Detach Chrome from the tool process.  The browser survives an
             # application close/update and is reused by the next launch.
@@ -1273,10 +1298,38 @@ class ChromeProfileSession:
 
     @staticmethod
     def _first_visible_input(frame: Frame, selectors: tuple[str, ...]) -> Any | None:
+        # Fast path: one JS query across all selectors instead of N x
+        # count()+is_visible(500ms) roundtrips (worst-case 10s+ per frame
+        # during bulk 45-profile startup).
+        try:
+            found = frame.evaluate(
+                """(selectors) => {
+                    for (const sel of selectors) {
+                        const el = document.querySelector(sel);
+                        if (!el) continue;
+                        const rect = el.getBoundingClientRect();
+                        const style = getComputedStyle(el);
+                        if (rect.width > 4 && rect.height > 4 &&
+                            style.display !== 'none' && style.visibility !== 'hidden')
+                            return sel;
+                    }
+                    return null;
+                }""",
+                list(selectors),
+            )
+            if isinstance(found, str) and found:
+                locator = frame.locator(found).first
+                try:
+                    if locator.count() and locator.is_visible(timeout=200):
+                        return locator
+                except Exception:
+                    pass
+        except Exception:
+            pass
         for selector in selectors:
             try:
                 locator = frame.locator(selector).first
-                if locator.count() and locator.is_visible(timeout=500):
+                if locator.count() and locator.is_visible(timeout=200):
                     return locator
             except Exception:
                 continue
@@ -1414,9 +1467,22 @@ class ChromeProfileSession:
     @staticmethod
     def _paced_login_input(locator: Any, value: str) -> None:
         """Enter a credential through normal keyboard events, never log its value."""
-        locator.click(timeout=3_000)
-        locator.press("Control+A", timeout=3_000)
-        locator.press("Backspace", timeout=3_000)
+        # Fast path: single fill + Enter is 1 CDP roundtrip vs N key events
+        # (~0.8s for a 12-char password). Fall back to paced typing only
+        # when the site blocks programmatic fill.
+        try:
+            locator.click(timeout=3_000)
+            locator.press("Control+A", timeout=3_000)
+            locator.press("Backspace", timeout=3_000)
+            locator.fill(value, timeout=3_000)
+            try:
+                current = locator.input_value(timeout=1_000)
+                if current == value:
+                    return
+            except Exception:
+                return
+        except Exception:
+            pass
         for character in value:
             locator.press_sequentially(character, delay=random.randint(42, 88), timeout=3_000)
 
@@ -1490,6 +1556,10 @@ class ChromeProfileSession:
     ) -> None:
         """Toggle the fixed iframe size used only during a renderer lease."""
         self._automation_game_frame_fixed = bool(enabled)
+        # Renderer geometry changed; drop the cached input transform.
+        self._surface_transform_at = 0.0
+        self._surface_transform_cached = None
+        self._surface_transform_fixed = None
         for page in self.context.pages:
             if page.is_closed():
                 continue
@@ -1882,7 +1952,9 @@ class ChromeProfileSession:
             scale,
         )
 
-    def detect_farm_state(self) -> tuple[Any, dict[str, float], tuple[int, int]]:
+    def detect_farm_state(
+        self, template_ids: tuple[Any, ...] | None = None
+    ) -> tuple[Any, dict[str, float], tuple[int, int]]:
         """Classify the current game canvas with the ported ADB template pack."""
         from ik_chrome_auto.farm_matcher import BrowserCanvasMatcher
 
@@ -1899,7 +1971,12 @@ class ChromeProfileSession:
         self._last_farm_capture_png = png
         if self._farm_matcher is None:
             self._farm_matcher = BrowserCanvasMatcher()
-        result = self._farm_matcher.detect(png)
+        detect = getattr(self._farm_matcher, "detect", None)
+        try:
+            # New matchers accept a subset; test doubles may only take png.
+            result = detect(png, template_ids)  # type: ignore[arg-type,misc]
+        except TypeError:
+            result = detect(png)  # type: ignore[misc]
         return result, surface, self._png_dimensions(png)
 
     def last_farm_capture_png(self) -> bytes | None:
@@ -1908,6 +1985,21 @@ class ChromeProfileSession:
 
     @staticmethod
     def _png_dimensions(png: bytes) -> tuple[int, int]:
+        """Read PNG size from IHDR without a full pixel decode.
+
+        The old path ran the pure-Python ``decode_png`` (zlib + per-pixel
+        loops over 1280x720) on every farm tick, right after OpenCV had
+        already decoded the same bytes. IHDR parsing is O(1).
+        """
+        try:
+            import struct
+
+            if len(png) >= 24 and png.startswith(b"\x89PNG\r\n\x1a\n"):
+                width, height = struct.unpack(">II", png[16:24])
+                if width > 0 and height > 0:
+                    return int(width), int(height)
+        except Exception:
+            pass
         image = decode_png(png)
         return image.width, image.height
 
@@ -2353,13 +2445,26 @@ class ChromeProfileSession:
         self,
     ) -> tuple[Any | None, CanvasTransformSnapshot]:
         """Measure once and return the sole mapping from 1280x720 to live canvas."""
-        canvas, surface = self._canvas_or_viewport()
-        # A renderer lease has already resized the game frame to the canonical
-        # coordinate system.  Do not read the canvas CSS box here: Chromium
-        # can report a compositor-scaled box while the lease is active, which
-        # would scale a 1280x720 point a second time and shift it left/up.
-        if getattr(self, "_automation_game_frame_fixed", False):
+        fixed = bool(getattr(self, "_automation_game_frame_fixed", False))
+        # Fixed renderer transform is constant; skip frame-walk entirely.
+        if fixed:
+            canvas = None
+            with contextlib.suppress(Exception):
+                canvas, _surface = self._canvas_or_viewport()
             return canvas, CanvasTransformSnapshot.from_box(_fixed_game_surface_box())
+        # Reuse the non-fixed transform briefly: sync fan-out (44 followers)
+        # and capture->click pairs measured bounding_box per event.
+        now = time.monotonic()
+        cached = getattr(self, "_surface_transform_cached", None)
+        cached_fixed = getattr(self, "_surface_transform_fixed", None)
+        cached_at = getattr(self, "_surface_transform_at", 0.0)
+        if cached is not None and cached_fixed is False and (now - cached_at) < 0.4:
+            try:
+                canvas, surface = self._canvas_or_viewport()
+                return canvas, cached
+            except Exception:
+                pass
+        canvas, surface = self._canvas_or_viewport()
         canvas_box: dict[str, float] | None = None
         if canvas is not None:
             bounding_box = getattr(canvas, "bounding_box", None)
@@ -2389,7 +2494,11 @@ class ChromeProfileSession:
         # and automation CSS make the iframe/canvas co-located, so carrying a
         # locator's page offset into CDP would reintroduce the historical 8px
         # (or host-layout) drift. Keep only the freshly measured dimensions.
-        return canvas, CanvasTransformSnapshot.from_box(_origin_surface_box(point_surface))
+        transform = CanvasTransformSnapshot.from_box(_origin_surface_box(point_surface))
+        self._surface_transform_at = time.monotonic()
+        self._surface_transform_fixed = False
+        self._surface_transform_cached = transform
+        return canvas, transform
 
     def set_sync_source(self, enabled: bool) -> SyncSourceStatus:
         enabled = bool(enabled)
@@ -3109,10 +3218,11 @@ class ChromeProfileSession:
             # ``__new__`` and therefore do not run ``__init__``.  Treat those
             # sessions as externally owned, the same safe default used for a
             # detached profile Chrome.
-            if (
-                (close_browser or getattr(self, "_owns_browser_process", False))
-                and self._context is not None
-            ):
+            # Detach must never close an externally retained Chrome window,
+            # even if IK Auto originally started that managed Chrome process.
+            # BrowserContext.close() on a persistent context may terminate
+            # Chrome; only the explicit "Đóng tabs" action may call it.
+            if close_browser and self._context is not None:
                 with contextlib.suppress(Exception):
                     self._context.close()
         finally:

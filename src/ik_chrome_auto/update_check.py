@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,7 +41,8 @@ def _git(root: Path, *args: str) -> str:
             capture_output=True,
             check=False,
             text=True,
-            timeout=30,
+            timeout=10,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise GitUpdateCheckError(f"Không thể chạy Git: {error}") from error

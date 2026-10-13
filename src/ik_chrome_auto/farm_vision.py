@@ -132,6 +132,39 @@ class GameDetectionResult:
 
 DETECTION_TEMPLATES: tuple[FarmTemplateId, ...] = tuple(FarmTemplateId)
 
+# Bounded subset for wait/poll loops: only anchors that prove a map
+# transition instead of the full ~50-template scan.
+WORLD_MAP_ANCHOR_TEMPLATES: tuple[FarmTemplateId, ...] = (
+    FarmTemplateId.WORLD_MAP_ANCHOR,
+    FarmTemplateId.BROWSER_WORLD_MAP_BACK_BUTTON,
+    FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON,
+    FarmTemplateId.BROWSER_WORLD_MAP_COORDINATE_PIN,
+    FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON,
+)
+
+# Per-state subsets so a farm tick only matches templates that can
+# actually advance the current workflow step.
+CITY_STEP_TEMPLATES: tuple[FarmTemplateId, ...] = (
+    FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON,
+    FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON,
+    FarmTemplateId.WORLD_MAP_ANCHOR,
+    FarmTemplateId.BROWSER_WORLD_MAP_BACK_BUTTON,
+    FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON,
+    FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON,
+)
+
+MAP_STEP_TEMPLATES: tuple[FarmTemplateId, ...] = (
+    FarmTemplateId.WORLD_MAP_ANCHOR,
+    FarmTemplateId.BROWSER_WORLD_MAP_BACK_BUTTON,
+    FarmTemplateId.BROWSER_MAP_TO_CITY_BUTTON,
+    FarmTemplateId.BROWSER_WORLD_MAP_COORDINATE_PIN,
+    FarmTemplateId.BROWSER_CITY_CONTINENT_MAP_BUTTON,
+    FarmTemplateId.BROWSER_RESOURCE_SEARCH_BUTTON,
+    FarmTemplateId.CITY_TO_WORLD_MAP_BUTTON,
+    FarmTemplateId.CONTINENT_MAP_PIN_BUTTON,
+    FarmTemplateId.CONTINENT_MAP_TITLE,
+)
+
 
 class BrowserGameStateDetector:
     """Classifies Chrome-canvas template evidence using the ADB detector rules."""

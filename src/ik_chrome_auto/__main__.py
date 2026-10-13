@@ -38,6 +38,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("ui")
     subparsers.add_parser("doctor")
+    subparsers.add_parser(
+        "connection-health",
+        help="Chỉ kiểm tra Windows Chrome/CDP; không mở, đóng hoặc điều khiển profile",
+    )
+    subparsers.add_parser("diagnostic-summary", help="Tổng hợp log kỹ thuật an toàn, không chứa credential")
     subparsers.add_parser("list")
     inspect_parser = subparsers.add_parser("inspect")
     inspect_parser.add_argument("profile")
@@ -81,11 +86,35 @@ def main() -> None:
     command = args.command or "ui"
     config_path = args.config.resolve()
     if command == "ui":
+        from ik_chrome_auto.diagnostics import (
+            diagnostic_log,
+            install_exception_hooks,
+            record,
+        )
+        from ik_chrome_auto.startup_update import maybe_start_update
+
+        log = diagnostic_log(config_path)
+        install_exception_hooks(log)
+        record(log, "application_start", command="ui")
+        if maybe_start_update(config_path):
+            record(log, "application_exit_for_update")
+            return
         from ik_chrome_auto.dashboard import run_dashboard
 
-        run_dashboard(config_path)
+        try:
+            run_dashboard(config_path)
+        finally:
+            record(log, "application_exit", command="ui")
     elif command == "doctor":
         raise SystemExit(run_doctor(config_path))
+    elif command == "connection-health":
+        from ik_chrome_auto.connection_health import run_connection_health
+
+        raise SystemExit(run_connection_health(config_path))
+    elif command == "diagnostic-summary":
+        from ik_chrome_auto.support_report import run_diagnostic_summary
+
+        raise SystemExit(run_diagnostic_summary(config_path))
     elif command == "list":
         config = load_config(config_path)
         for profile in config.profiles:

@@ -81,7 +81,7 @@ def test_repair_restarts_only_the_exact_profile_user_data_dir(monkeypatch, tmp_p
         lambda args, **_kwargs: calls.append(args) or SimpleNamespace(returncode=0),
     )
 
-    assert session.repair_existing_browser_without_cdp() is True
+    assert session.repair_existing_browser_without_cdp(allow_restart=True) is True
     assert calls == [["taskkill", "/PID", "111", "/T", "/F"]]
     assert session.attach_diagnostics()["repair_result"] == "terminated"
 
@@ -118,7 +118,7 @@ def test_repair_never_terminates_when_profile_process_is_not_unique(monkeypatch,
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not taskkill")),
     )
 
-    assert session.repair_existing_browser_without_cdp() is False
+    assert session.repair_existing_browser_without_cdp(allow_restart=True) is False
     assert session.attach_diagnostics()["repair_result"] == "no_unique_profile_root"
 
 

@@ -79,15 +79,30 @@ class BrowserCheckpoint:
 class BrowserCheckpointStore:
     def __init__(self, root: Path) -> None:
         self.root = root
+        self._last_fsync_at = 0.0
 
-    def save(self, checkpoint: BrowserCheckpoint) -> Path:
+    def save(self, checkpoint: BrowserCheckpoint, *, sync: bool | None = None) -> Path:
+        import time
+
         target = self.root / checkpoint.browser_profile_id / f"{checkpoint.farm_profile_id}.json"
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_suffix(".tmp")
+        # fsync on every PREFLIGHT->READY->RUNNING transition stalls disk
+        # when farm/monitor churns. fsync only for STOPPED (durable) or at
+        # most once every 2s; otherwise flush without fsync.
+        if sync is None:
+            now = time.monotonic()
+            sync = (
+                checkpoint.state == ProfileRunState.STOPPED
+                or (now - self._last_fsync_at) >= 2.0
+            )
+            if sync:
+                self._last_fsync_at = now
         with temporary.open("wb") as handle:
             handle.write(json.dumps(asdict(checkpoint), sort_keys=True).encode("utf-8"))
             handle.flush()
-            os.fsync(handle.fileno())
+            if sync:
+                os.fsync(handle.fileno())
         os.replace(temporary, target)
         return target
 
