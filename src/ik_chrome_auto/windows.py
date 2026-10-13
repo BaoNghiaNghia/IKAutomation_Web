@@ -495,18 +495,34 @@ def find_tcp_listener_process(port: int) -> int | None:
     except (OSError, subprocess.SubprocessError):
         return None
     mapping: dict[int, int] = {}
+    # netstat prints established connections before or after listeners.
+    # An ESTABLISHED outgoing socket may use a local port equal to a CDP
+    # listener's port; treating it as the listener identifies the WRONG
+    # Chrome profile and breaks every retained attach (or worse, routes a
+    # control command to the wrong account). Only LISTENING sockets own CDP.
+    ambiguous: set[int] = set()
     for line in result.stdout.splitlines():
         fields = line.split()
-        if len(fields) < 4 or fields[0].upper() != "TCP":
+        if (
+            len(fields) < 5
+            or fields[0].upper() != "TCP"
+            or fields[-2].upper() != "LISTENING"
+        ):
             continue
-        local = fields[1]
         try:
-            local_port = int(local.rsplit(":", 1)[1])
+            local_port = int(fields[1].rsplit(":", 1)[1])
             process_id = int(fields[-1])
         except (IndexError, ValueError):
             continue
-        if local_port > 0 and process_id > 0 and local_port not in mapping:
+        if not (1 <= local_port <= 65535 and process_id > 0):
+            continue
+        previous = mapping.get(local_port)
+        if previous is not None and previous != process_id:
+            ambiguous.add(local_port)
+        elif local_port not in ambiguous:
             mapping[local_port] = process_id
+    for port in ambiguous:
+        mapping.pop(port, None)
     _netstat_cache = mapping
     _netstat_cache_at = now
     return mapping.get(wanted)

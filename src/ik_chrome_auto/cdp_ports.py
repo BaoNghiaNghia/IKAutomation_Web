@@ -18,9 +18,15 @@ def stable_profile_cdp_port(profile_id: str) -> int:
 
 
 def command_line_user_data_dir(command_line: str) -> str | None:
-    """Extract ``--user-data-dir`` without relying on argument ordering."""
+    """Extract the full path, including spaces, from Windows Chrome argv.
+
+    subprocess.list2cmdline quotes the *whole* argument when the path has
+    spaces: "--user-data-dir=D:\\IK Auto\\profiles\\account-3". Older
+    parsing looked for quotes after '=' only and truncated this to D:\\IK.
+    """
     match = re.search(
-        r"--user-data-dir(?:=|\s+)(?:\"([^\"]+)\"|'([^']+)'|(\S+))",
+        r"""(?:"--user-data-dir=([^"]+)"|'--user-data-dir=([^']+)'|"""
+        r"""--user-data-dir(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s"']+)))""",
         command_line,
         flags=re.IGNORECASE,
     )

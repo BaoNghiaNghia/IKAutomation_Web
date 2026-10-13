@@ -25,6 +25,15 @@ class _FakePlaywright:
         self.chromium = _FakeChromium()
 
 
+def test_chrome_user_data_dir_parses_whole_quoted_switch_with_spaces() -> None:
+    target = r"D:\\IK Auto\\data\\profiles\\account-3"
+    full_quoted = f'chrome.exe "--user-data-dir={target}" --remote-debugging-port=21901'
+    value_quoted = f'chrome.exe --user-data-dir="{target}" --remote-debugging-port=21901'
+    separate_quoted = f'chrome.exe --user-data-dir "{target}" --remote-debugging-port=21901'
+    for command in (full_quoted, value_quoted, separate_quoted):
+        assert browser._command_line_user_data_dir(command) == target
+
+
 def test_live_managed_cdp_ports_reads_the_running_chrome_command_line(monkeypatch) -> None:
     browser._CDP_PROCESS_DISCOVERY_CACHE = (0.0, {})
     monkeypatch.setattr(

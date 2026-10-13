@@ -39,6 +39,38 @@ def test_tcp_listener_process_parses_profile_cdp_port(monkeypatch) -> None:
     assert find_tcp_listener_process(23145) == 4321
 
 
+def test_cdp_listener_ignores_established_connections_using_same_local_port(monkeypatch) -> None:
+    """Only a LISTENING owner may pass profile identity verification."""
+    monkeypatch.setattr(windows_module.sys, "platform", "win32")
+    monkeypatch.setattr(windows_module, "_netstat_cache_at", 0.0)
+    monkeypatch.setattr(windows_module, "_netstat_cache", {})
+    monkeypatch.setattr(
+        windows_module.subprocess, "run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout=(
+            " TCP 127.0.0.1:23145 127.0.0.1:62000 ESTABLISHED 9999\n"
+            " TCP 127.0.0.1:23145 0.0.0.0:0 LISTENING 4321\n"
+            " TCP 127.0.0.1:27000 127.0.0.1:24000 ESTABLISHED 8888\n"
+            " TCP [::1]:23145 [::]:0 LISTENING 4321\n"
+        )),
+    )
+    assert find_tcp_listener_process(23145) == 4321
+    assert find_tcp_listener_process(27000) is None
+
+
+def test_conflicting_tcp_listeners_fail_closed(monkeypatch) -> None:
+    monkeypatch.setattr(windows_module.sys, "platform", "win32")
+    monkeypatch.setattr(windows_module, "_netstat_cache_at", 0.0)
+    monkeypatch.setattr(windows_module, "_netstat_cache", {})
+    monkeypatch.setattr(
+        windows_module.subprocess, "run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout=(
+            " TCP 127.0.0.1:23145 0.0.0.0:0 LISTENING 4321\n"
+            " TCP [::1]:23145 [::]:0 LISTENING 9999\n"
+        )),
+    )
+    assert find_tcp_listener_process(23145) is None
+
+
 def test_calculate_tiled_positions_orders_left_to_right_then_down() -> None:
     work_area = WindowRect(0, 0, 1200, 800)
 
