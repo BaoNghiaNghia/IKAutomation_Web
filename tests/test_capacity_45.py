@@ -49,6 +49,24 @@ def test_capacity_allows_staged_test_not_stability_certification():
     assert report["blockers"] == []
 
 
+def test_capacity_reports_real_credential_counts_not_enabled_profile_count():
+    rows = [(f"user{i}", True) for i in range(42)] + [
+        ("user_incomplete", False), ("", False), ("", False),
+    ]
+    report = capacity45.evaluate_capacity(
+        configured=45, enabled=45, credential_rows=rows,
+        commit=CommitSnapshot(limit_bytes=250 * 1024**3, available_bytes=90 * 1024**3),
+    )
+    assert report["credential_slots_checked"] == 45
+    assert report["credential_entries"] == 43
+    assert report["incomplete_credential_entries"] == 1
+    assert report["profiles_without_credential_username"] == 2
+    assert report["unique_complete_accounts"] == 42
+    assert report["missing_unique_accounts"] == 3
+    assert report["ready_for_staged_45_profile_test"] is False
+    assert "user_incomplete" not in repr(report)
+
+
 def test_unavailable_commit_fails_closed():
     report = capacity45.evaluate_capacity(
         configured=45, enabled=45,

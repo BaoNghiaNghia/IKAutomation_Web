@@ -30,6 +30,8 @@ def evaluate_capacity(
 ) -> dict[str, object]:
     """Compute safe readiness using counts only; never store raw usernames."""
     rows = [(username.strip().casefold(), bool(complete)) for username, complete in credential_rows]
+    credential_usernames_present = sum(bool(username) for username, _ in rows)
+    incomplete_credentials = sum(bool(username) and not complete for username, complete in rows)
     complete_names = [username for username, complete in rows if username and complete]
     unique = len(set(complete_names))
     missing = max(0, TARGET - unique)
@@ -50,7 +52,10 @@ def evaluate_capacity(
         "target": TARGET,
         "configured_profiles": configured,
         "enabled_profiles": enabled,
-        "credential_entries": len(rows),
+        "credential_slots_checked": len(rows),
+        "credential_entries": credential_usernames_present,
+        "incomplete_credential_entries": incomplete_credentials,
+        "profiles_without_credential_username": max(0, enabled - credential_usernames_present),
         "unique_complete_accounts": unique,
         "missing_unique_accounts": missing,
         "duplicate_complete_accounts": duplicate_count,
