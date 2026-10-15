@@ -1041,14 +1041,14 @@ class ChromeProfileSession:
                     "--metrics-recording-only",
                     "--mute-audio",
                     "--process-per-site",
-                    "--renderer-process-limit=2",
+                    f"--renderer-process-limit={self.config.browser.renderer_process_limit}",
                 ]
             )
         if self.config.browser.low_gpu_mode:
             # Avoid rendering a larger backing surface on high-DPI monitors.
             # Keep hardware WebGL enabled; software rendering would move the
             # bottleneck to CPU and destabilise large profile counts.
-            args.append("--force-device-scale-factor=1")
+            args.append(f"--force-device-scale-factor={self.config.browser.render_scale:g}")
         if self.config.browser.auto_resize:
             args.append(
                 f"--window-size={self.config.browser.viewport_width},"

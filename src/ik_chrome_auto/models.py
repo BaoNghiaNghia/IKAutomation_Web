@@ -71,6 +71,8 @@ class BrowserSettings:
     profile_title: bool = True
     low_memory_mode: bool = True
     low_gpu_mode: bool = True
+    render_scale: float = 1.0
+    renderer_process_limit: int = 2
     render_fps_limit: int = 22
     auto_resize: bool = True
     viewport_width: int = 500
