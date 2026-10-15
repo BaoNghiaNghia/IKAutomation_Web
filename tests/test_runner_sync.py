@@ -390,6 +390,34 @@ def test_add_sync_target_does_not_rearm_or_reset_the_active_master() -> None:
     ]
 
 
+def test_live_sync_member_add_updates_snapshot_and_next_input_fans_out() -> None:
+    runner = make_runner()
+    runner._sync_targets_snapshot = (("follower-open", runner.workers["follower-open"]),)
+    runner.workers["follower-new"] = FakeWorker(object())
+
+    assert runner.add_sync_target("follower-new") is True
+    assert {pid for pid, _worker in runner._sync_targets_snapshot} == {
+        "follower-open", "follower-new"
+    }
+    runner._on_input("master", {"type": "pointerup", "sequence": 18})
+    assert runner.sync_enabled is True
+    assert runner.sync_target_ids == {"follower-open", "follower-new"}
+    assert runner.workers["follower-new"].commands[-1].kind == CommandKind.SYNC_INPUT
+    assert runner.workers["follower-open"].commands[-1].kind == CommandKind.SYNC_INPUT
+
+
+def test_live_sync_rejects_detached_member_without_mutating_snapshot() -> None:
+    runner = make_runner()
+    before = (("follower-open", runner.workers["follower-open"]),)
+    runner._sync_targets_snapshot = before
+    runner.workers["follower-new"] = FakeWorker(None)
+    assert runner.add_sync_target("follower-new") is False
+    assert runner.sync_target_ids == {"follower-open"}
+    assert runner._sync_targets_snapshot == before
+    runner._on_input("master", {"type": "pointermove", "sequence": 19})
+    assert runner.sync_enabled is True
+
+
 def test_disable_sync_only_reconfigures_the_previous_master() -> None:
     runner = make_runner()
 

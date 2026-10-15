@@ -4904,7 +4904,22 @@ class MultiProfileRunner:
                 or profile_id in self.sync_target_ids
             ):
                 return False
+            worker = self.workers[profile_id]
+            # Reject members without an attached CDP worker.  An unchecked
+            # addition can otherwise abort the whole 43-profile Sync on its
+            # next physical input event.
+            is_attached = getattr(worker, "is_attached", None)
+            ready = bool(is_attached()) if callable(is_attached) else getattr(worker, "session", None) is not None
+            if not ready:
+                return False
             self.sync_target_ids.add(profile_id)
+            # Publish the full immutable target snapshot under the same lock
+            # used by _on_input().  A stale snapshot previously made the
+            # first gesture after adding a profile shut down Sync entirely.
+            self._sync_targets_snapshot = tuple(
+                (member_id, self.workers[member_id])
+                for member_id in sorted(self.sync_target_ids)
+            )
             master_id = self.sync_master_id
             targets = sorted(self.sync_target_ids)
         self.event_log.write(
