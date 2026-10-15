@@ -69,6 +69,29 @@ class FarmLaunchPolicy:
             constrained_duration,
         ) + self.resource_pause_timeout_seconds
 
+    def hard_ram_pause_reason(
+        self, *, available_memory_bytes: int, memory_load_percent: float
+    ) -> str | None:
+        """Hard gate new Chrome when physical RAM reaches the configured limits.
+
+        Windows pagefiles increase commit capacity, NOT available physical RAM.
+        New WebGL profiles must wait instead of paging the entire machine.
+        """
+        if available_memory_bytes < self.min_available_memory_bytes:
+            return f"RAM trống {available_memory_bytes / _GIB:.1f} GiB"
+        if memory_load_percent >= self.max_memory_load_percent:
+            return f"RAM đã dùng {memory_load_percent:.0f}%"
+        return None
+
+    def ram_has_recovered(
+        self, *, available_memory_bytes: int, memory_load_percent: float
+    ) -> bool:
+        """Require healthy headroom (hysteresis), not a one-sample bounce."""
+        return (
+            available_memory_bytes >= int(self.min_available_memory_bytes * 1.25)
+            and memory_load_percent <= self.max_memory_load_percent - 8
+        )
+
     def resource_block_reason(
         self,
         *,

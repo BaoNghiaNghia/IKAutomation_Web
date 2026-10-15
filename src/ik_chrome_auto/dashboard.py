@@ -111,7 +111,7 @@ class _UiActionTrace(QObject):
         "Sắp xếp", "Quản lý", "Bật đồng bộ", "Tắt đồng bộ",
         "Check for Updates", "Kiểm tra cập nhật", "Telegram",
         "Chọn tất cả", "Bỏ chọn", "Lưu thay đổi", "Xác nhận",
-        "Hủy", "Gửi thử", "Copy x,y", "JSON",
+        "Hủy", "Hủy mở", "Gửi thử", "Copy x,y", "JSON",
     })
 
     def __init__(self, parent: QObject, log: object) -> None:
@@ -255,6 +255,7 @@ class Dashboard(QWidget):
         self._farm_arrange_columns = self.config.browser.windows_per_row
         self._farm_resource_pause_started = 0.0
         self._farm_resource_pause_reason: str | None = None
+        self._farm_ram_recovery_samples = 0
         self._farm_commit_wait_alerted = False
         self._farm_commit_wait_last_log_at = 0.0
         self._farm_commit_snapshot_percent: float | None = None
@@ -451,6 +452,13 @@ class Dashboard(QWidget):
         self.close_all_button.setEnabled(False)
         self.close_all_button.clicked.connect(self._close_all_profiles)
         actions.addWidget(self.close_all_button)
+        self.cancel_open_button = PushButton(FIF.CLOSE, "Hủy mở")
+        self.cancel_open_button.setToolTip(
+            "Chỉ hủy các profile chưa mở; giữ nguyên Chrome đã chạy"
+        )
+        self.cancel_open_button.clicked.connect(self._cancel_farm_opening)
+        self.cancel_open_button.setVisible(False)
+        actions.addWidget(self.cancel_open_button)
         self.reconnect_retry = PushButton("Retry CDP")
         self.reconnect_retry.setVisible(False)
         self.reconnect_retry.clicked.connect(self._retry_profile_reattach)
@@ -2275,6 +2283,64 @@ class Dashboard(QWidget):
             self.runner.submit(pid, CommandKind.START_FARM)
             self._notify_telegram(f"🌾 Đã bắt đầu Farm: {self.config.profile(pid).name}")
 
+    def _set_farm_opening_controls(self, opening: bool) -> None:
+        """A visible cancel remains actionable while the launch button is locked."""
+        cancel = getattr(self, "cancel_open_button", None)
+        close_all = getattr(self, "close_all_button", None)
+        if cancel is not None:
+            cancel.setVisible(opening)
+            cancel.setEnabled(opening)
+        if close_all is not None:
+            close_all.setVisible(not opening)
+
+    def _cancel_farm_opening(self) -> None:
+        """Cancel future OPEN submissions; do not terminate launched sessions."""
+        if getattr(self, "_farm_launcher_phase", "") != "opening":
+            return
+        queued = len(self._farm_open_queue)
+        if QMessageBox.question(
+            self,
+            "Hủy hàng đợi mở Chrome",
+            f"Hủy {queued} profile còn chờ mở? Các Chrome đã mở và "
+            "lệnh đang khởi động sẽ được giữ nguyên.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        # A worker may already be executing OPEN; preserve an individual
+        # in-flight lock until its READY/ERROR snapshot arrives.
+        in_flight = {
+            profile_id for profile_id in self._farm_batch_profiles
+            if not self.runner.has_open_session(profile_id)
+            and self._farm_open_states.get(profile_id) not in {
+                WorkerState.ERROR, WorkerState.STOPPED,
+            }
+        }
+        self._individually_opening_profiles.update(in_flight)
+        self._farm_open_queue.clear()
+        self._farm_batch_profiles.clear()
+        self._farm_batch_submitted = 0
+        self._farm_batch_resume_at = 0.0
+        self._farm_resource_pause_started = 0.0
+        self._farm_resource_pause_reason = None
+        self._farm_ram_recovery_samples = 0
+        self._farm_launch_profiles = self._opened_profile_ids()
+        self._farm_launcher_phase = "launch"
+        self._set_farm_opening_controls(False)
+        self.farm_launcher.setEnabled(True)
+        self.farm_launcher.setText("Khởi động")
+        self._set_labeled_action_icon(self.farm_launcher, FIF.PLAY)
+        self._set_farm_launcher_launch_style()
+        self._refresh_close_all_control()
+        self._log_monitor_scheduler(
+            "profile_open_queue_cancelled", cancelled_count=queued,
+            in_flight_count=len(in_flight),
+        )
+        self._append_log(
+            f"Đã hủy {queued} profile chưa mở; "
+            f"giữ nguyên {len(in_flight)} lệnh đang chạy và Chrome đã kết nối"
+        )
+
     def _farm_launcher_action(self) -> None:
         """Open selected profile tabs, or close them when already prepared."""
         if self._farm_launcher_phase == "launch":
@@ -2302,9 +2368,11 @@ class Dashboard(QWidget):
             pending = len(self._farm_open_queue)
             self.farm_launcher.setEnabled(False)
             self.farm_launcher.setText("Đang mở...")
+            self._set_farm_opening_controls(True)
             self._set_labeled_action_icon(self.farm_launcher, FIF.PLAY)
             self.farm_all_button.setEnabled(False)
             self._farm_launcher_phase = "opening"
+            self._set_farm_opening_controls(True)
             self._farm_next_open_at = 0.0
             self._farm_batch_profiles.clear()
             self._farm_batch_submitted = 0
@@ -2312,6 +2380,7 @@ class Dashboard(QWidget):
             self._farm_arrange_columns = self._apply_windows_per_row()
             self._farm_resource_pause_started = 0.0
             self._farm_resource_pause_reason = None
+            self._farm_ram_recovery_samples = 0
             self._farm_commit_wait_alerted = False
             self._farm_commit_wait_last_log_at = 0.0
             self._farm_commit_snapshot_percent = None
@@ -2532,6 +2601,7 @@ class Dashboard(QWidget):
                 self._append_log(f"[{profile_id}] Đang kiểm tra form đăng nhập ({len(self._farm_login_queue)} còn lại)")
             return
         self._farm_launcher_phase = "ready"
+        self._set_farm_opening_controls(False)
         self.farm_launcher.setEnabled(True)
         self.farm_launcher.setText("Đóng tabs")
         self._set_labeled_action_icon(self.farm_launcher, FIF.CLOSE)
@@ -2596,6 +2666,32 @@ class Dashboard(QWidget):
                 queue_remaining=remaining, commit_percent=round(used_percent, 1),
                 commit_available_gib=round(free_gib, 2),
             )
+
+    def _pause_farm_for_ram(self, reason: str, now: float) -> None:
+        """Hard-pause NEW Chrome launches while preserving the entire queue."""
+        if self._farm_resource_pause_reason != "physical_ram_critical":
+            self._farm_resource_pause_started = now
+            self._farm_ram_recovery_samples = 0
+            self._log_monitor_scheduler(
+                "farm_physical_ram_pause_started",
+                queue_remaining=len(self._farm_open_queue),
+                reason="physical_ram_pressure",
+            )
+            self._append_log(
+                f"TẠM DỪNG mở Chrome: {reason}. "
+                f"Còn {len(self._farm_open_queue)} profile trong hàng đợi."
+            )
+        self._farm_resource_pause_reason = "physical_ram_critical"
+        self.farm_launcher.setText(
+            f"Chờ RAM · {len(self._farm_open_queue)} tab"
+        )
+        set_tooltip = getattr(self.farm_launcher, "setToolTip", None)
+        if callable(set_tooltip):
+            set_tooltip(
+                f"{reason}. Tự tiếp tục khi RAM hồi phục đủ an toàn. "
+                "Có thể bấm Hủy mở; không đóng Chrome đã mở."
+            )
+        self._set_labeled_action_icon(self.farm_launcher, FIF.PAUSE)
 
     def _advance_farm_opening(self) -> None:
         """Open profiles in resource-guarded batches instead of one startup burst."""
@@ -2673,9 +2769,55 @@ class Dashboard(QWidget):
             self._farm_commit_snapshot_percent = None
             self._farm_commit_snapshot_available_gib = None
             self.farm_launcher.setText("Đang mở...")
-        reason: str | None = None
+        # Physical RAM is a hard gate. Pagefile headroom cannot protect
+        # WebGL renderer responsiveness at 90-96% physical memory usage.
         try:
             memory = get_system_memory_status()
+        except Exception as error:
+            self._pause_farm_for_ram(
+                f"Không đo được RAM ({type(error).__name__})", now
+            )
+            self._farm_next_open_at = now + 10.0
+            return
+        hard_reason = policy.hard_ram_pause_reason(
+            available_memory_bytes=memory.available_bytes,
+            memory_load_percent=memory.load_percent,
+        )
+        if hard_reason:
+            self._pause_farm_for_ram(hard_reason, now)
+            self._farm_ram_recovery_samples = 0
+            self._farm_next_open_at = now + 10.0
+            return
+        if self._farm_resource_pause_reason == "physical_ram_critical":
+            # Two safe readings at least ten seconds apart, plus hysteresis.
+            # A brief dip under the stop threshold must not start more tabs.
+            if not policy.ram_has_recovered(
+                available_memory_bytes=memory.available_bytes,
+                memory_load_percent=memory.load_percent,
+            ):
+                self._farm_ram_recovery_samples = 0
+                self._farm_next_open_at = now + 10.0
+                return
+            self._farm_ram_recovery_samples = getattr(
+                self, "_farm_ram_recovery_samples", 0
+            ) + 1
+            if self._farm_ram_recovery_samples < 2:
+                self._farm_next_open_at = now + 10.0
+                return
+            self._log_monitor_scheduler(
+                "farm_physical_ram_recovered",
+                queue_remaining=len(self._farm_open_queue),
+            )
+            self._append_log(
+                f"RAM đã hồi phục ổn định; tự tiếp tục "
+                f"{len(self._farm_open_queue)} profile đang chờ"
+            )
+            self._farm_resource_pause_started = 0.0
+            self._farm_resource_pause_reason = None
+            self._farm_ram_recovery_samples = 0
+            self.farm_launcher.setText("Đang mở...")
+        reason: str | None = None
+        try:
             gpu_percent = self._cached_gpu_percent()
             reason = policy.resource_block_reason(
                 available_memory_bytes=memory.available_bytes,
@@ -2684,7 +2826,7 @@ class Dashboard(QWidget):
                 gpu_utilization_percent=gpu_percent,
             )
         except Exception as error:
-            self._append_log(f"Không đọc được tài nguyên hệ thống: {error}")
+            self._append_log(f"Không đọc được GPU/CPU: {type(error).__name__}")
         if reason:
             if not self._farm_resource_pause_started:
                 self._farm_resource_pause_started = now
@@ -2732,6 +2874,7 @@ class Dashboard(QWidget):
     def _abort_farm_opening(self, title: str, message: str, *, critical: bool = False) -> None:
         """Reset only the launch controller; already opened profiles stay recoverable."""
         self._farm_launcher_phase = "launch"
+        self._set_farm_opening_controls(False)
         self._farm_launch_profiles.clear()
         self._farm_open_queue.clear()
         self._farm_batch_profiles.clear()

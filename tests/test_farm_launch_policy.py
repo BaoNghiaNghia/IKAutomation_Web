@@ -59,6 +59,22 @@ def test_resource_guard_blocks_low_memory_and_high_cpu() -> None:
     ) is None
 
 
+def test_physical_ram_hard_stop_and_recovery_have_hysteresis() -> None:
+    policy = FarmLaunchPolicy.for_total_memory(64 * GIB)
+    assert policy.hard_ram_pause_reason(
+        available_memory_bytes=8 * GIB, memory_load_percent=88
+    )
+    assert not policy.ram_has_recovered(
+        available_memory_bytes=17 * GIB, memory_load_percent=73
+    )
+    assert policy.hard_ram_pause_reason(
+        available_memory_bytes=32 * GIB, memory_load_percent=55
+    ) is None
+    assert policy.ram_has_recovered(
+        available_memory_bytes=26 * GIB, memory_load_percent=59
+    )
+
+
 def test_timeout_budget_includes_all_batch_pauses() -> None:
     policy = FarmLaunchPolicy.for_total_memory(96 * GIB)
 

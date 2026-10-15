@@ -6,6 +6,7 @@ from ik_chrome_auto.memory_guard import (
     GIB,
     CommitSnapshot,
     guard_new_chrome_launch,
+    guard_physical_ram_for_new_chrome_launch,
 )
 
 
@@ -24,6 +25,19 @@ def test_new_chrome_launch_rejected_at_ninety_percent_used() -> None:
 
 def test_new_chrome_launch_safe_with_sufficient_commit() -> None:
     guard_new_chrome_launch(CommitSnapshot(192 * GIB, 75 * GIB))
+
+
+def test_new_chrome_launch_blocked_by_physical_ram_even_with_commit_headroom() -> None:
+    with pytest.raises(RuntimeError, match="Physical RAM"):
+        guard_physical_ram_for_new_chrome_launch(
+            total_bytes=64 * GIB, available_bytes=2 * GIB, load_percent=96.0
+        )
+
+
+def test_new_chrome_launch_allowed_when_physical_ram_safe() -> None:
+    guard_physical_ram_for_new_chrome_launch(
+        total_bytes=64 * GIB, available_bytes=32 * GIB, load_percent=50.0
+    )
 
 
 def test_existing_cdp_reattach_not_subject_to_launch_only_guard() -> None:

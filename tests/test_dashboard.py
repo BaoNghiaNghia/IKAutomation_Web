@@ -1204,8 +1204,8 @@ def test_username_results_update_qt_labels_on_main_poll_only() -> None:
     assert updates == ["Tài khoản 02 · masked***"]
 
 
-def test_profile_launch_sends_an_open_command_even_when_memory_is_constrained(monkeypatch) -> None:
-    """A full RAM guard must throttle opening, not leave every selection queued."""
+def test_profile_launch_hard_pauses_when_physical_ram_is_constrained(monkeypatch) -> None:
+    """Never open a new Chrome when physical RAM has already become unsafe."""
     dashboard = Dashboard.__new__(Dashboard)
     policy = FarmLaunchPolicy.for_total_memory(32 * 1_073_741_824)
     dashboard.config = SimpleNamespace(profiles=[SimpleNamespace(id="account-1")])
@@ -1246,9 +1246,157 @@ def test_profile_launch_sends_an_open_command_even_when_memory_is_constrained(mo
 
     dashboard._advance_farm_opening()
 
-    assert dashboard.runner.commands == [("account-1", CommandKind.OPEN)]
-    assert dashboard._farm_batch_limit == 1
-    assert dashboard.farm_launcher.text == "Đang mở chậm"
+    assert dashboard.runner.commands == []
+    assert list(dashboard._farm_open_queue) == ["account-1"]
+    assert dashboard._farm_resource_pause_reason == "physical_ram_critical"
+    assert "Chờ RAM" in dashboard.farm_launcher.text
+
+
+def test_ram_pause_stays_closed_until_hysteresis_recovers(monkeypatch) -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    policy = FarmLaunchPolicy.for_total_memory(64 * 1024**3)
+    dashboard.runner = FakeFarmRunner(set())
+    dashboard._farm_launcher_phase = "opening"
+    dashboard._farm_open_queue = deque(["account-31"])
+    dashboard._farm_launch_profiles = {"account-31"}
+    dashboard._farm_open_states = {}
+    dashboard._farm_launch_policy = policy
+    dashboard._farm_batch_profiles = set()
+    dashboard._farm_batch_submitted = 0
+    dashboard._farm_batch_limit = policy.batch_size
+    dashboard._farm_batch_resume_at = 0.0
+    dashboard._farm_next_open_at = 0.0
+    dashboard._farm_resource_pause_started = 0.0
+    dashboard._farm_resource_pause_reason = None
+    dashboard._farm_ram_recovery_samples = 0
+    dashboard._latest_profile_cpu_percent = 0.0
+    dashboard.farm_launcher = FakeActionButton()
+    dashboard._set_labeled_action_icon = lambda *_args, **_kwargs: None
+    dashboard._cached_gpu_percent = lambda: None
+    dashboard._append_log = lambda *_args: None
+    events = []
+    dashboard._log_monitor_scheduler = lambda name, **_kw: events.append(name)
+    monkeypatch.setattr(
+        dashboard_module, "get_windows_commit_snapshot",
+        lambda: SimpleNamespace(critical=False),
+    )
+    memory = SimpleNamespace(available_bytes=8 * 1024**3, load_percent=88.0)
+    monkeypatch.setattr(dashboard_module, "get_system_memory_status", lambda: memory)
+    dashboard._advance_farm_opening()
+    assert not dashboard.runner.commands
+    assert dashboard._farm_resource_pause_reason == "physical_ram_critical"
+    assert list(dashboard._farm_open_queue) == ["account-31"]
+    assert "farm_physical_ram_pause_started" in events
+
+    # Being just below the stop threshold is not enough to resume.
+    memory.available_bytes = 17 * 1024**3
+    memory.load_percent = 73.0
+    dashboard._farm_next_open_at = 0.0
+    dashboard._advance_farm_opening()
+    assert not dashboard.runner.commands
+
+    # Hysteresis requires >20 GiB free and memory use <=72% on a 64 GiB box.
+    memory.available_bytes = 26 * 1024**3
+    memory.load_percent = 59.0
+    dashboard._farm_next_open_at = 0.0
+    dashboard._advance_farm_opening()
+    assert not dashboard.runner.commands
+    assert dashboard._farm_ram_recovery_samples == 1
+    dashboard._farm_next_open_at = 0.0
+    dashboard._advance_farm_opening()
+    assert dashboard.runner.commands == [("account-31", CommandKind.OPEN)]
+    assert "farm_physical_ram_recovered" in events
+
+
+def test_ram_probe_failure_fails_closed(monkeypatch) -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    policy = FarmLaunchPolicy.for_total_memory(64 * 1024**3)
+    dashboard.runner = FakeFarmRunner(set())
+    dashboard._farm_launcher_phase = "opening"
+    dashboard._farm_open_queue = deque(["account-31"])
+    dashboard._farm_launch_policy = policy
+    dashboard._farm_batch_profiles = set()
+    dashboard._farm_batch_submitted = 0
+    dashboard._farm_batch_limit = policy.batch_size
+    dashboard._farm_batch_resume_at = 0.0
+    dashboard._farm_next_open_at = 0.0
+    dashboard._farm_resource_pause_started = 0.0
+    dashboard._farm_resource_pause_reason = None
+    dashboard.farm_launcher = FakeActionButton()
+    dashboard._set_labeled_action_icon = lambda *_args, **_kwargs: None
+    dashboard._append_log = lambda *_args: None
+    dashboard._log_monitor_scheduler = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(
+        dashboard_module, "get_windows_commit_snapshot",
+        lambda: SimpleNamespace(critical=False),
+    )
+    def fail_memory():
+        raise OSError("probe failed")
+    monkeypatch.setattr(dashboard_module, "get_system_memory_status", fail_memory)
+    dashboard._advance_farm_opening()
+    assert dashboard.runner.commands == []
+    assert list(dashboard._farm_open_queue) == ["account-31"]
+
+
+def test_cancel_opening_keeps_live_sessions_and_pending_worker_lock(monkeypatch) -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard._farm_launcher_phase = "opening"
+    dashboard._farm_open_queue = deque(["account-3", "account-4"])
+    dashboard._farm_batch_profiles = {"account-1", "account-2"}
+    dashboard._farm_open_states = {
+        "account-1": WorkerState.READY,
+        "account-2": WorkerState.STARTING,
+    }
+    dashboard._farm_batch_submitted = 2
+    dashboard._farm_batch_resume_at = 123.0
+    dashboard._farm_resource_pause_started = 100.0
+    dashboard._farm_resource_pause_reason = "physical_ram_critical"
+    dashboard._farm_ram_recovery_samples = 0
+    dashboard._farm_launch_profiles = {"account-1", "account-2", "account-3", "account-4"}
+    dashboard._individually_opening_profiles = set()
+    dashboard.runner = FakeFarmRunner({"account-1"})
+    dashboard.config = SimpleNamespace(profiles=[
+        SimpleNamespace(id=f"account-{i}") for i in range(1, 5)
+    ])
+    dashboard.farm_launcher = FakeActionButton()
+    actions = []
+    dashboard._set_farm_opening_controls = lambda active: actions.append(active)
+    dashboard._set_labeled_action_icon = lambda *_args, **_kwargs: None
+    dashboard._set_farm_launcher_launch_style = lambda: None
+    dashboard._refresh_close_all_control = lambda: None
+    dashboard._append_log = lambda message: actions.append(message)
+    dashboard._log_monitor_scheduler = (
+        lambda event, **kwargs: actions.append((event, kwargs))
+    )
+    monkeypatch.setattr(
+        dashboard_module.QMessageBox, "question",
+        lambda *_args: dashboard_module.QMessageBox.StandardButton.Yes,
+    )
+    dashboard._cancel_farm_opening()
+    assert dashboard._farm_launcher_phase == "launch"
+    assert not dashboard._farm_open_queue
+    assert not dashboard.runner.commands
+    assert dashboard._individually_opening_profiles == {"account-2"}
+    assert dashboard._farm_launch_profiles == {"account-1"}
+    assert "account-3" not in dashboard._individually_opening_profiles
+    assert dashboard.farm_launcher.enabled
+    assert False in actions
+    assert ("profile_open_queue_cancelled", {
+        "cancelled_count": 2, "in_flight_count": 1
+    }) in actions
+
+
+def test_cancel_opening_confirmation_no_leaves_queue_unchanged(monkeypatch) -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard._farm_launcher_phase = "opening"
+    dashboard._farm_open_queue = deque(["account-1"])
+    monkeypatch.setattr(
+        dashboard_module.QMessageBox, "question",
+        lambda *_args: dashboard_module.QMessageBox.StandardButton.No,
+    )
+    dashboard._cancel_farm_opening()
+    assert dashboard._farm_launcher_phase == "opening"
+    assert list(dashboard._farm_open_queue) == ["account-1"]
 
 
 def test_commit_wait_reports_queue_and_alerts_only_once_after_five_minutes() -> None:
