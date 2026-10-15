@@ -41,6 +41,66 @@ def make_runner() -> MultiProfileRunner:
     return runner
 
 
+def test_opt_in_follower_render_budget_only_targets_followers_and_restores() -> None:
+    runner = make_runner()
+    runner.config = SimpleNamespace(browser=SimpleNamespace(
+        sync_follower_fps_limit=14, render_fps_limit=22
+    ))
+    runner._sync_session_id = "sync-perf"
+    runner._apply_sync_follower_budget(
+        ("follower-open",), "sync-perf", enabled=True
+    )
+    follower = runner.workers["follower-open"]
+    assert len(follower.commands) == 1
+    assert follower.commands[0].kind == CommandKind.SET_SYNC_RENDER_BUDGET
+    assert follower.commands[0].payload["fps"] == 14
+    assert runner.workers["master"].commands == []
+    runner._apply_sync_follower_budget(
+        ("follower-open",), "sync-perf", enabled=False
+    )
+    assert follower.commands[-1].payload["fps"] == 0
+
+
+def test_render_budget_modifies_only_live_frames_without_canvas_resize() -> None:
+    from ik_chrome_auto.browser import ChromeProfileSession
+
+    class Frame:
+        def __init__(self, working: bool = True):
+            self.working = working
+            self.calls: list[tuple[str, int]] = []
+
+        def evaluate(self, script: str, fps: int) -> bool:
+            self.calls.append((script, fps))
+            if not self.working:
+                raise RuntimeError("navigation in progress")
+            return True
+
+    healthy, navigating = Frame(), Frame(False)
+    session = ChromeProfileSession.__new__(ChromeProfileSession)
+    session._page = SimpleNamespace(
+        is_closed=lambda: False, frames=[healthy, navigating]
+    )
+    session.config = SimpleNamespace(browser=SimpleNamespace(
+        low_gpu_mode=True, render_fps_limit=22
+    ))
+    assert session.set_sync_render_budget(14) == 1
+    assert healthy.calls[-1][1] == 14
+    assert "canvas" not in healthy.calls[-1][0].lower()
+    assert session.set_sync_render_budget(None) == 1
+    assert healthy.calls[-1][1] == 22
+
+
+def test_follower_render_budget_default_is_disabled() -> None:
+    runner = make_runner()
+    runner.config = SimpleNamespace(browser=SimpleNamespace(
+        sync_follower_fps_limit=0
+    ))
+    runner._apply_sync_follower_budget(
+        ("follower-open",), "sync-perf", enabled=True
+    )
+    assert runner.workers["follower-open"].commands == []
+
+
 def test_sync_routes_master_event_only_to_open_followers() -> None:
     runner = make_runner()
     event = {"type": "pointerdown", "canvas": {"ratio_x": 0.5, "ratio_y": 0.5}}

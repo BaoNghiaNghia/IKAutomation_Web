@@ -1141,6 +1141,23 @@ class ProfileWorker:
                         )
                         self._publish_monitor((SCAN_ERROR,), ("combat_mail",))
                     continue
+                if command.kind == CommandKind.SET_SYNC_RENDER_BUDGET:
+                    # Only the owning Playwright worker touches the frame.
+                    # Never block the native input callback with CDP calls.
+                    fps = int(command.payload.get("fps", 0) or 0)
+                    frames_updated = 0
+                    if self.session is not None:
+                        frames_updated = self.session.set_sync_render_budget(fps or None)
+                    self.event_log.write(
+                        "sync_follower_render_budget",
+                        {
+                            "profile_id": self.profile.id,
+                            "fps": fps or self.config.browser.render_fps_limit,
+                            "frame_count": frames_updated,
+                            "sync_session_id": str(command.payload.get("sync_session_id", "")),
+                        },
+                    )
+                    continue
                 if command.kind == CommandKind.SET_SYNC_SOURCE:
                     self._sync_source_enabled = bool(command.payload.get("enabled", False))
                     sync_session_id = str(command.payload.get("sync_session_id", ""))
@@ -4827,7 +4844,27 @@ class MultiProfileRunner:
         native = getattr(self, "_native_input", None)
         for diagnostic in native.diagnostics() if native is not None else ():
             self.event_log.write(str(diagnostic.get("event", "native_input")), {"master_profile_id": master_id, "sync_session_id": sync_session_id, **{key: value for key, value in diagnostic.items() if key != "event"}})
+        self._apply_sync_follower_budget(
+            tuple(self.sync_target_ids), sync_session_id, enabled=True
+        )
         self._publish_sync_state(master_id, SyncState.ACTIVE, f"MASTER → {len(self._sync_targets_snapshot)} thiết bị")
+
+    def _apply_sync_follower_budget(
+        self, profile_ids: tuple[str, ...], sync_session_id: str, *, enabled: bool
+    ) -> None:
+        fps = int(getattr(
+            getattr(getattr(self, "config", None), "browser", None),
+            "sync_follower_fps_limit", 0
+        ) or 0)
+        if fps <= 0:
+            return
+        for profile_id in profile_ids:
+            worker = self.workers.get(profile_id)
+            if worker is not None:
+                worker.submit(WorkerCommand(
+                    CommandKind.SET_SYNC_RENDER_BUDGET,
+                    {"fps": fps if enabled else 0, "sync_session_id": sync_session_id},
+                ))
 
     def _on_sync_start_timeout(self, master_id: str, sync_session_id: str) -> None:
         with self._sync_lock:
@@ -4930,6 +4967,9 @@ class MultiProfileRunner:
                 "target_profile_ids": targets,
             },
         )
+        self._apply_sync_follower_budget(
+            (profile_id,), str(getattr(self, "_sync_session_id", "")), enabled=True
+        )
         return True
 
     def disable_sync(self) -> None:
@@ -4962,6 +5002,9 @@ class MultiProfileRunner:
             )
         if previous_master is not None and previous_master in self.workers:
             self.submit(previous_master, CommandKind.SET_SYNC_SOURCE, enabled=False, sync_session_id=sync_session_id)
+        self._apply_sync_follower_budget(
+            tuple(previous_targets), sync_session_id, enabled=False
+        )
         for profile_id in previous_targets:
             worker = self.workers.get(profile_id)
             if worker is not None:

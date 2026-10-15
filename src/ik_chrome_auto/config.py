@@ -152,6 +152,10 @@ def load_config(path: Path) -> AppConfig:
         # this independent from older config files also migrates retained
         # installations that previously stored 24/30/60 FPS.
         render_fps_limit=22,
+        sync_follower_fps_limit=(
+            max(10, min(22, int(browser_raw["sync_follower_fps_limit"])))
+            if int(browser_raw.get("sync_follower_fps_limit", 0)) > 0 else 0
+        ),
         auto_resize=bool(browser_raw.get("auto_resize", True)),
         viewport_width=int(viewport.get("width", 500)),
         viewport_height=int(viewport.get("height", 281)),
@@ -232,6 +236,7 @@ def save_config(config: AppConfig) -> None:
             "render_scale": config.browser.render_scale,
             "renderer_process_limit": config.browser.renderer_process_limit,
             "render_fps_limit": 22,
+            "sync_follower_fps_limit": config.browser.sync_follower_fps_limit,
             "auto_resize": config.browser.auto_resize,
             "viewport": {
                 "width": config.browser.viewport_width,

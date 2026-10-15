@@ -2504,6 +2504,41 @@ class ChromeProfileSession:
         self._surface_transform_cached = transform
         return canvas, transform
 
+    def set_sync_render_budget(self, fps_limit: int | None) -> int:
+        """Opt-in follower-only paint throttle; preserve canvas and game input.
+
+        Runs solely on this profile's Playwright worker thread. Does not
+        resize the canvas, pause JS timers, or disable WebGL. Returns the
+        number of already-loaded frames that accepted the temporary limit.
+        Page reloads restore the ordinary 22-FPS init-script default.
+        """
+        if not self.config.browser.low_gpu_mode:
+            return 0
+        fps = (
+            self.config.browser.render_fps_limit
+            if fps_limit is None
+            else max(10, min(self.config.browser.render_fps_limit, int(fps_limit)))
+        )
+        page = self._page
+        if page is None or page.is_closed():
+            return 0
+        installed = 0
+        for frame in tuple(page.frames):
+            try:
+                updated = frame.evaluate(
+                    """(fps) => {
+                        if (!window.__IK_LOW_GPU_MODE) return false;
+                        window.__IK_RENDER_INTERVAL_MS = 1000 / fps;
+                        return true;
+                    }""",
+                    fps,
+                )
+                installed += bool(updated)
+            except Exception:
+                # Cross-origin navigation may replace a frame at any moment.
+                continue
+        return installed
+
     def set_sync_source(self, enabled: bool) -> SyncSourceStatus:
         enabled = bool(enabled)
         if self._sync_source == enabled:

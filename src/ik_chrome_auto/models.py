@@ -51,6 +51,7 @@ class CommandKind(StrEnum):
     SYNC_INPUT = "sync_input"
     RESET_SYNC_INPUT = "reset_sync_input"
     SET_SYNC_SOURCE = "set_sync_source"
+    SET_SYNC_RENDER_BUDGET = "set_sync_render_budget"
     SET_INSPECTOR = "set_inspector"
     SET_DRAG_ITEM = "set_drag_item"
     SET_SCROLLBARS = "set_scrollbars"
@@ -74,6 +75,8 @@ class BrowserSettings:
     render_scale: float = 1.0
     renderer_process_limit: int = 2
     render_fps_limit: int = 22
+    # Experimental only; 0 keeps the original 22-FPS WebGL behavior.
+    sync_follower_fps_limit: int = 0
     auto_resize: bool = True
     viewport_width: int = 500
     viewport_height: int = 281
