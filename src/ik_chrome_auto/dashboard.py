@@ -2386,12 +2386,15 @@ class Dashboard(QWidget):
             if not selected:
                 return
             if self.runner.sync_enabled:
-                self._set_sync_disabled_ui()
+                # Opening extra Chrome members must not tear down the active
+                # physical-input master.  Each new CDP-ready follower joins
+                # atomically via runner.add_sync_target() after attachment.
                 self._append_log(
-                    "Đã tắt phiên đồng bộ cũ trước khi mở nhóm profile mới"
+                    "Giữ Sync đang chạy khi mở profile mới; tự thêm follower sau khi CDP sẵn sàng"
                 )
-            self._sync_target_profiles = set()
-            self._sync_available_profiles = set()
+            else:
+                self._sync_target_profiles = set()
+                self._sync_available_profiles = set()
             self._farm_launch_profiles = selected
             self._farm_open_states = {
                 profile_id: WorkerState.READY

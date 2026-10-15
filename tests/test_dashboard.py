@@ -1163,6 +1163,42 @@ def test_monitoring_disables_input_sync_before_starting() -> None:
     assert dashboard.monitor_button.icon == dashboard_module.FIF.PAUSE
 
 
+def test_opening_new_profile_keeps_active_manual_sync() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    dashboard.config = SimpleNamespace(
+        profiles=[
+            SimpleNamespace(id="account-1"),
+            SimpleNamespace(id="account-2"),
+            SimpleNamespace(id="account-3"),
+        ]
+    )
+    dashboard.runner = FakeFarmRunner({"account-1", "account-2"})
+    dashboard.runner.sync_enabled = True
+    dashboard._farm_launcher_phase = "launch"
+    dashboard._sync_target_profiles = {"account-2"}
+    dashboard._sync_available_profiles = {"account-2"}
+    dashboard._farm_batch_profiles = set()
+    dashboard._choose_farm_profiles = lambda: {"account-3"}
+    dashboard.farm_launcher = FakeActionButton()
+    dashboard.farm_all_button = FakeActionButton()
+    dashboard._set_farm_opening_controls = lambda _opening: None
+    dashboard._set_labeled_action_icon = lambda *_args: None
+    dashboard._apply_windows_per_row = lambda: 6
+    dashboard._advance_farm_opening = lambda: None
+    messages = []
+    dashboard._append_log = messages.append
+
+    dashboard._farm_launcher_action()
+
+    assert dashboard.runner.sync_enabled is True
+    assert dashboard.runner.disable_sync_calls == 0
+    assert dashboard._sync_target_profiles == {"account-2"}
+    assert dashboard._sync_available_profiles == {"account-2"}
+    assert list(dashboard._farm_open_queue) == ["account-3"]
+    assert dashboard._farm_launcher_phase == "opening"
+    assert any("Giữ Sync" in message for message in messages)
+
+
 def test_close_tabs_stops_individual_farm_before_serial_browser_shutdown() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     dashboard.config = SimpleNamespace(
