@@ -174,7 +174,29 @@ def activate_if_idle(
         # Metadata is advisory; successful binary activation remains valid.
         pass
     manifest.unlink()
-    stage.rmdir()
+    # The isolated QA executable can create diagnostics under the staging
+    # directory while running.  A nonempty stage must never turn a
+    # *successful* binary swap into an OSError, and its files must not be
+    # deleted because they could contain useful recovery logs.
+    try:
+        stage.rmdir()
+    except OSError:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        archived = False
+        for index in range(100):
+            destination = release / f".ik-auto-stage-preserved-{stamp}-{index}"
+            if destination.exists():
+                continue
+            try:
+                stage.replace(destination)
+            except OSError:
+                break
+            archived = True
+            break
+        if not archived:
+            # Binaries have already been activated; caller can reconcile the
+            # preserved staging folder without attempting a second swap.
+            return "activated_cleanup_pending"
     return "activated"
 
 

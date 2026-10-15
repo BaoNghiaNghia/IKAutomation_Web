@@ -57,6 +57,21 @@ def test_activates_only_app_binaries_after_exit(tmp_path: Path) -> None:
     assert not stage.exists()
 
 
+def test_activation_preserves_experiment_logs_left_in_staging(tmp_path: Path) -> None:
+    target, stage = _layout(tmp_path)
+    (stage / "data" / "logs").mkdir(parents=True)
+    (stage / "data" / "logs" / "experiment.jsonl").write_text("sample\n")
+
+    assert activate_if_idle(tmp_path, running=lambda root: False) == "activated"
+    assert (target / "IK Auto.exe").read_bytes() == b"new-binary"
+    assert (target / "config.json").read_text() == "private config unchanged"
+    assert (target / "data" / "profiles" / "Cookie Data").read_bytes() == b"private"
+    assert not stage.exists()
+    archived = list((tmp_path / "release").glob(".ik-auto-stage-preserved-*"))
+    assert len(archived) == 1
+    assert (archived[0] / "data" / "logs" / "experiment.jsonl").read_text() == "sample\n"
+
+
 def test_bad_checksum_never_moves_any_binaries(tmp_path: Path) -> None:
     target, stage = _layout(tmp_path)
     (stage / "IK Auto.exe").write_bytes(b"modified")
