@@ -72,6 +72,8 @@ class BrowserSettings:
     profile_title: bool = True
     low_memory_mode: bool = True
     low_gpu_mode: bool = True
+    # Opt-in Chromium compositor/resource low-end policy; test before enabling.
+    low_end_device_mode: bool = False
     render_scale: float = 1.0
     renderer_process_limit: int = 2
     render_fps_limit: int = 22

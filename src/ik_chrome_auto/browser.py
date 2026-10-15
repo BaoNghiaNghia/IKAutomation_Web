@@ -1044,6 +1044,10 @@ class ChromeProfileSession:
                     f"--renderer-process-limit={self.config.browser.renderer_process_limit}",
                 ]
             )
+        if self.config.browser.low_memory_mode and self.config.browser.low_end_device_mode:
+            # Chromium native low-memory compositor policy. Keep default off:
+            # this can change raster cache/quality and requires real WebGL QA.
+            args.append("--enable-low-end-device-mode")
         if self.config.browser.low_gpu_mode:
             # Avoid rendering a larger backing surface on high-DPI monitors.
             # Keep hardware WebGL enabled; software rendering would move the

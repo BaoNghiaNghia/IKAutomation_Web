@@ -40,6 +40,7 @@ def test_load_resolves_relative_paths(tmp_path: Path) -> None:
     assert config.browser.profile_title is True
     assert config.browser.low_memory_mode is True
     assert config.browser.low_gpu_mode is True
+    assert config.browser.low_end_device_mode is False
     assert config.browser.render_scale == 1.0
     assert config.browser.renderer_process_limit == 2
     assert config.browser.render_fps_limit == 22
@@ -87,6 +88,7 @@ def test_save_round_trip(tmp_path: Path) -> None:
     config = load_config(source)
     config.browser.low_memory_mode = False
     config.browser.low_gpu_mode = False
+    config.browser.low_end_device_mode = True
     config.browser.render_scale = 0.5
     config.browser.renderer_process_limit = 1
     config.browser.render_fps_limit = 30
@@ -101,6 +103,7 @@ def test_save_round_trip(tmp_path: Path) -> None:
     assert loaded.browser.app_mode is True
     assert loaded.browser.low_memory_mode is False
     assert loaded.browser.low_gpu_mode is False
+    assert loaded.browser.low_end_device_mode is True
     assert loaded.browser.render_scale == 0.5
     assert loaded.browser.renderer_process_limit == 1
     assert loaded.browser.render_fps_limit == 22
