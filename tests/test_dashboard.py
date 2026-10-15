@@ -61,6 +61,45 @@ class FakeToggleButton:
         self.tooltip = tooltip
 
 
+def test_recover_offscreen_dashboard_after_monitor_change() -> None:
+    from ik_chrome_auto.dashboard import _window_is_effectively_offscreen
+    screen = [(0, 0, 1920, 1080)]
+    assert _window_is_effectively_offscreen((-781, 385, 789, 663), screen)
+    assert _window_is_effectively_offscreen((1930, 385, 789, 663), screen)
+    assert not _window_is_effectively_offscreen((1100, 385, 789, 663), screen)
+    assert not _window_is_effectively_offscreen((0, 0, 789, 663), screen)
+    assert not _window_is_effectively_offscreen((1921, 100, 789, 663), [(1920, 0, 1920, 1080)])
+
+
+def test_cdp_health_count_drops_to_zero_after_all_profiles_close() -> None:
+    dashboard = Dashboard.__new__(Dashboard)
+    live = {"a", "b"}
+    dashboard.config = SimpleNamespace(
+        profiles=[SimpleNamespace(id=pid, enabled=True) for pid in ("a", "b")]
+    )
+    dashboard.runner = SimpleNamespace(has_open_session=lambda pid: pid in live)
+    dashboard.reconnect_health = FakeProfileOpenButton()
+    dashboard._reattach_pending_profiles = set()
+
+    dashboard._update_reconnect_health()
+    assert dashboard.reconnect_health.text.startswith("CDP 2/2")
+    live.clear()
+    dashboard._update_reconnect_health()
+    assert dashboard.reconnect_health.text.startswith("CDP 0/2")
+
+
+def test_resource_refresh_also_refreshes_cdp_label() -> None:
+    from pathlib import Path
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "ik_chrome_auto" / "dashboard.py"
+    ).read_text(encoding="utf-8")
+    body = source.split("def _drain_resource_overview(self)", 1)[1].split(
+        "def _trim_profile_memory_safely", 1
+    )[0]
+    assert "self._update_reconnect_health()" in body
+
+
 def test_profile_window_toggle_updates_icon_tooltip_and_log() -> None:
     dashboard = Dashboard.__new__(Dashboard)
     dashboard.runner = SimpleNamespace(

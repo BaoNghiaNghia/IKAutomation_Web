@@ -153,6 +153,43 @@ def _ui_pt(value: int | float, minimum: float = 5.0) -> float:
     return max(minimum, round(value * TOOL_UI_SCALE, 2))
 
 
+def _window_is_effectively_offscreen(
+    window: tuple[int, int, int, int],
+    screens: list[tuple[int, int, int, int]],
+) -> bool:
+    """True if fewer than 80 logical pixels remain visible in either axis."""
+    x, y, width, height = window
+    if not screens:
+        return False
+    minimum_x = min(80, max(1, width // 4))
+    minimum_y = min(80, max(1, height // 4))
+    for sx, sy, sw, sh in screens:
+        overlap_x = max(0, min(x + width, sx + sw) - max(x, sx))
+        overlap_y = max(0, min(y + height, sy + sh) - max(y, sy))
+        if overlap_x >= minimum_x and overlap_y >= minimum_y:
+            return False
+    return True
+
+
+def _recover_dashboard_on_visible_screen(window: QWidget) -> bool:
+    """Recover a dashboard stranded after a monitor/DPI-layout change."""
+    screens = QGuiApplication.screens()
+    if not screens:
+        return False
+    bounds = window.frameGeometry()
+    rects = [screen.availableGeometry() for screen in screens]
+    window_rect = (bounds.x(), bounds.y(), bounds.width(), bounds.height())
+    areas = [(r.x(), r.y(), r.width(), r.height()) for r in rects]
+    if not _window_is_effectively_offscreen(window_rect, areas):
+        return False
+    preferred = QGuiApplication.primaryScreen() or screens[0]
+    area = preferred.availableGeometry()
+    x = area.x() + max(0, (area.width() - window.width()) // 2)
+    y = area.y() + max(0, (area.height() - window.height()) // 2)
+    window.move(x, y)
+    return True
+
+
 class FullRowCheckBox(CheckBox):
     """Toggle when clicking anywhere inside the checkbox widget bounds."""
 
@@ -603,6 +640,7 @@ class Dashboard(QWidget):
     def _on_screen_changed(self, screen) -> None:
         if screen is not None:
             self._apply_responsive_geometry(screen)
+            QTimer.singleShot(60, lambda: _recover_dashboard_on_visible_screen(self))
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
         scroll = getattr(self, "scroll", None)
@@ -3370,6 +3408,9 @@ class Dashboard(QWidget):
             )
         )
         self._refresh_close_all_control()
+        # This label was previously refreshed only during startup/reattach,
+        # leaving an obsolete CDP count after a normal Close All operation.
+        self._update_reconnect_health()
         for item in overview.profiles:
             row = self.rows.get(item.profile_id)
             if row is None:
@@ -4020,6 +4061,7 @@ def run_dashboard(config_path:Path)->None:
     trace = _UiActionTrace(app, diagnostic_log(config_path))
     app.installEventFilter(trace)
     dashboard.show()
+    QTimer.singleShot(60, lambda: _recover_dashboard_on_visible_screen(dashboard))
     record(diagnostic_log(config_path), "dashboard_startup_phase", phase="shown")
     if dashboard.windowHandle() is not None:
         dashboard.windowHandle().screenChanged.connect(dashboard._on_screen_changed)
